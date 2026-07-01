@@ -1,0 +1,13 @@
+python-dotenv
+llama-index
+llama-index-vector-stores-chroma
+llama-index-embeddings-ollama
+llama-index-llms-ollama
+llama-index-llms-openai
+chromadb
+gradio
+sqlalchemy
+passlib[bcrypt]
+sentence-transformers
+rank-bm25
+FlagEmbedding
