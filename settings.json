@@ -1,0 +1,25 @@
+{
+    "env": {
+        "api_key": "",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "api_type": "chat-completions"
+    },
+    "groups": [
+        {
+            "group_name": "DeepSeek",
+            "vendor": "customendpoint",
+            "api_key": "",
+            "api_type": "chat-completions",
+            "base_url": "",
+            "models": [
+                {
+                    "request_id": "deepseek-v4-pro",
+                    "show_id": "DeepSeek V4 Pro",
+                    "toolCalling": true,
+                    "vision": false
+                }
+            ]
+        }
+    ]
+}
