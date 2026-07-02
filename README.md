@@ -1,6 +1,17 @@
 # USTC-107-let-ai-think-of-one
 这是一个比赛项目的仓库，参加的是智能体赛道，也许我们会做一个agent
 
+## 环境安装
+使用uv：
+```bash
+uv sync
+```
+
+pip:
+```bash
+pip3 install -r requirement.txt
+```
+
 ## 项目结构
 
 ```
