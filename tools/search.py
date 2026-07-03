@@ -1,6 +1,8 @@
 import urllib.error
 import urllib.request
+from langchain.tools import tool
 
+@tool
 def fetch_text_from_url(url: str) -> str:
     """Fetch the document from a URL.
     """
@@ -15,4 +17,3 @@ def fetch_text_from_url(url: str) -> str:
         return f"Fetch failed: {e}"
     text = raw.decode("utf-8", errors="replace")
     return text
-

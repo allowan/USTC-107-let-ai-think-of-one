@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from langchain.chat_models import init_chat_model
 
@@ -58,4 +57,3 @@ def change_model(group: str, model: str):
 
     # 应用初始化
     return init_chat()
-        
