@@ -14,12 +14,11 @@ from typing import Literal
 
 try:
     from langchain.tools import tool
-except ImportError:  # Keep the dependency-free core usable before project setup.
+except ImportError:  # Allow core file operations to work before dependencies are installed.
     def tool(function):  # type: ignore[no-redef]
         return function
 
-
-Action = Literal["read", "write", "append"]
+Action = Literal["read", "write", "append", "mkdir", "delete"]
 DEFAULT_MAX_READ_BYTES = 1_000_000
 
 
@@ -113,6 +112,35 @@ class WorkspaceFiles:
             raise WorkspaceFileError(f"Could not append to {path}: {exc}") from exc
         return f"Appended {len(content.encode('utf-8'))} bytes to {self._display_path(target)}"
 
+    def mkdir(self, path: str) -> str:
+        """Create a directory and any missing parent directories."""
+        target = self._resolve(path)
+        if target.exists() and not target.is_dir():
+            raise WorkspaceFileError(f"Path exists and is not a directory: {path}")
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspaceFileError(f"Could not create directory {path}: {exc}") from exc
+        return f"Created directory {self._display_path(target)}"
+
+    def delete(self, path: str) -> str:
+        """Delete a file or an empty directory without recursive removal."""
+        target = self._resolve(path)
+        if not target.exists():
+            raise WorkspaceFileError(f"Path does not exist: {path}")
+        try:
+            if target.is_dir():
+                target.rmdir()
+                kind = "directory"
+            else:
+                target.unlink()
+                kind = "file"
+        except OSError as exc:
+            raise WorkspaceFileError(
+                f"Could not delete {path}; directories must be empty: {exc}"
+            ) from exc
+        return f"Deleted {kind} {self._display_path(target)}"
+
     def run(self, action: Action, path: str, content: str | None = None) -> str:
         """Perform a file operation and return content or a concise status."""
         if action == "read":
@@ -123,6 +151,10 @@ class WorkspaceFiles:
             if content is None:
                 raise WorkspaceFileError(f"content is required when action is '{action}'")
             return self.write(path, content) if action == "write" else self.append(path, content)
+        if action in {"mkdir", "delete"}:
+            if content is not None:
+                raise WorkspaceFileError(f"content must be omitted when action is '{action}'")
+            return self.mkdir(path) if action == "mkdir" else self.delete(path)
         raise WorkspaceFileError(f"Unsupported action: {action}")
 
     def _display_path(self, path: Path) -> str:
@@ -137,19 +169,83 @@ def _default_workspace() -> Path:
 workspace_files = WorkspaceFiles(_default_workspace())
 
 
+def _failure(error: WorkspaceFileError) -> str:
+    return f"File operation failed: {error}"
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a UTF-8 text file located inside the workspace."""
+    try:
+        return workspace_files.read(path)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def write_file(path: str, content: str) -> str:
+    """Create or overwrite a UTF-8 text file inside the workspace."""
+    try:
+        return workspace_files.write(path, content)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def append_file(path: str, content: str) -> str:
+    """Append UTF-8 text to a file inside the workspace."""
+    try:
+        return workspace_files.append(path, content)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def create_directory(path: str) -> str:
+    """Create a directory and missing parent directories inside the workspace."""
+    try:
+        return workspace_files.mkdir(path)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def delete_path(path: str) -> str:
+    """Delete a file or empty directory inside the workspace; never recursively."""
+    try:
+        return workspace_files.delete(path)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
 @tool
 def file_tool(action: Action, path: str, content: str | None = None) -> str:
     """Read or write UTF-8 text files within the workspace.
 
-    Use action ``read`` to return a file's contents. Use ``write`` to replace a
-    file atomically, or ``append`` to add text. ``content`` is required for
-    write/append and must be omitted for read. Paths may be workspace-relative
-    or absolute paths inside the workspace; paths outside it are rejected.
+    Use action ``read`` to return a file's contents, ``write`` to replace a file
+    atomically, ``append`` to add text, ``mkdir`` to create a directory, or
+    ``delete`` to remove a file or empty directory. ``content`` is required only
+    for write/append. Paths may be workspace-relative or absolute paths inside
+    the workspace; paths outside it are rejected. Delete is never recursive.
     """
     try:
         return workspace_files.run(action, path, content)
     except WorkspaceFileError as exc:
-        return f"File operation failed: {exc}"
+        return _failure(exc)
 
 
-__all__ = ["WorkspaceFileError", "WorkspaceFiles", "file_tool", "workspace_files"]
+FILE_TOOLS = [read_file, write_file, append_file, create_directory, delete_path]
+
+
+__all__ = [
+    "FILE_TOOLS",
+    "WorkspaceFileError",
+    "WorkspaceFiles",
+    "append_file",
+    "create_directory",
+    "delete_path",
+    "file_tool",
+    "read_file",
+    "workspace_files",
+    "write_file",
+]
