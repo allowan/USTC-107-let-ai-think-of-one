@@ -1,7 +1,5 @@
 #llm_factory.py
 import os
-from dotenv import load_dotenv
-load_dotenv()
 
 def get_llm():
     provider=os.getenv("LLM_PROVIDER","ollama") 

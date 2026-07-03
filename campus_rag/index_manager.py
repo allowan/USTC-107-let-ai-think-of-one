@@ -2,8 +2,8 @@
 import chromadb
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.chroma import ChromaVectorStore
-from data_loader import load_documents_from_files
-import config
+from .data_loader import load_documents_from_files
+from . import config
 
 class RAGSystem:
     def __init__(self,persist_dir="./chroma_db"):

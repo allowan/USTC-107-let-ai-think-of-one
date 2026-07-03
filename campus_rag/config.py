@@ -1,6 +1,6 @@
 # config.py
 from llama_index.core import Settings
-from llm_factory import get_llm, get_embed_model
+from .llm_factory import get_llm, get_embed_model
 
 Settings.llm = get_llm()
 Settings.embed_model = get_embed_model()
