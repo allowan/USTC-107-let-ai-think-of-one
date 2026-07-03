@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,8 @@ except ImportError:  # Allow core file operations to work before dependencies ar
 
 Action = Literal["read", "write", "append", "mkdir", "delete"]
 DEFAULT_MAX_READ_BYTES = 1_000_000
+DEFAULT_LARGE_READ_BYTES = 100_000
+MAX_LARGE_READ_BYTES = 500_000
 DEFAULT_MAX_RESULTS = 100
 IGNORED_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__"}
 
@@ -153,6 +156,41 @@ class WorkspaceFiles:
         except OSError as exc:
             raise WorkspaceFileError(f"Could not read {path}: {exc}") from exc
 
+    def read_large_file(
+        self,
+        path: str,
+        offset: int = 0,
+        max_bytes: int = DEFAULT_LARGE_READ_BYTES,
+    ) -> str:
+        """Read one byte range from a large UTF-8 text file."""
+        if offset < 0:
+            raise WorkspaceFileError("offset cannot be negative")
+        if max_bytes <= 0 or max_bytes > MAX_LARGE_READ_BYTES:
+            raise WorkspaceFileError(
+                f"max_bytes must be between 1 and {MAX_LARGE_READ_BYTES}"
+            )
+        target = self._resolve(path)
+        if not target.exists():
+            raise WorkspaceFileError(f"File does not exist: {path}")
+        if not target.is_file():
+            raise WorkspaceFileError(f"Path is not a file: {path}")
+        total = target.stat().st_size
+        if offset > total:
+            raise WorkspaceFileError(f"offset {offset} is beyond file size {total}")
+        try:
+            with target.open("rb") as file:
+                file.seek(offset)
+                raw = file.read(max_bytes)
+        except OSError as exc:
+            raise WorkspaceFileError(f"Could not read {path}: {exc}") from exc
+        if b"\x00" in raw:
+            raise WorkspaceFileError(f"File appears to be binary: {path}")
+        end = offset + len(raw)
+        next_offset = str(end) if end < total else "EOF"
+        text = raw.decode("utf-8", errors="replace")
+        header = f"[bytes {offset}:{end} of {total}; next_offset={next_offset}]"
+        return f"{header}\n{text}"
+
     def write(self, path: str, content: str) -> str:
         """Atomically overwrite a UTF-8 text file, creating parent folders."""
         target = self._resolve(path)
@@ -221,6 +259,64 @@ class WorkspaceFiles:
             ) from exc
         return f"Deleted {kind} {self._display_path(target)}"
 
+    def copy(self, source: str, destination: str) -> str:
+        """Copy a file or directory without overwriting an existing path."""
+        source_path = self._resolve(source)
+        destination_path = self._resolve(destination)
+        if not source_path.exists():
+            raise WorkspaceFileError(f"Source does not exist: {source}")
+        if destination_path.exists():
+            raise WorkspaceFileError(f"Destination already exists: {destination}")
+        if source_path == destination_path:
+            raise WorkspaceFileError("Source and destination must be different")
+        if source_path.is_dir():
+            try:
+                destination_path.relative_to(source_path)
+            except ValueError:
+                pass
+            else:
+                raise WorkspaceFileError("Cannot copy a directory into itself")
+        try:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            if source_path.is_dir():
+                shutil.copytree(source_path, destination_path)
+                kind = "directory"
+            else:
+                shutil.copy2(source_path, destination_path)
+                kind = "file"
+        except OSError as exc:
+            raise WorkspaceFileError(
+                f"Could not copy {source} to {destination}: {exc}"
+            ) from exc
+        return f"Copied {kind} {self._display_path(source_path)} to {self._display_path(destination_path)}"
+
+    def move(self, source: str, destination: str) -> str:
+        """Move a file or directory without overwriting an existing path."""
+        source_path = self._resolve(source)
+        destination_path = self._resolve(destination)
+        if not source_path.exists():
+            raise WorkspaceFileError(f"Source does not exist: {source}")
+        if destination_path.exists():
+            raise WorkspaceFileError(f"Destination already exists: {destination}")
+        if source_path == destination_path:
+            raise WorkspaceFileError("Source and destination must be different")
+        if source_path.is_dir():
+            try:
+                destination_path.relative_to(source_path)
+            except ValueError:
+                pass
+            else:
+                raise WorkspaceFileError("Cannot move a directory into itself")
+        kind = "directory" if source_path.is_dir() else "file"
+        try:
+            destination_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source_path), str(destination_path))
+        except OSError as exc:
+            raise WorkspaceFileError(
+                f"Could not move {source} to {destination}: {exc}"
+            ) from exc
+        return f"Moved {kind} {source} to {self._display_path(destination_path)}"
+
     def run(self, action: Action, path: str, content: str | None = None) -> str:
         """Perform a file operation and return content or a concise status."""
         if action == "read":
@@ -263,6 +359,19 @@ def read_file(path: str) -> str:
 
 
 @tool
+def read_large_file(
+    path: str,
+    offset: int = 0,
+    max_bytes: int = DEFAULT_LARGE_READ_BYTES,
+) -> str:
+    """Read a large text file in chunks; use returned next_offset for the next chunk."""
+    try:
+        return workspace_files.read_large_file(path, offset, max_bytes)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
 def write_file(path: str, content: str) -> str:
     """Create or overwrite a UTF-8 text file inside the workspace."""
     try:
@@ -294,6 +403,24 @@ def delete_path(path: str) -> str:
     """Delete a file or empty directory inside the workspace; never recursively."""
     try:
         return workspace_files.delete(path)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def copy_path(source: str, destination: str) -> str:
+    """Copy a workspace file or directory; the destination must not exist."""
+    try:
+        return workspace_files.copy(source, destination)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def move_path(source: str, destination: str) -> str:
+    """Move a workspace file or directory; the destination must not exist."""
+    try:
+        return workspace_files.move(source, destination)
     except WorkspaceFileError as exc:
         return _failure(exc)
 
@@ -340,10 +467,13 @@ def file_tool(action: Action, path: str, content: str | None = None) -> str:
 
 FILE_TOOLS = [
     read_file,
+    read_large_file,
     write_file,
     append_file,
     create_directory,
     delete_path,
+    copy_path,
+    move_path,
     search_file,
     list_dir,
 ]
@@ -354,11 +484,14 @@ __all__ = [
     "WorkspaceFileError",
     "WorkspaceFiles",
     "append_file",
+    "copy_path",
     "create_directory",
     "delete_path",
     "file_tool",
     "list_dir",
+    "move_path",
     "read_file",
+    "read_large_file",
     "search_file",
     "workspace_files",
     "write_file",
