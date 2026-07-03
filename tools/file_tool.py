@@ -8,6 +8,7 @@ from ordinary Python code or tests.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,8 @@ except ImportError:  # Allow core file operations to work before dependencies ar
 
 Action = Literal["read", "write", "append", "mkdir", "delete"]
 DEFAULT_MAX_READ_BYTES = 1_000_000
+DEFAULT_MAX_RESULTS = 100
+IGNORED_DIRECTORIES = {".git", ".venv", "node_modules", "__pycache__"}
 
 
 class WorkspaceFileError(ValueError):
@@ -37,7 +40,7 @@ class WorkspaceFiles:
             raise WorkspaceFileError("max_read_bytes must be greater than zero")
         self.max_read_bytes = max_read_bytes
 
-    def _resolve(self, path: str) -> Path:
+    def _resolve(self, path: str, allow_workspace: bool = False) -> Path:
         if not path or not path.strip():
             raise WorkspaceFileError("path cannot be empty")
 
@@ -50,9 +53,86 @@ class WorkspaceFiles:
             candidate.relative_to(self.workspace)
         except ValueError as exc:
             raise WorkspaceFileError(f"Path is outside the workspace: {path}") from exc
-        if candidate == self.workspace:
+        if candidate == self.workspace and not allow_workspace:
             raise WorkspaceFileError("path must refer to a file, not the workspace directory")
         return candidate
+
+    def list_dir(self, path: str = ".", recursive: bool = False, max_entries: int = DEFAULT_MAX_RESULTS) -> str:
+        """List files and directories beneath a workspace directory."""
+        if max_entries <= 0:
+            raise WorkspaceFileError("max_entries must be greater than zero")
+        target = self._resolve(path, allow_workspace=True)
+        if not target.exists():
+            raise WorkspaceFileError(f"Directory does not exist: {path}")
+        if not target.is_dir():
+            raise WorkspaceFileError(f"Path is not a directory: {path}")
+
+        entries: list[str] = []
+        iterator = target.rglob("*") if recursive else target.iterdir()
+        try:
+            for entry in iterator:
+                relative_parts = entry.relative_to(target).parts
+                if any(part in IGNORED_DIRECTORIES for part in relative_parts):
+                    continue
+                suffix = "/" if entry.is_dir() else ""
+                entries.append(f"{entry.relative_to(self.workspace).as_posix()}{suffix}")
+                if len(entries) >= max_entries:
+                    entries.append(f"... truncated after {max_entries} entries")
+                    break
+        except OSError as exc:
+            raise WorkspaceFileError(f"Could not list directory {path}: {exc}") from exc
+        return "\n".join(sorted(entries)) if entries else "(empty directory)"
+
+    def search_file(
+        self,
+        query: str,
+        path: str = ".",
+        file_pattern: str = "*",
+        use_regex: bool = False,
+        max_results: int = DEFAULT_MAX_RESULTS,
+    ) -> str:
+        """Search matching lines in UTF-8 workspace files."""
+        if not query:
+            raise WorkspaceFileError("query cannot be empty")
+        if max_results <= 0:
+            raise WorkspaceFileError("max_results must be greater than zero")
+        target = self._resolve(path, allow_workspace=True)
+        if not target.exists():
+            raise WorkspaceFileError(f"Path does not exist: {path}")
+
+        try:
+            matcher = re.compile(query) if use_regex else None
+        except re.error as exc:
+            raise WorkspaceFileError(f"Invalid regular expression: {exc}") from exc
+
+        candidates = [target] if target.is_file() else target.rglob(file_pattern)
+        matches: list[str] = []
+        try:
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                relative_parts = candidate.relative_to(self.workspace).parts
+                if any(part in IGNORED_DIRECTORIES for part in relative_parts):
+                    continue
+                if target.is_file() and not candidate.match(file_pattern):
+                    continue
+                if candidate.stat().st_size > self.max_read_bytes:
+                    continue
+                try:
+                    with candidate.open(encoding="utf-8") as file:
+                        for line_number, line in enumerate(file, start=1):
+                            found = bool(matcher.search(line)) if matcher else query in line
+                            if found:
+                                relative = candidate.relative_to(self.workspace).as_posix()
+                                matches.append(f"{relative}:{line_number}:{line.rstrip()}")
+                                if len(matches) >= max_results:
+                                    matches.append(f"... truncated after {max_results} matches")
+                                    return "\n".join(matches)
+                except UnicodeDecodeError:
+                    continue
+        except OSError as exc:
+            raise WorkspaceFileError(f"Could not search {path}: {exc}") from exc
+        return "\n".join(matches) if matches else "No matches found"
 
     def read(self, path: str) -> str:
         """Read a UTF-8 text file from the workspace."""
@@ -219,6 +299,30 @@ def delete_path(path: str) -> str:
 
 
 @tool
+def search_file(
+    query: str,
+    path: str = ".",
+    file_pattern: str = "*",
+    use_regex: bool = False,
+    max_results: int = DEFAULT_MAX_RESULTS,
+) -> str:
+    """Search workspace text files like grep and return file:line:content matches."""
+    try:
+        return workspace_files.search_file(query, path, file_pattern, use_regex, max_results)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
+def list_dir(path: str = ".", recursive: bool = False, max_entries: int = DEFAULT_MAX_RESULTS) -> str:
+    """List a workspace directory; set recursive to see its nested structure."""
+    try:
+        return workspace_files.list_dir(path, recursive, max_entries)
+    except WorkspaceFileError as exc:
+        return _failure(exc)
+
+
+@tool
 def file_tool(action: Action, path: str, content: str | None = None) -> str:
     """Read or write UTF-8 text files within the workspace.
 
@@ -234,7 +338,15 @@ def file_tool(action: Action, path: str, content: str | None = None) -> str:
         return _failure(exc)
 
 
-FILE_TOOLS = [read_file, write_file, append_file, create_directory, delete_path]
+FILE_TOOLS = [
+    read_file,
+    write_file,
+    append_file,
+    create_directory,
+    delete_path,
+    search_file,
+    list_dir,
+]
 
 
 __all__ = [
@@ -245,7 +357,9 @@ __all__ = [
     "create_directory",
     "delete_path",
     "file_tool",
+    "list_dir",
     "read_file",
+    "search_file",
     "workspace_files",
     "write_file",
 ]

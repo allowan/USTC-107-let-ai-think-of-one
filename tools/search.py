@@ -2,7 +2,7 @@ import urllib.error
 import urllib.request
 from langchain.tools import tool
 
-@tool
+@tool("web_search")
 def fetch_text_from_url(url: str) -> str:
     """Fetch the document from a URL.
     """
