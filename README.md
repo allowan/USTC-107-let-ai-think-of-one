@@ -2,14 +2,14 @@
 这是一个比赛项目的仓库，参加的是智能体赛道，也许我们会做一个agent
 
 ## 环境安装
-使用uv：
+使用 uv：
 ```bash
 uv sync
 ```
 
 pip:
 ```bash
-pip3 install -r requirement.txt
+pip install -r requirements.txt
 ```
 
 ## 项目结构
@@ -31,7 +31,6 @@ USTC-107-let-ai-think-of-one/
 │   ├── data_loader.py
 │   ├── index_manager.py
 │   ├── llm_factory.py
-│   ├── requirements.txt
 │   └── test_static.py
 ├── model/
 │   └── config.py

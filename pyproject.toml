@@ -4,4 +4,21 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "langchain>=1.3.11",
+    "langchain-openai>=1.3.3",
+    "langgraph>=1.2.7",
+    "python-dotenv",
+    "llama-index",
+    "llama-index-vector-stores-chroma",
+    "llama-index-embeddings-ollama",
+    "llama-index-llms-ollama",
+    "llama-index-llms-openai",
+    "chromadb",
+    "sqlalchemy",
+    "bcrypt",
+    "sentence-transformers",
+    "rank-bm25",
+    "FlagEmbedding",
+    "jieba",
+]
