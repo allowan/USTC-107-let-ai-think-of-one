@@ -1,6 +1,6 @@
 {
     "env": {
-        "api_key": "",
+        "api_key": "your-deepseek-api-key-here",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-v4-flash",
         "api_type": "chat-completions"

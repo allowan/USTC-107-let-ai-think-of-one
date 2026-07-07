@@ -21,7 +21,8 @@ class RAGSystem:
         vector_store = ChromaVectorStore(chroma_collection=collection)
         docs = load_documents_from_files(data_dir)
         nodes = split_documents(docs)
-        index = VectorStoreIndex(nodes, vector_store=vector_store)
+        index = VectorStoreIndex.from_vector_store(vector_store)
+        index.insert_nodes(nodes)
         return index
 
     def get_or_create_public_index(self, data_dir="./data"):
@@ -91,6 +92,58 @@ class RAGSystem:
             self.chroma_client.delete_collection(coll_name)
         except Exception:
             pass
+
+    def list_public_documents(self) -> dict:
+        """列出公共集合中所有文档，返回 {ids, metadatas, documents, previews}。"""
+        try:
+            collection = self.chroma_client.get_collection("public")
+            result = collection.get(include=["metadatas", "documents"])
+        except Exception:
+            return {"ids": [], "metadatas": [], "documents": [], "previews": []}
+        docs = result.get("documents") or []
+        result["previews"] = [d[:200] + "..." if len(d) > 200 else d for d in docs]
+        return result
+
+    def delete_public_document(self, doc_id: str) -> bool:
+        """按 ChromaDB ID 删除公共集合中的单条文档。"""
+        try:
+            self.chroma_client.get_collection("public").delete(ids=[doc_id])
+            return True
+        except Exception:
+            return False
+
+    def delete_public_documents_by_source(self, source: str) -> int:
+        """删除指定来源（文件名）的所有文档块，返回删除数量。"""
+        try:
+            collection = self.chroma_client.get_collection("public")
+            result = collection.get(where={"source": source})
+            ids = result["ids"]
+            if ids:
+                collection.delete(ids=ids)
+            return len(ids)
+        except Exception:
+            return 0
+
+    def get_collection_stats(self) -> dict:
+        """返回各集合的文档计数。"""
+        stats = {}
+        try:
+            stats["public"] = self.chroma_client.get_collection("public").count()
+        except Exception:
+            stats["public"] = 0
+        user_count = 0
+        for c in self.chroma_client.list_collections():
+            if c.name.startswith("user_"):
+                user_count += 1
+        stats["user_collections_count"] = user_count
+        return stats
+
+    def get_user_collection_size(self, username: str) -> int:
+        """返回用户私有集合中的文档数量。"""
+        try:
+            return self.chroma_client.get_collection(f"user_{username}").count()
+        except Exception:
+            return 0
 
     def get_combined_query_engine(self, user_id: str):
         """返回 (public_index, user_index) 元组，user_index 可能为 None。"""

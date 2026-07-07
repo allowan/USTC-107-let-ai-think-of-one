@@ -1,6 +1,16 @@
 *.log
 data/
 chroma_db/
+campus_rag/chroma_db/
+node_modules/
+.claude/
+
+# Secrets & local state
+settings.json
+campus_rag/.env
+users.db
+workspace/
+*.db-journal
 
 
 # Byte-compiled / optimized / DLL files

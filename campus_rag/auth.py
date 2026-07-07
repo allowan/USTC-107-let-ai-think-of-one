@@ -74,3 +74,26 @@ def list_users() -> list:
     users = db.query(User).all()
     db.close()
     return [(u.username, u.is_admin) for u in users]
+
+
+def get_user_admin_status(username: str) -> bool:
+    """查询用户是否为管理员（仅需用户名，无需密码）。"""
+    db = SessionLocal()
+    user = db.query(User).filter_by(username=username).first()
+    db.close()
+    return user.is_admin if user else False
+
+
+def delete_user(username: str) -> bool:
+    """删除用户，admin 账户受保护不可删除。返回 True 表示删除成功。"""
+    if username == "admin":
+        return False
+    db = SessionLocal()
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        db.close()
+        return False
+    db.delete(user)
+    db.commit()
+    db.close()
+    return True

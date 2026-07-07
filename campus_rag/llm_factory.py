@@ -4,6 +4,9 @@ import os
 def get_llm():
     provider = os.getenv("LLM_PROVIDER", "ollama")
     if provider == "ollama":
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(key, None)
+        os.environ.setdefault("NO_PROXY", "*")
         from llama_index.llms.ollama import Ollama
         return Ollama(
             model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
@@ -24,9 +27,14 @@ def get_llm():
 def get_embed_model():
     provider = os.getenv("EMBED_PROVIDER", "ollama")
     if provider == "ollama":
+        # httpx 会读取系统代理导致 502，先清除
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(key, None)
+        os.environ.setdefault("NO_PROXY", "*")
         from llama_index.embeddings.ollama import OllamaEmbedding
         return OllamaEmbedding(
             model_name=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+            base_url=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"),
         )
     elif provider == "openai":
         from llama_index.embeddings.openai import OpenAIEmbedding

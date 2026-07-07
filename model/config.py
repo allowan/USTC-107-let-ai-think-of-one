@@ -1,25 +1,41 @@
 import json
+import os
 from pathlib import Path
 from langchain.chat_models import init_chat_model
 
+_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.json"
+
 
 def read_json() -> dict:
-    """读取 ../settings.json 中的 env 配置"""
-    settings_path = Path(__file__).resolve().parent.parent / "settings.json"
-    with open(settings_path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("env", {})
+    """读取 settings.json 中的 env 配置（文件不存在时返回空字典）。"""
+    try:
+        with open(_SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("env", {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
 
 def init_chat():
-    """完成对模型的初始化"""
-    env = read_json()
-    model = init_chat_model(
-        model=env["model"],
+    """初始化聊天模型。环境变量优先，settings.json 作为 fallback。"""
+    file_env = read_json()
+
+    api_key = os.environ.get("LLM_API_KEY") or file_env.get("api_key", "")
+    base_url = os.environ.get("LLM_BASE_URL") or file_env.get("base_url", "https://api.deepseek.com")
+    model_id = os.environ.get("LLM_MODEL") or file_env.get("model", "deepseek-v4-flash")
+
+    if not api_key:
+        raise RuntimeError(
+            "未配置 LLM API Key。请在环境变量 LLM_API_KEY 中设置，"
+            "或复制 settings.example.json 为 settings.json 并填入 api_key。"
+        )
+
+    return init_chat_model(
+        model=model_id,
         model_provider="openai",
-        base_url=env["base_url"],
-        api_key=env["api_key"],
+        base_url=base_url,
+        api_key=api_key,
     )
-    return model
 
 def change_model(group: str, model: str):
     """更改模型选项：根据 group 与 model 索引更新 env 并重新初始化模型"""

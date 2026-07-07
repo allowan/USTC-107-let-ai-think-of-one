@@ -1,0 +1,9 @@
+# 所有文本文件统一使用 LF 换行符
+* text=auto eol=lf
+
+# 二进制文件不做转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
+*.sqlite3 binary

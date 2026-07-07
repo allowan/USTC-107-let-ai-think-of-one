@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 # 确保项目根目录在 sys.path 中
-_project_root = Path(__file__).resolve().parent
+_project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root))
 
 
@@ -251,7 +251,7 @@ class TestRAGSystem(unittest.TestCase):
     """ChromaDB 索引管理。"""
 
     TEST_USER = "test_rag_runner"
-    _RAG_BASE = Path(__file__).resolve().parent / "campus_rag"
+    _RAG_BASE = Path(__file__).resolve().parent.parent / "campus_rag"
 
     @classmethod
     def setUpClass(cls):
@@ -474,7 +474,7 @@ class TestRerankNodes(unittest.TestCase):
 class TestQueryEngine(unittest.TestCase):
     """高级 RAG 管线：向量检索 + 重排序 + LLM 生成。"""
 
-    _RAG_BASE = Path(__file__).resolve().parent / "campus_rag"
+    _RAG_BASE = Path(__file__).resolve().parent.parent / "campus_rag"
     DATA_DIR = str(_RAG_BASE / "data")
     CHROMA_DIR = str(_RAG_BASE / "chroma_db")
 

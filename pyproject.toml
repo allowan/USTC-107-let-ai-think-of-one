@@ -21,4 +21,8 @@ dependencies = [
     "rank-bm25",
     "FlagEmbedding",
     "jieba",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-jose[cryptography]>=3.3.0",
+    "python-multipart>=0.0.18",
 ]

@@ -1,0 +1,14 @@
+{
+  "name": "USTC 校园 AI 助手",
+  "short_name": "USTC AI",
+  "description": "校园信息智能问答助手",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#1677ff",
+  "background_color": "#ffffff",
+  "icons": [
+    { "src": "favicon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "favicon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

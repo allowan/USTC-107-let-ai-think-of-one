@@ -53,7 +53,7 @@ campus_rag/
 ├── data/                  # 校园通知 txt 文件
 ├── chroma_db/             # ChromaDB 持久化目录（自动生成）
 ├── .env                   # 环境变量
-└── READEME.md
+└── README.md
 ```
 
 ---

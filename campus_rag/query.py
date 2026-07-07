@@ -29,10 +29,9 @@ def _format_nodes(nodes, empty_message: str) -> str:
     if not nodes:
         return empty_message
     contexts = []
-    for i, node in enumerate(nodes, 1):
-        source = node.metadata.get("source", "未知来源")
-        contexts.append(f"[{i}] 来源: {source}\n{node.get_content()}")
-    return "\n\n---\n\n".join(contexts)
+    for node in nodes:
+        contexts.append(node.get_content())
+    return "\n\n".join(contexts)
 
 
 def search_notices(query: str) -> str:
