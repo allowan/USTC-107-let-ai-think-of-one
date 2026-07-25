@@ -7,10 +7,21 @@ node_modules/
 
 # Secrets & local state
 settings.json
+sync_server/settings.json
+sync_server/data/*.db
+sync_server/data/*.db-journal
 campus_rag/.env
 users.db
 workspace/
 *.db-journal
+*.db-shm
+*.db-wal
+agent_checkpoints*.db
+test_checkpoint.db
+
+# TypeScript
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 
 # Byte-compiled / optimized / DLL files

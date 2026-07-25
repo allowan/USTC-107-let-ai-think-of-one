@@ -1,6 +1,8 @@
 # auth.py
+import uuid
+from datetime import datetime
 import bcrypt
-from sqlalchemy import create_engine, Column, String, Boolean
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = "sqlite:///./users.db"
@@ -22,6 +24,21 @@ class User(Base):
     username = Column(String, primary_key=True)
     hashed_password = Column(String)
     is_admin = Column(Boolean, default=False)
+
+
+class Topic(Base):
+    __tablename__ = "topics"
+    id = Column(String, primary_key=True, default=lambda: uuid.uuid4().hex[:12])
+    username = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserToolPref(Base):
+    __tablename__ = "user_tool_prefs"
+    username = Column(String, primary_key=True)
+    tool_name = Column(String, primary_key=True)
+    enabled = Column(Boolean, nullable=False, default=True)
 
 
 Base.metadata.create_all(bind=engine)
@@ -76,6 +93,24 @@ def list_users() -> list:
     return [(u.username, u.is_admin) for u in users]
 
 
+def change_password(username: str, old_password: str, new_password: str) -> tuple:
+    """修改用户密码，返回 (是否成功, 消息)。"""
+    if not new_password:
+        return False, "新密码不能为空"
+    db = SessionLocal()
+    user = db.query(User).filter_by(username=username).first()
+    if not user:
+        db.close()
+        return False, "用户不存在"
+    if not _verify_password(old_password, user.hashed_password):
+        db.close()
+        return False, "旧密码错误"
+    user.hashed_password = _hash_password(new_password)
+    db.commit()
+    db.close()
+    return True, "密码修改成功"
+
+
 def get_user_admin_status(username: str) -> bool:
     """查询用户是否为管理员（仅需用户名，无需密码）。"""
     db = SessionLocal()
@@ -97,3 +132,91 @@ def delete_user(username: str) -> bool:
     db.commit()
     db.close()
     return True
+
+
+# ── Topic CRUD ────────────────────────────────────────────────
+
+def _thread_id(username: str, topic_id: str) -> str:
+    return f"user-{username}-topic-{topic_id}"
+
+
+def create_topic(username: str, name: str) -> dict:
+    db = SessionLocal()
+    tid = uuid.uuid4().hex[:12]
+    topic = Topic(id=tid, username=username, name=name)
+    db.add(topic)
+    db.commit()
+    db.close()
+    return {"id": tid, "name": name, "thread_id": _thread_id(username, tid)}
+
+
+def list_topics(username: str) -> list:
+    db = SessionLocal()
+    topics = db.query(Topic).filter_by(username=username).order_by(Topic.created_at.desc()).all()
+    db.close()
+    return [{"id": t.id, "name": t.name, "thread_id": _thread_id(username, t.id)} for t in topics]
+
+
+def delete_topic(username: str, topic_id: str) -> bool:
+    db = SessionLocal()
+    topic = db.query(Topic).filter_by(id=topic_id, username=username).first()
+    if not topic:
+        db.close()
+        return False
+    db.delete(topic)
+    db.commit()
+    db.close()
+    return True
+
+
+def get_topic(username: str, topic_id: str) -> dict | None:
+    db = SessionLocal()
+    topic = db.query(Topic).filter_by(id=topic_id, username=username).first()
+    db.close()
+    if not topic:
+        return None
+    return {"id": topic.id, "name": topic.name, "thread_id": _thread_id(username, topic.id)}
+
+
+def rename_topic(username: str, topic_id: str, new_name: str) -> bool:
+    db = SessionLocal()
+    topic = db.query(Topic).filter_by(id=topic_id, username=username).first()
+    if not topic:
+        db.close()
+        return False
+    topic.name = new_name
+    db.commit()
+    db.close()
+    return True
+
+
+# ── Tool Preferences CRUD ───────────────────────────────────────
+
+def get_user_tool_prefs(username: str) -> dict[str, bool]:
+    """返回用户工具偏好 {tool_name: enabled}。空 dict 表示未设置（默认全部启用）。"""
+    db = SessionLocal()
+    rows = db.query(UserToolPref).filter_by(username=username).all()
+    db.close()
+    return {r.tool_name: r.enabled for r in rows}
+
+
+def set_user_tool_prefs(username: str, prefs: dict[str, bool]) -> None:
+    """替换用户的所有工具偏好设置。"""
+    db = SessionLocal()
+    db.query(UserToolPref).filter_by(username=username).delete()
+    for tool_name, enabled in prefs.items():
+        db.add(UserToolPref(username=username, tool_name=tool_name, enabled=bool(enabled)))
+    db.commit()
+    db.close()
+
+
+def get_enabled_tool_names(username: str) -> list[str] | None:
+    """返回用户启用的工具名称列表。None 表示无自定义偏好（默认全部启用）。"""
+    db = SessionLocal()
+    rows = db.query(UserToolPref).filter_by(username=username, enabled=True).all()
+    if not rows:
+        count = db.query(UserToolPref).filter_by(username=username).count()
+        db.close()
+        return None if count == 0 else []
+    db.close()
+    return [r.tool_name for r in rows]

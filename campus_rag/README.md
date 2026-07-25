@@ -9,29 +9,35 @@
 到 [ollama.com](https://ollama.com) 下载安装，然后拉取模型：
 
 ```bash
-ollama pull llama3.1:8b          # 对话模型
-ollama pull nomic-embed-text     # 嵌入模型
+ollama pull nomic-embed-text     # 嵌入模型（必需）
 ```
 
 首次运行时会自动下载重排序模型 `BAAI/bge-reranker-base`（约 1GB）。
 
 ### 配置环境变量
 
+```bash
+cp campus_rag/.env.example campus_rag/.env
+```
+
 编辑 `campus_rag/.env`：
 
 ```ini
-# LLM 配置（ollama / openai）
-LLM_PROVIDER=ollama
-OLLAMA_MODEL=llama3.1:8b
-# 当 LLM_PROVIDER=openai 时生效
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-your-key
-OPENAI_MODEL=deepseek-chat
-
-# Embedding 配置（ollama / openai）
+# Embedding 配置（默认 provider: ollama）
 EMBED_PROVIDER=ollama
 OLLAMA_EMBED_MODEL=nomic-embed-text
-OPENAI_EMBED_MODEL=text-embedding-3-small
+OLLAMA_HOST=http://127.0.0.1:11434
+
+# 若使用 openai 兼容的 embedding：
+# EMBED_PROVIDER=openai
+# OPENAI_EMBED_MODEL=text-embedding-3-small
+# OPENAI_BASE_URL=https://api.deepseek.com/v1
+# OPENAI_API_KEY=sk-your-key
+
+# LLM 配置由项目根目录 settings.json 统一管理（api_key、base_url、model）
+# 如需使用本地 Ollama 生成回答，可覆盖：
+# LLM_PROVIDER=ollama
+# OLLAMA_MODEL=llama3.1:8b
 ```
 
 ---
@@ -43,16 +49,15 @@ campus_rag/
 ├── __init__.py            # 包入口，自动加载 .env 并导出公开接口
 ├── config.py              # LlamaIndex 全局配置（LLM、Embedding、chunk 参数）
 ├── llm_factory.py         # LLM/Embedding 工厂，支持 ollama ↔ openai 热切换
-├── data_loader.py         # 文档加载与分块
+├── data_loader.py         # 文档加载与分块（.txt 文件）
 ├── index_manager.py       # ChromaDB 集合管理（公共 + 用户隔离）
 ├── query.py               # 简单检索接口（不经过 LLM，直接返回原文片段）
 ├── query_engine.py        # 高级查询引擎（混合检索 + 重排序 + LLM 生成）
-├── keyword_retriever.py   # BM25 关键词检索器
-├── auth.py                # 用户认证系统（SQLite + bcrypt）
+├── keyword_retriever.py   # BM25 关键词检索器（jieba 分词）
+├── auth.py                # 用户认证 + 话题 CRUD + 工具偏好管理
 ├── ingest.py              # 动态入库接口
 ├── data/                  # 校园通知 txt 文件
-├── chroma_db/             # ChromaDB 持久化目录（自动生成）
-├── .env                   # 环境变量
+├── .env.example           # 嵌入配置模板
 └── README.md
 ```
 
@@ -65,7 +70,6 @@ campus_rag/
 导入即生效，设置 LlamaIndex 的全局 LLM、Embedding 模型及分块参数。其他模块只需 `import config` 即可。
 
 ```python
-# config.py
 from llama_index.core import Settings
 from .llm_factory import get_llm, get_embed_model
 
@@ -77,9 +81,9 @@ Settings.chunk_overlap = 50
 
 ### `llm_factory.py` — 模型工厂
 
-根据 `.env` 中的 `LLM_PROVIDER` / `EMBED_PROVIDER` 动态创建模型实例，支持 ollama（本地免费）和 openai（兼容接口）两种后端。
+根据环境变量动态创建模型实例，支持 ollama（本地免费）和 openai（兼容接口）两种后端。
 
-- `get_llm()` — 返回对话模型（用于生成回答）
+- `get_llm()` — 返回对话模型（用于生成回答），默认从项目根目录 `settings.json` 读取配置
 - `get_embed_model()` — 返回嵌入模型（用于向量化文档和查询）
 
 ### `data_loader.py` — 数据加载
@@ -107,6 +111,8 @@ Settings.chunk_overlap = 50
 | `get_or_create_user_index(user_id, data_dir)` | 获取或创建用户索引 |
 | `get_user_index(user_id)` | 获取用户个人索引 |
 | `add_user_documents(user_id, documents)` | 向用户索引追加文档 |
+| `delete_user_data(user_id, source)` | 按来源删除用户数据 |
+| `update_user_data(user_id, source, content)` | 更新用户数据 |
 | `clear_user_index(user_id)` | 清空用户全部数据 |
 | `get_combined_query_engine(user_id)` | 返回 (public_index, user_index) 元组 |
 
@@ -159,15 +165,15 @@ answer = get_rag_response_hybrid("暑假有什么活动？", pub_idx, user_idx=u
 ```
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
-  ├── BM25 关键词检索 (rank_bm25)          ← 仅 hybrid 模式
+  ├── BM25 关键词检索 (rank_bm25 + jieba)     ← 仅 hybrid 模式
   ├── 合并去重
   ├── 重排序 (FlagEmbedding BGE-reranker)
-  └── LLM 生成回答 (Ollama / OpenAI)
+  └── LLM 生成回答
 ```
 
 ### `keyword_retriever.py` — BM25 检索器
 
-基于 `rank_bm25` 的稀疏检索，对关键词匹配敏感，与向量检索互补。
+基于 `rank_bm25` + `jieba` 分词的稀疏检索，对关键词匹配敏感，与向量检索互补。
 
 ```python
 from campus_rag.keyword_retriever import BM25Retriever
@@ -176,15 +182,17 @@ bm25 = BM25Retriever("./data")
 nodes = bm25.retrieve("编程比赛", top_k=10)
 ```
 
-### `auth.py` — 用户认证
+### `auth.py` — 用户认证与话题管理
 
-基于 SQLite + bcrypt 的简易用户系统，首次导入自动建表和默认管理员。
+基于 SQLite + bcrypt 的简易用户系统，首次导入自动建表和默认管理员。同时管理话题 CRUD 和用户工具偏好。
 
 | 函数 | 说明 |
 |---|---|
 | `authenticate(username, password)` | 返回 `(是否成功, 是否管理员)` |
-| `register_user(username, password, is_admin)` | 注册新用户，返回是否成功 |
+| `register_user(username, password, is_admin)` | 注册新用户 |
 | `list_users()` | 列出所有用户 |
+| `get_user_tool_prefs(username)` | 获取用户工具偏好 |
+| `set_user_tool_prefs(username, prefs)` | 设置用户工具偏好 |
 
 默认管理员：`admin` / `admin123`
 
@@ -326,4 +334,4 @@ python main.py
 
 ### 8. 切换云端模型
 
-修改 `campus_rag/.env`，将 `LLM_PROVIDER` 和 `EMBED_PROVIDER` 改为 `openai`，填入对应的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，无需改任何代码即可切换。
+修改 `campus_rag/.env`，将 `EMBED_PROVIDER` 改为 `openai`，填入对应的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`，无需改任何代码即可切换。LLM 配置在项目根目录 `settings.json` 中统一管理。

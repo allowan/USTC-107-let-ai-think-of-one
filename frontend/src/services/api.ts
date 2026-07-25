@@ -5,61 +5,34 @@ const api = axios.create({
   timeout: 30000,
 });
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
-
-api.interceptors.response.use(
-  (res) => res,
-  (err) => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
-    }
-    return Promise.reject(err);
-  },
-);
-
-export const authApi = {
-  login: (username: string, password: string) =>
-    api.post<{ token: string; user_id: string; username: string; is_admin?: boolean }>('/auth/login', { username, password }),
-
-  register: (username: string, password: string) =>
-    api.post<{ token: string; user_id: string; username: string; is_admin?: boolean }>('/auth/register', { username, password }),
-};
-
 export const chatApi = {
   getWebSocketUrl: () => {
-    const token = localStorage.getItem('token');
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${protocol}://${window.location.host}/ws/chat?token=${token}`;
+    return `${protocol}://${window.location.host}/ws/chat`;
   },
 };
 
-export const fileApi = {
-  list: (dirPath?: string) =>
-    api.get<{ files: import('@/types').FileInfo[] }>('/files/list', { params: { path: dirPath } }),
+export const topicApi = {
+  list: () =>
+    api.get<{ topics: import('@/types').TopicInfo[] }>('/topics'),
 
-  read: (filePath: string) =>
-    api.get<{ content: string; path: string }>('/files/read', { params: { path: filePath } }),
+  create: (name: string) =>
+    api.post<import('@/types').TopicInfo>('/topics', { name }),
 
-  write: (filePath: string, content: string) =>
-    api.post<{ message: string }>('/files/write', { path: filePath, content }),
+  delete: (topicId: string) =>
+    api.delete<{ message: string }>(`/topics/${topicId}`),
 
-  delete: (filePath: string) =>
-    api.delete<{ message: string }>('/files/delete', { params: { path: filePath } }),
+  rename: (topicId: string, name: string) =>
+    api.put<{ message: string; name: string }>(`/topics/${topicId}`, { name }),
 
-  upload: (file: File, destDir?: string) => {
-    const form = new FormData();
-    form.append('file', file);
-    const params = destDir ? `?dest_dir=${encodeURIComponent(destDir)}` : '';
-    return api.post<{ message: string; path: string }>(`/files/upload${params}`, form);
-  },
+  summarize: (topicId: string, userMessage: string, aiMessage: string) =>
+    api.post<{ name: string }>(`/topics/${topicId}/summarize`, {
+      user_message: userMessage,
+      ai_message: aiMessage,
+    }),
+
+  getHistory: (topicId: string) =>
+    api.get<{ messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(`/topics/${topicId}/history`),
 };
 
 export const searchApi = {
@@ -67,24 +40,43 @@ export const searchApi = {
     api.get<{ query: string; results: string }>('/search/notices', { params: { q: query } }),
 };
 
-export const adminApi = {
-  getUsers: () =>
-    api.get<{ users: Array<{ username: string; is_admin: boolean; index_size: number }> }>('/admin/users'),
+export const settingsApi = {
+  getGlobal: () =>
+    api.get<import('@/types').GlobalSettings>('/settings'),
 
-  deleteUser: (username: string) =>
-    api.delete<{ message: string }>(`/admin/users/${encodeURIComponent(username)}`),
+  updateGlobal: (data: { api_key?: string; base_url?: string; api_type?: string }) =>
+    api.put<{ message: string }>('/settings', data),
 
-  getNotices: () =>
-    api.get<{ notices: Array<{ source: string; preview: string }> }>('/admin/notices'),
+  switchModel: (group: string, model: string) =>
+    api.post<{ message: string; model: string }>('/settings/model', { group, model }),
 
-  addNotice: (content: string, source?: string) =>
-    api.post<{ message: string }>('/admin/notices', { content, source }),
+  getTools: () =>
+    api.get<{ tools: import('@/types').ToolSetting[] }>('/settings/tools'),
 
-  deleteNotice: (source: string) =>
-    api.delete<{ message: string }>(`/admin/notices/${encodeURIComponent(source)}`),
+  updateTools: (tools: Record<string, boolean>) =>
+    api.put<{ message: string }>('/settings/tools', { tools }),
+};
 
-  getStats: () =>
-    api.get<{ user_count: number; public_doc_count: number; user_collections_count: number; agent_ready: boolean }>('/admin/stats'),
+export const syncApi = {
+  getStatus: () =>
+    api.get<import('@/types').SyncStatus>('/sync/status'),
+
+  syncNow: () =>
+    api.post<import('@/types').SyncResult>('/sync/now'),
+};
+
+export const personalDataApi = {
+  list: () =>
+    api.get<{ items: import('@/types').PersonalDataItem[] }>('/personal-data'),
+
+  add: (content: string, source?: string) =>
+    api.post<{ message: string }>('/personal-data', { content, source }),
+
+  update: (source: string, content: string) =>
+    api.put<{ message: string }>(`/personal-data/${encodeURIComponent(source)}`, { content }),
+
+  delete: (source: string) =>
+    api.delete<{ message: string }>(`/personal-data/${encodeURIComponent(source)}`),
 };
 
 export default api;

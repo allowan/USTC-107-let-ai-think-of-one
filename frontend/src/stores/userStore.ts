@@ -1,32 +1,17 @@
 import { create } from 'zustand';
-import type { UserInfo } from '@/types';
+
+const LOCAL_USER = {
+  user_id: 'local_user',
+  username: 'local_user',
+  is_admin: true,
+};
 
 interface UserState {
-  user: UserInfo | null;
-  token: string | null;
-  setAuth: (user: UserInfo, token: string) => void;
-  logout: () => void;
-  isLoggedIn: () => boolean;
-  isAdmin: () => boolean;
+  user: typeof LOCAL_USER | null;
+  ready: boolean;
 }
 
-export const useUserStore = create<UserState>((set, get) => ({
-  user: JSON.parse(localStorage.getItem('user') || 'null'),
-  token: localStorage.getItem('token'),
-
-  setAuth: (user, token) => {
-    localStorage.setItem('user', JSON.stringify(user));
-    localStorage.setItem('token', token);
-    set({ user, token });
-  },
-
-  logout: () => {
-    localStorage.removeItem('user');
-    localStorage.removeItem('token');
-    set({ user: null, token: null });
-  },
-
-  isLoggedIn: () => !!get().token,
-
-  isAdmin: () => get().user?.is_admin === true,
+export const useUserStore = create<UserState>(() => ({
+  user: LOCAL_USER,
+  ready: true,
 }));

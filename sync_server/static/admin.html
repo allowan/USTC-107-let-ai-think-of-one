@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>USTC 通知管理</title>
+<style>
+:root {
+  --primary: #1677ff;
+  --danger: #ff4d4f;
+  --success: #52c41a;
+  --bg: #f5f5f5;
+  --card: #fff;
+  --border: #e8e8e8;
+  --text: #333;
+  --text-secondary: #888;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.header { background: var(--card); border-bottom: 1px solid var(--border); padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; font-weight: 600; }
+.header .info { font-size: 13px; color: var(--text-secondary); }
+.container { max-width: 960px; margin: 24px auto; padding: 0 24px; }
+.card { background: var(--card); border-radius: 8px; border: 1px solid var(--border); padding: 24px; margin-bottom: 16px; }
+.card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.card-header h2 { font-size: 16px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: #fff; cursor: pointer; font-size: 14px; transition: all .2s; }
+.btn:hover { border-color: var(--primary); color: var(--primary); }
+.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.btn-primary:hover { background: #4096ff; border-color: #4096ff; color: #fff; }
+.btn-danger { color: var(--danger); border-color: #ffccc7; }
+.btn-danger:hover { color: #fff; background: var(--danger); border-color: var(--danger); }
+.btn-sm { font-size: 12px; padding: 2px 10px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; text-align: center; }
+.stat-value { font-size: 28px; font-weight: 700; color: var(--primary); }
+.stat-label { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { background: #fafafa; font-weight: 600; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; }
+td.source { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 12px; }
+td.preview { max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.actions { white-space: nowrap; }
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 1000; align-items: center; justify-content: center; }
+.modal-overlay.active { display: flex; }
+.modal { background: #fff; border-radius: 8px; width: 90%; max-width: 700px; max-height: 80vh; display: flex; flex-direction: column; }
+.modal-header { padding: 16px 24px; border-bottom: 1px solid var(--border); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.modal-body { padding: 24px; overflow: auto; flex: 1; }
+.modal-footer { padding: 12px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: monospace; font-size: 13px; resize: vertical; }
+textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 2px rgba(22,119,255,.2); }
+.login-box { max-width: 400px; margin: 100px auto; }
+.login-box input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; margin-bottom: 12px; }
+.login-box input:focus { outline: none; border-color: var(--primary); }
+.empty { text-align: center; padding: 40px; color: var(--text-secondary); }
+.loading { text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+
+<!-- Login screen -->
+<div id="login-screen">
+  <div class="card login-box">
+    <h2 style="text-align:center;margin-bottom:20px;">通知管理后台</h2>
+    <input id="token-input" type="password" placeholder="管理员令牌" onkeydown="if(event.key==='Enter')login()">
+    <button class="btn btn-primary" style="width:100%;justify-content:center;" onclick="login()">登录</button>
+    <p id="login-error" style="color:var(--danger);font-size:13px;margin-top:8px;display:none;"></p>
+  </div>
+</div>
+
+<!-- Main app -->
+<div id="app-screen" style="display:none;">
+
+  <div class="header">
+    <h1>USTC 通知管理</h1>
+    <div>
+      <span class="info" id="server-info"></span>
+      <button class="btn btn-sm" style="margin-left:8px;" onclick="logout()">退出</button>
+    </div>
+  </div>
+
+  <div class="container">
+
+    <div class="stats" id="stats-row"></div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>通知列表</h2>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" onclick="refresh()">刷新</button>
+          <button class="btn btn-primary" onclick="openAddModal()">+ 添加通知</button>
+        </div>
+      </div>
+
+      <div id="table-container">
+        <div class="loading">加载中...</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal-overlay" id="notice-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="modal-title">添加通知</span>
+      <button class="btn btn-sm" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:12px;">
+        <label style="font-size:13px;color:var(--text-secondary);">来源标识（可选，如文件名）</label>
+        <input id="modal-source" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-top:4px;" placeholder="留空自动生成">
+      </div>
+      <label style="font-size:13px;color:var(--text-secondary);">通知内容</label>
+      <textarea id="modal-content" rows="15" placeholder="粘贴通知全文..."></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modal-save-btn" onclick="saveNotice()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirm -->
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal" style="max-width:400px;">
+    <div class="modal-header">确认删除</div>
+    <div class="modal-body">
+      <p>确定要删除通知 "<span id="delete-source"></span>" 吗？此操作不可撤销。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="document.getElementById('delete-modal').classList.remove('active')">取消</button>
+      <button class="btn btn-danger" id="delete-confirm-btn">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('sync_admin_token');
+let editingSource = null;
+
+if (token) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app-screen').style.display = 'block';
+  refresh();
+  loadStats();
+}
+
+async function login() {
+  const t = document.getElementById('token-input').value.trim();
+  if (!t) return;
+  const res = await fetch('/api/admin/notices', { headers: { Authorization: 'Bearer ' + t } });
+  if (res.status === 401 || res.status === 403) {
+    document.getElementById('login-error').textContent = '令牌无效';
+    document.getElementById('login-error').style.display = 'block';
+    return;
+  }
+  if (res.ok) {
+    token = t;
+    localStorage.setItem('sync_admin_token', token);
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display = 'block';
+    refresh();
+    loadStats();
+  } else {
+    document.getElementById('login-error').textContent = '连接失败: ' + res.status;
+    document.getElementById('login-error').style.display = 'block';
+  }
+}
+
+function logout() {
+  localStorage.removeItem('sync_admin_token');
+  token = null;
+  document.getElementById('login-screen').style.display = 'block';
+  document.getElementById('app-screen').style.display = 'none';
+}
+
+async function api(path, options = {}) {
+  const url = '/api' + path;
+  const res = await fetch(url, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + token, ...options.headers },
+  });
+  if (res.status === 401 || res.status === 403) { logout(); throw new Error('Unauthorized'); }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
+  return res.json();
+}
+
+async function refresh() {
+  const container = document.getElementById('table-container');
+  try {
+    const data = await api('/admin/notices');
+    const notices = data.notices || [];
+    if (!notices.length) {
+      container.innerHTML = '<div class="empty">暂无通知，点击右上角添加</div>';
+      return;
+    }
+    container.innerHTML = `
+      <table>
+        <thead><tr><th>来源</th><th>预览</th><th style="width:120px">操作</th></tr></thead>
+        <tbody>${notices.map(n => `
+          <tr>
+            <td class="source" title="${esc(n.source)}">${esc(n.source)}</td>
+            <td class="preview" title="${esc(n.preview)}">${esc(n.preview)}</td>
+            <td class="actions">
+              <button class="btn btn-sm" onclick="openEditModal('${escAttr(n.source)}')">编辑</button>
+              <button class="btn btn-sm btn-danger" onclick="confirmDelete('${escAttr(n.source)}')">删除</button>
+            </td>
+          </tr>`).join('')}</tbody>
+      </table>`;
+  } catch (e) {
+    container.innerHTML = '<div class="empty" style="color:var(--danger);">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function loadStats() {
+  try {
+    const data = await api('/admin/stats');
+    document.getElementById('stats-row').innerHTML = `
+      <div class="stat"><div class="stat-value">${data.document_count}</div><div class="stat-label">文档总数</div></div>
+      <div class="stat"><div class="stat-value">v${data.version}</div><div class="stat-label">当前版本</div></div>`;
+  } catch (e) {
+    document.getElementById('stats-row').innerHTML = '';
+  }
+}
+
+function openAddModal() {
+  editingSource = null;
+  document.getElementById('modal-title').textContent = '添加通知';
+  document.getElementById('modal-source').value = '';
+  document.getElementById('modal-content').value = '';
+  document.getElementById('modal-save-btn').textContent = '添加';
+  document.getElementById('notice-modal').classList.add('active');
+}
+
+async function openEditModal(source) {
+  try {
+    const data = await api('/admin/notices/' + encodeURIComponent(source) + '/content');
+    editingSource = source;
+    document.getElementById('modal-title').textContent = '编辑通知';
+    document.getElementById('modal-source').value = source;
+    document.getElementById('modal-content').value = data.content || '';
+    document.getElementById('modal-save-btn').textContent = '保存';
+    document.getElementById('notice-modal').classList.add('active');
+  } catch (e) {
+    alert('获取内容失败: ' + e.message);
+  }
+}
+
+function closeModal() {
+  document.getElementById('notice-modal').classList.remove('active');
+  editingSource = null;
+}
+
+async function saveNotice() {
+  const content = document.getElementById('modal-content').value.trim();
+  const sourceInput = document.getElementById('modal-source').value.trim();
+  if (!content) { alert('内容不能为空'); return; }
+  const btn = document.getElementById('modal-save-btn');
+  btn.disabled = true; btn.textContent = '保存中...';
+
+  try {
+    if (editingSource) {
+      await api('/admin/notices/' + encodeURIComponent(editingSource), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+    } else {
+      await api('/admin/notices', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, source: sourceInput }),
+      });
+    }
+    closeModal();
+    refresh();
+    loadStats();
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = editingSource ? '保存' : '添加';
+  }
+}
+
+function confirmDelete(source) {
+  document.getElementById('delete-source').textContent = source;
+  document.getElementById('delete-modal').classList.add('active');
+  document.getElementById('delete-confirm-btn').onclick = async () => {
+    try {
+      await api('/admin/notices/' + encodeURIComponent(source), { method: 'DELETE' });
+      document.getElementById('delete-modal').classList.remove('active');
+      refresh();
+      loadStats();
+    } catch (e) {
+      alert('删除失败: ' + e.message);
+    }
+  };
+}
+
+function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escAttr(s) { return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;'); }
+</script>
+</body>
+</html>

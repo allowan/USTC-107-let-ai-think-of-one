@@ -10,14 +10,9 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
-#root {
-  display: flex;
-  flex-direction: column;
-}
-
 /* Markdown rendering in chat bubbles */
 .chat-markdown p {
-  margin: 0.4em 0;
+  margin: 0.2em 0;
 }
 .chat-markdown p:first-child {
   margin-top: 0;
@@ -51,4 +46,23 @@ html, body, #root {
   padding-left: 10px;
   color: #666;
   margin: 0.4em 0;
+}
+
+/* Stream status indicator */
+.stream-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin: 8px 0;
+  font-size: 14px;
+  color: #8c8c8c;
+  animation: fadeIn 0.3s ease;
+}
+.stream-status .anticon {
+  font-size: 16px;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }

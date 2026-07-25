@@ -1,17 +1,14 @@
 """
-Compatibility shim: re-exports the FastAPI app from the server package.
-Use "python server.py" or "python server/main.py" to start the server.
+Entry point: python server/main.py  or  python -m server.main
 """
 
-from server import app  # noqa: F401
+import signal
+import logging
+import uvicorn
+
+logger = logging.getLogger("server.main")
 
 if __name__ == "__main__":
-    import signal
-    import logging
-    import uvicorn
-
-    logger = logging.getLogger("server")
-
     def _shutdown_uvicorn(signum, frame):
         logger.info("Received signal %s, shutting down...", signum)
         raise KeyboardInterrupt

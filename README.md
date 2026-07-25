@@ -4,11 +4,14 @@
 
 ## 功能特性
 
-- **流式对话** — WebSocket 实时流式输出，支持 Markdown 渲染
-- **RAG 检索** — 混合检索（向量 + BM25）+ 重排序，精准匹配校园通知
-- **多用户隔离** — 每个用户独立的知识库和工作区
-- **文件管理** — 工作区文件的上传、预览、删除
+- **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染
+- **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
+- **RAG 检索** — 混合检索（向量 + BM25）+ 重排序，精准匹配校园通知和个人数据
+- **多用户隔离** — JWT 认证，每个用户独立的知识库和工作区
+- **个人知识库** — 用户私有数据的增删改查，支持按来源聚合展示
+- **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
 - **管理面板** — 用户管理、知识库文档管理、系统状态监控（管理员专属）
+- **设置中心** — LLM API Key/Base URL 热更新、模型切换、Agent 工具开关
 
 ## 快速开始
 
@@ -104,7 +107,17 @@ python server.py
 
 > **Windows 注意**：如果使用 conda，确保先 `conda activate 107`。如果遇到 Ollama 嵌入返回 502 错误，说明系统代理干扰了 httpx，`llm_factory.py` 已内置清除代理环境变量的逻辑，重启服务即可。
 
-### 6. 启动前端
+### 6. 启动 Sync Server（可选）
+
+Sync Server 是公共通知同步服务端，独立运行在端口 8001：
+
+```bash
+cd sync_server && python main.py
+```
+
+如果不启动 Sync Server，主服务的同步功能会显示服务离线，不影响其他功能。
+
+### 7. 启动前端
 
 ```bash
 cd frontend
@@ -153,47 +166,85 @@ npm run dev
 
 ```
 USTC-107-let-ai-think-of-one/
-├── server.py                  # FastAPI 后端入口（HTTP + WebSocket）
-├── main.py                    # LangChain Agent 定义和系统提示
+├── server.py                  # 后端入口（uvicorn 启动）
+├── server/                    # FastAPI 应用包
+│   ├── __init__.py            #   应用工厂、路由注册、静态文件挂载
+│   ├── main.py                #   开发/调试入口（python server/main.py）
+│   ├── lifespan.py            #   启动/关闭生命周期（ChatService 初始化）
+│   ├── deps.py                #   依赖注入（JWT 认证、服务获取）
+│   ├── routes/                #   路由模块
+│   │   ├── chat.py            #     SSE / WebSocket 流式对话
+│   │   ├── topics.py          #     话题 CRUD、历史、自动标题
+│   │   ├── search.py          #     公共通知 / 个人数据检索
+│   │   ├── personal_data.py   #     个人知识库 CRUD
+│   │   ├── settings.py        #     LLM 配置、模型切换、工具开关
+│   │   ├── sync.py            #     公共通知同步管理
+│   │   └── health.py          #     健康检查
+│   └── services/              #   业务逻辑层
+│       ├── auth_service.py    #     登录、注册、JWT 签发
+│       ├── chat_service.py    #     Agent 管理、对话执行
+│       ├── rag_service.py     #     RAG 检索、数据入库
+│       └── sync_service.py    #     客户端同步逻辑
+├── sync_server/               # 公共通知同步服务端（独立进程，端口 8001）
+│   ├── main.py                #   FastAPI 应用入口
+│   ├── database.py            #   SQLite 数据库 + 版本管理
+│   ├── deps.py                #   Admin 认证依赖
+│   ├── routes/
+│   │   ├── admin.py           #     通知 CRUD、统计（需 admin token）
+│   │   └── sync.py            #     版本查询、增量/全量同步（公开）
+│   ├── services/
+│   │   ├── admin_service.py   #     通知管理逻辑
+│   │   └── sync_service.py    #     同步数据逻辑
+│   ├── static/admin.html      #   Sync Server 管理后台页面
+│   └── data/                  #   同步源数据（.txt 通知文件）
+├── main.py                    # LangChain Agent 定义、工具注册、系统提示
+├── model/
+│   └── config.py              # LLM 初始化（支持 settings.json 热切换）
+├── campus_rag/                # RAG 检索系统
+│   ├── data/                  #   校园通知 .txt 源数据
+│   ├── config.py              #   LlamaIndex 全局设置
+│   ├── llm_factory.py         #   LLM / Embedding 工厂
+│   ├── data_loader.py         #   文档加载和 SentenceSplitter 切分
+│   ├── index_manager.py       #   ChromaDB 索引管理（公共 + 用户隔离）
+│   ├── keyword_retriever.py   #   BM25 关键词检索（jieba 分词）
+│   ├── query.py               #   检索接口（Agent 工具用）
+│   ├── query_engine.py        #   RAG 管线（向量/混合检索 + 重排序 + LLM）
+│   ├── ingest.py              #   运行时文档注入
+│   ├── auth.py                #   用户认证、话题 CRUD、工具偏好
+│   ├── .env.example           #   嵌入配置模板
+│   └── README.md              #   RAG 模块文档
+├── tools/                     # Agent 工具
+│   └── search.py              #   网页抓取工具
 ├── frontend/                  # React 18 前端
 │   └── src/
-│       ├── pages/             # 页面组件
-│       │   ├── LoginPage.tsx   #   登录 / 注册
-│       │   ├── ChatPage.tsx    #   流式对话（WebSocket + Markdown）
-│       │   ├── FilesPage.tsx   #   文件管理
-│       │   └── AdminPage.tsx   #   管理面板（三 Tab）
-│       ├── components/        # 布局组件
-│       ├── services/          # API 调用 + Axios 拦截器
-│       ├── stores/            # Zustand 状态管理
-│       └── types/             # TypeScript 类型定义
-├── campus_rag/                # RAG 检索系统
-│   ├── data/                  # 校园通知 .txt 数据文件
-│   ├── auth.py                # 用户认证（SQLite + bcrypt）
-│   ├── index_manager.py       # ChromaDB 索引（公共 + 用户隔离）
-│   ├── query.py               # 轻量检索（Agent 工具用）
-│   ├── query_engine.py        # 完整 RAG 管线（混合检索 + 重排序）
-│   ├── data_loader.py         # 文档加载和 SentenceSplitter 切分
-│   ├── keyword_retriever.py   # BM25 关键词检索（jieba 分词）
-│   ├── ingest.py              # 运行时文档注入
-│   ├── llm_factory.py         # LLM / Embedding 工厂
-│   ├── config.py              # LlamaIndex 全局设置
-│   ├── .env.example           # 嵌入配置模板
-│   └── README.md              # RAG 模块文档
-├── tools/                     # Agent 工具
-│   ├── file_tool.py           # 11 个文件操作工具（沙箱化 workspace）
-│   └── search.py              # 网页抓取工具
-├── model/
-│   └── config.py              # LLM 初始化（支持热切换模型）
+│       ├── pages/
+│       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染
+│       │   ├── PersonalDataPage.tsx #   个人知识库管理
+│       │   └── SyncPage.tsx        #   公共通知同步
+│       ├── components/
+│       │   └── Layout/
+│       │       ├── AppLayout.tsx    #   侧边栏（菜单 + 话题列表）+ 顶栏
+│       │       └── SettingsModal.tsx #   LLM/工具 设置弹窗
+│       ├── services/
+│       │   └── api.ts              #   API 调用 + Axios JWT 拦截器
+│       ├── stores/
+│       │   ├── userStore.ts         #   认证状态
+│       │   └── topicStore.ts        #   话题状态
+│       └── types/
+│           └── index.ts            #   TypeScript 类型定义
 ├── tests/                     # 单元测试
-├── settings.example.json      # LLM 配置模板（可提交）
+├── data/                      # 运行时数据（checkpoint DB，gitignore）
 ├── workspace/                 # 用户文件存储（gitignore）
 ├── chroma_db/                 # ChromaDB 向量数据库（gitignore）
-└── TEST_REPORT.md              # 测试报告
+├── settings.example.json      # LLM 配置模板
+└── TEST_REPORT.md             # 测试报告
 ```
 
 ## API 总览
 
-### 认证（无需登录）
+### 主服务（端口 8000）
+
+#### 认证（无需登录）
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -201,39 +252,84 @@ USTC-107-let-ai-think-of-one/
 | POST | `/api/auth/register` | 注册 |
 | GET | `/api/health` | 健康检查 |
 
-### 对话（WebSocket）
-
-| Path | 说明 |
-|---|---|
-| `/ws/chat?token=<jwt>` | 流式对话，收发 JSON：`{"type":"chat","content":"..."}` |
-
-### 文件（需登录）
+#### 认证（需登录）
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/files/list?path=` | 列出目录 |
-| GET | `/api/files/read?path=` | 读取文件 |
-| POST | `/api/files/write` | 写入文件 |
-| DELETE | `/api/files/delete?path=` | 删除文件 |
-| POST | `/api/files/upload` | 上传文件（UTF-8 文本） |
+| PUT | `/api/auth/password` | 修改密码 |
 
-### 搜索（需登录）
+#### 话题（需登录）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/topics` | 话题列表 |
+| POST | `/api/topics` | 创建话题 |
+| DELETE | `/api/topics/{id}` | 删除话题及对话记录 |
+| PUT | `/api/topics/{id}` | 重命名话题 |
+| POST | `/api/topics/{id}/summarize` | 自动生成话题标题 |
+| GET | `/api/topics/{id}/history` | 获取话题对话历史 |
+
+#### 对话（需登录）
+
+| Method | Path | 说明 |
+|---|---|---|
+| POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`） |
+| WS | `/ws/chat?token=<jwt>` | WebSocket 流式对话 |
+
+#### 个人知识库（需登录）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/personal-data` | 列出个人数据（按来源聚合） |
+| POST | `/api/personal-data` | 添加个人数据 |
+| PUT | `/api/personal-data/{source}` | 编辑个人数据 |
+| DELETE | `/api/personal-data/{source}` | 删除个人数据 |
+
+#### 搜索（需登录）
 
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/api/search/notices?q=` | 搜索公共通知 |
 | GET | `/api/search/my-data?q=` | 搜索个人数据 |
 
-### 管理（需管理员）
+#### 设置（需登录）
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/admin/users` | 用户列表（含索引大小） |
-| DELETE | `/api/admin/users/{username}` | 删除用户及数据 |
-| GET | `/api/admin/notices` | 知识库文档列表（按来源聚合） |
-| POST | `/api/admin/notices` | 添加通知到知识库 |
-| DELETE | `/api/admin/notices/{source}` | 按来源删除通知及所有分块 |
-| GET | `/api/admin/stats` | 系统统计（用户数、文档数、Agent 状态） |
+| GET | `/api/settings` | 获取 LLM 配置 |
+| PUT | `/api/settings` | 更新 API Key / Base URL |
+| POST | `/api/settings/model` | 切换模型 |
+| GET | `/api/settings/tools` | 获取工具开关状态 |
+| PUT | `/api/settings/tools` | 更新工具开关 |
+
+#### 同步（需登录）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/sync/status` | 查看本地/远程版本差异 |
+| POST | `/api/sync/now` | 立即触发同步 |
+
+### Sync Server（端口 8001）
+
+#### 客户端同步（公开）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/sync/version` | 获取当前版本号 |
+| GET | `/api/sync/changes?since=` | 增量同步变更 |
+| GET | `/api/sync/full` | 全量同步所有文档 |
+
+#### 管理后台（需 admin token）
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/admin/notices` | 通知列表 |
+| POST | `/api/admin/notices` | 添加通知 |
+| GET | `/api/admin/notices/{source}/content` | 获取通知原文 |
+| PUT | `/api/admin/notices/{source}` | 编辑通知 |
+| DELETE | `/api/admin/notices/{source}` | 删除通知 |
+| GET | `/api/admin/stats` | 系统统计 |
+| GET | `/admin` | 管理后台 HTML 页面 |
 
 ## 测试
 
@@ -256,9 +352,13 @@ curl -X POST http://localhost:8000/api/auth/login \
 curl "http://localhost:8000/api/search/notices?q=讲座" \
   -H "Authorization: Bearer <token>"
 
-# 4. 管理员接口
-curl "http://localhost:8000/api/admin/stats" \
-  -H "Authorization: Bearer <admin_token>"
+# 4. 个人知识库
+curl "http://localhost:8000/api/personal-data" \
+  -H "Authorization: Bearer <token>"
+
+# 5. 同步状态
+curl "http://localhost:8000/api/sync/status" \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### 前端测试
@@ -273,12 +373,15 @@ npm run build       # 生产构建
 
 1. 启动 Ollama：`ollama serve`
 2. 启动后端：`python server.py`
-3. 启动前端：`cd frontend && npm run dev`
-4. 浏览器打开 `http://localhost:3000`
-5. 用 `admin` / `admin123` 登录
-6. 测试对话：发送"有什么暑期学校的活动？"
-7. 测试文件：上传/预览/删除 .txt 文件
-8. 测试管理：侧边栏"管理" → 用户管理 / 知识库管理 / 系统状态
+3. （可选）启动 Sync Server：`cd sync_server && python main.py`
+4. 启动前端：`cd frontend && npm run dev`
+5. 浏览器打开 `http://localhost:3000`
+6. 用 `admin` / `admin123` 登录
+7. 创建话题：侧边栏点击 + 按钮
+8. 测试对话：发送"有什么暑期学校的活动？"
+9. 测试个人知识库：侧边栏"个人数据" → 添加/编辑/删除
+10. 测试同步：侧边栏"同步" → 查看状态 → 触发同步
+11. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
 
 ### 测试报告
 
@@ -292,11 +395,39 @@ npm run build       # 生产构建
 - **文档分块**：每篇通知会被 `SentenceSplitter` 切分为多个 1024 字符的块，管理面板按文件名聚合显示
 - **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致 Ollama 连接 502，`llm_factory.py` 已内置清除逻辑
 - **ChromaDB 持久化**：向量数据存储在项目根目录的 `chroma_db/`，删除后重启服务会自动从 `data/` 重新索引
+- **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
+- **工具偏好**：每个用户可独立启/禁用 Agent 工具，偏好存储在 `users.db` 中，通过设置面板管理
 
-## 待实现
+## 未来规划
 
-- [ ] 真正的 RAG Answer 模式（检索结果经 LLM 总结后再传给 Agent，而非原始文本）
-- [ ] 对话历史持久化
-- [ ] 用户个人信息修改
-- [ ] 知识库文档在线编辑
+### 数据库多文件格式支持
+
+当前 `campus_rag/data/` 仅支持 `.txt` 纯文本文件。计划扩展支持以下格式：
+
+- [ ] **PDF** — 校园通知常以 PDF 发布，使用 `PyMuPDF` 或 `pdfplumber` 解析
+- [ ] **Word (.docx)** — 使用 `python-docx` 解析
+- [ ] **Markdown (.md)** — 保留格式结构，按标题层级智能分块
+- [ ] **HTML** — 爬取网页后可直接入库，使用 `BeautifulSoup` 清洗
+- [ ] **Excel (.xlsx)** — 表格类数据（如课表、考试安排），按行/sheet 分块
+
+实现思路：在 `data_loader.py` 中增加 `FormatRouter`，根据文件后缀分发到对应的解析器，统一输出 `Document` 列表进入现有 RAG 管线。
+
+### 数据库自动爬取更新
+
+- [ ] **定时爬取** — 用 APScheduler 或后台 asyncio 任务定时抓取校园网站通知（教务处、研究生院、各学院官网）
+- [ ] **增量更新** — 记录已爬取 URL 和内容哈希，仅对新通知或变更内容触发重新索引
+- [ ] **爬取结果自动入库** — 抓取 → 清洗 → 分块 → 写入 ChromaDB 全自动
+- [ ] **管理面板手动触发** — 在 Sync Server 管理后台增加「立即爬取」按钮
+
+### 工具扩展
+
+- [ ] **联网搜索工具** — 集成 Tavily / DuckDuckGo Search API 作为 Agent 工具，弥补本地知识库的时效性缺口（参考 `tools/search.py` 现有网页抓取逻辑，可复用）
+- [ ] **知识图谱工具** — 基于 Neo4j 或 NetworkX 构建课程依赖、教师关系等结构化知识
+- [ ] **邮件/通知推送工具** — Agent 可代用户订阅关键词，匹配到新通知时推送提醒
+- [ ] **日程解析工具** — 从通知中提取时间、地点、事件，自动生成日历事件
+- [ ] **图片/多模态支持** — 结合多模态 LLM 解析通知中的海报图片
+
+### 工程化
+
 - [ ] Docker 部署支持
+- [ ] CI/CD 流水线（GitHub Actions）

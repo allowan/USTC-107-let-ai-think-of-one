@@ -1,0 +1,215 @@
+"""
+Chat service: agent lifecycle, streaming (SSE/WS), checkpoint management.
+"""
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+
+logger = logging.getLogger("server")
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+class ChatService:
+    """Manages agent instances and provides streaming chat."""
+
+    def __init__(self):
+        self._default_agent = None
+        self._user_agents: dict[str, object] = {}
+
+    async def initialize(self):
+        from main import build_agent
+        self._default_agent = await build_agent()
+        logger.info("ChatService initialized")
+
+    async def shutdown(self):
+        from main import close_agent
+        self._clear_agent_cache()
+        await close_agent()
+        logger.info("ChatService shut down")
+
+    async def _get_agent(self, username: str = ""):
+        if username:
+            if username in self._user_agents:
+                return self._user_agents[username]
+            from campus_rag.auth import get_enabled_tool_names
+            from main import build_agent
+            enabled = get_enabled_tool_names(username)
+            agent = await build_agent(username=username, enabled_tool_names=enabled)
+            self._user_agents[username] = agent
+            return agent
+        if self._default_agent is None:
+            from main import build_agent
+            self._default_agent = await build_agent()
+        return self._default_agent
+
+    def invalidate_user_agent(self, username: str):
+        old = self._user_agents.pop(username, None)
+        if old is not None:
+            conn = getattr(old, '_checkpointer_conn', None)
+            if conn is not None:
+                asyncio.create_task(self._close_conn(conn))
+
+    def _clear_agent_cache(self):
+        for username in list(self._user_agents.keys()):
+            self.invalidate_user_agent(username)
+
+    async def _close_conn(self, conn):
+        try:
+            await conn.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _thread_id(username: str, topic_id: str) -> str:
+        return f"user-{username}-topic-{topic_id}" if topic_id else f"user-{username}"
+
+    async def delete_thread(self, thread_id: str):
+        """Delete all checkpoints for a thread."""
+        import aiosqlite
+        # Try to use an existing agent's connection first
+        conn = None
+        for ag in [self._default_agent] + list(self._user_agents.values()):
+            if ag is not None:
+                conn = getattr(ag, '_checkpointer_conn', None)
+                if conn is not None:
+                    break
+        own = conn is None
+        if own:
+            db_path = ROOT / "data" / "agent_checkpoints.db"
+            conn = await aiosqlite.connect(str(db_path))
+        try:
+            await conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+            await conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+            await conn.commit()
+        except Exception:
+            logger.warning("Failed to delete checkpoints for thread %s", thread_id, exc_info=True)
+        finally:
+            if own:
+                await conn.close()
+
+    async def get_history(self, username: str, topic_id: str) -> list:
+        from main import get_history
+        thread_id = self._thread_id(username, topic_id)
+        return await get_history(thread_id)
+
+    async def stream_chat_events(self, username: str, content: str, topic_id: str):
+        """Async generator yielding SSE-style (event_type, data) tuples."""
+        from langchain_core.messages import AIMessageChunk
+
+        agent_instance = await self._get_agent(username)
+        thread_id = self._thread_id(username, topic_id)
+
+        seen_tool_names: set[str] = set()
+        yield ("thinking", "")
+
+        async for msg_chunk, _metadata in agent_instance.astream(
+            {"messages": [{"role": "user", "content": content}]},
+            {"configurable": {"thread_id": thread_id}},
+            stream_mode="messages",
+        ):
+            if isinstance(msg_chunk, AIMessageChunk):
+                emitted_tool = False
+                if msg_chunk.tool_call_chunks:
+                    for tc in msg_chunk.tool_call_chunks:
+                        name = tc.get("name")
+                        if name and name not in seen_tool_names:
+                            seen_tool_names.add(name)
+                            yield ("tool_use", str(name))
+                            emitted_tool = True
+                if msg_chunk.tool_calls:
+                    for tc in msg_chunk.tool_calls:
+                        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                        if name and name not in seen_tool_names:
+                            seen_tool_names.add(name)
+                            yield ("tool_use", str(name))
+                            emitted_tool = True
+                if emitted_tool:
+                    continue
+                if msg_chunk.content:
+                    text = msg_chunk.content
+                    if not isinstance(text, str):
+                        text = str(text)
+                    yield ("token", text)
+
+    async def sse_generator(self, username: str, content: str, topic_id: str):
+        """Full SSE response generator with error handling and retry on corrupted checkpoints."""
+        thread_id = self._thread_id(username, topic_id)
+
+        async def _stream():
+            async for event_type, data in self.stream_chat_events(username, content, topic_id):
+                yield f"data: {json.dumps({'type': event_type, 'content': data})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        try:
+            async for chunk in _stream():
+                yield chunk
+        except Exception as exc:
+            err_msg = str(exc)
+            if "tool_calls" in err_msg and "tool messages" in err_msg:
+                logger.warning("Checkpoint corrupted for thread %s, retrying", thread_id)
+                await self.delete_thread(thread_id)
+                from campus_rag.query import _reset
+                _reset()
+                try:
+                    async for chunk in _stream():
+                        yield chunk
+                except Exception as exc2:
+                    logger.error("SSE retry failed for thread %s: %s", thread_id, exc2, exc_info=True)
+                    yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc2}'})}\n\n"
+            else:
+                logger.error("SSE error for thread %s: %s", thread_id, exc, exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc}'})}\n\n"
+
+    async def handle_ws_stream(self, ws, username: str, content: str, topic_id: str):
+        """Send streaming tokens + tool_use events over a WebSocket."""
+        from langchain_core.messages import AIMessageChunk
+
+        agent_instance = await self._get_agent(username)
+        thread_id = self._thread_id(username, topic_id)
+        seen_tool_names: set[str] = set()
+
+        await ws.send_json({"type": "thinking", "content": ""})
+        async for msg_chunk, _metadata in agent_instance.astream(
+            {"messages": [{"role": "user", "content": content}]},
+            {"configurable": {"thread_id": thread_id}},
+            stream_mode="messages",
+        ):
+            if isinstance(msg_chunk, AIMessageChunk):
+                emitted_tool = False
+                if msg_chunk.tool_call_chunks:
+                    for tc in msg_chunk.tool_call_chunks:
+                        name = tc.get("name")
+                        if name and name not in seen_tool_names:
+                            seen_tool_names.add(name)
+                            await ws.send_json({"type": "tool_use", "content": str(name)})
+                            emitted_tool = True
+                if msg_chunk.tool_calls:
+                    for tc in msg_chunk.tool_calls:
+                        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+                        if name and name not in seen_tool_names:
+                            seen_tool_names.add(name)
+                            await ws.send_json({"type": "tool_use", "content": str(name)})
+                            emitted_tool = True
+                if emitted_tool:
+                    continue
+                if msg_chunk.content:
+                    text = msg_chunk.content
+                    if not isinstance(text, str):
+                        text = str(text)
+                    await ws.send_json({"type": "token", "content": text})
+
+
+# ── Singleton ─────────────────────────────────────────────────────
+
+_chat_service: ChatService | None = None
+
+
+async def get_chat_service() -> ChatService:
+    global _chat_service
+    if _chat_service is None:
+        _chat_service = ChatService()
+        await _chat_service.initialize()
+    return _chat_service

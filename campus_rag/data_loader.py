@@ -6,6 +6,8 @@ import os
 def load_documents_from_files(directory: str) -> list:
     """读取目录下所有 .txt 文件，每个文件为一个 Document"""
     documents = []
+    if not os.path.isdir(directory):
+        return documents
     for filename in os.listdir(directory):
         if filename.endswith(".txt"):
             filepath = os.path.join(directory, filename)

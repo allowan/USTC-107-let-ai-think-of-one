@@ -323,12 +323,12 @@ class TestIngest(unittest.TestCase):
             add_public_activity("未授权的通知", admin_check=False)
 
     def test_02_add_user_files_not_exist(self):
-        from campus_rag.ingest import add_user_files
+        from campus_rag import add_user_files
         with self.assertRaises(FileNotFoundError):
             add_user_files(self.TEST_USER, "/nonexistent/path/file.txt")
 
     def test_03_add_user_files_non_txt(self):
-        from campus_rag.ingest import add_user_files
+        from campus_rag import add_user_files
         tmpdir = tempfile.mkdtemp()
         try:
             p = os.path.join(tmpdir, "test.md")
@@ -362,7 +362,7 @@ class TestIngestWithEmbedding(unittest.TestCase):
         self.assertNotIn("未在个人数据中找到", result, "应能检索到刚入库的内容")
 
     def test_02_add_user_files_from_dir(self):
-        from campus_rag.ingest import add_user_files
+        from campus_rag import add_user_files
         from campus_rag import search_user_data
         tmpdir = tempfile.mkdtemp()
         try:
@@ -376,7 +376,7 @@ class TestIngestWithEmbedding(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_03_add_user_files_single_file(self):
-        from campus_rag.ingest import add_user_files
+        from campus_rag import add_user_files
         from campus_rag import search_user_data
         tmpdir = tempfile.mkdtemp()
         try:
