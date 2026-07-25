@@ -75,22 +75,6 @@ def search_user_data(query: str, user_id: str) -> str:
                          "未在个人数据中找到相关信息。")
 
 
-def search_all(query: str, user_id: str) -> str:
-    """同时搜索官方通知和用户个人数据。"""
-    _ensure_init()
-    pub_nodes = _public_retriever.retrieve(query)
-    user_retriever = _get_user_retriever(user_id)
-    user_nodes = user_retriever.retrieve(query)
-
-    parts = []
-    if pub_nodes:
-        parts.append("=== 官方通知 ===\n" + _format_nodes(pub_nodes, ""))
-    if user_nodes:
-        parts.append("=== 个人数据 ===\n" + _format_nodes(user_nodes, ""))
-
-    return "\n\n".join(parts) if parts else "未找到相关信息。"
-
-
 def search_notices_answer(query: str) -> str:
     """搜索官方通知，经 LLM 总结后返回回答。"""
     _ensure_init()
@@ -106,13 +90,6 @@ def search_user_data_answer(query: str, user_id: str) -> str:
     from .query_engine import get_rag_response
     return get_rag_response(query, user_index=user_idx)
 
-
-def search_all_answer(query: str, user_id: str) -> str:
-    """同时搜索官方通知和个人数据，经 LLM 总结后返回回答。"""
-    _ensure_init()
-    pub_idx, user_idx = _rag.get_combined_query_engine(user_id)
-    from .query_engine import get_rag_response
-    return get_rag_response(query, public_index=pub_idx, user_index=user_idx)
 
 
 def add_user_data(user_id: str, documents: list):

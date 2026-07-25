@@ -93,47 +93,6 @@ def list_users() -> list:
     return [(u.username, u.is_admin) for u in users]
 
 
-def change_password(username: str, old_password: str, new_password: str) -> tuple:
-    """修改用户密码，返回 (是否成功, 消息)。"""
-    if not new_password:
-        return False, "新密码不能为空"
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=username).first()
-    if not user:
-        db.close()
-        return False, "用户不存在"
-    if not _verify_password(old_password, user.hashed_password):
-        db.close()
-        return False, "旧密码错误"
-    user.hashed_password = _hash_password(new_password)
-    db.commit()
-    db.close()
-    return True, "密码修改成功"
-
-
-def get_user_admin_status(username: str) -> bool:
-    """查询用户是否为管理员（仅需用户名，无需密码）。"""
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=username).first()
-    db.close()
-    return user.is_admin if user else False
-
-
-def delete_user(username: str) -> bool:
-    """删除用户，admin 账户受保护不可删除。返回 True 表示删除成功。"""
-    if username == "admin":
-        return False
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=username).first()
-    if not user:
-        db.close()
-        return False
-    db.delete(user)
-    db.commit()
-    db.close()
-    return True
-
-
 # ── Topic CRUD ────────────────────────────────────────────────
 
 def _thread_id(username: str, topic_id: str) -> str:
