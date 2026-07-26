@@ -7,10 +7,8 @@
 - **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **RAG 检索** — 混合检索（向量 + BM25）+ 重排序，精准匹配校园通知和个人数据
-- **多用户隔离** — JWT 认证，每个用户独立的知识库和工作区
 - **个人知识库** — 用户私有数据的增删改查，支持按来源聚合展示
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
-- **管理面板** — 用户管理、知识库文档管理、系统状态监控（管理员专属）
 - **设置中心** — LLM API Key/Base URL 热更新、模型切换、Agent 工具开关
 
 ## 快速开始
@@ -151,16 +149,7 @@ npm run dev
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `JWT_SECRET` | JWT 签名密钥 | `ustc-campus-ai-secret-2026` |
 | `WORKSPACE_ROOT` | 文件工作区路径 | 项目根目录 `workspace/` |
-
-## 默认账户
-
-| 用户名 | 密码 | 角色 |
-|---|---|---|
-| `admin` | `admin123` | 管理员 |
-
-首次启动后端时自动创建。管理员登录后可访问"管理"面板（用户管理、知识库管理、系统状态）。
 
 ## 项目结构
 
@@ -171,7 +160,7 @@ USTC-107-let-ai-think-of-one/
 │   ├── __init__.py            #   应用工厂、路由注册、静态文件挂载
 │   ├── main.py                #   开发/调试入口（python server/main.py）
 │   ├── lifespan.py            #   启动/关闭生命周期（ChatService 初始化）
-│   ├── deps.py                #   依赖注入（JWT 认证、服务获取）
+│   ├── deps.py                #   依赖注入（本地用户标识）
 │   ├── routes/                #   路由模块
 │   │   ├── chat.py            #     SSE / WebSocket 流式对话
 │   │   ├── topics.py          #     话题 CRUD、历史、自动标题
@@ -181,7 +170,7 @@ USTC-107-let-ai-think-of-one/
 │   │   ├── sync.py            #     公共通知同步管理
 │   │   └── health.py          #     健康检查
 │   └── services/              #   业务逻辑层
-│       ├── auth_service.py    #     登录、注册、JWT 签发
+│       ├── auth_service.py    #     话题管理服务
 │       ├── chat_service.py    #     Agent 管理、对话执行
 │       ├── rag_service.py     #     RAG 检索、数据入库
 │       └── sync_service.py    #     客户端同步逻辑
@@ -210,7 +199,7 @@ USTC-107-let-ai-think-of-one/
 │   ├── query.py               #   检索接口（Agent 工具用）
 │   ├── query_engine.py        #   RAG 管线（向量/混合检索 + 重排序 + LLM）
 │   ├── ingest.py              #   运行时文档注入
-│   ├── auth.py                #   用户认证、话题 CRUD、工具偏好
+│   ├── auth.py                #   话题 CRUD、工具偏好
 │   ├── .env.example           #   嵌入配置模板
 │   └── README.md              #   RAG 模块文档
 ├── tools/                     # Agent 工具
@@ -226,9 +215,9 @@ USTC-107-let-ai-think-of-one/
 │       │       ├── AppLayout.tsx    #   侧边栏（菜单 + 话题列表）+ 顶栏
 │       │       └── SettingsModal.tsx #   LLM/工具 设置弹窗
 │       ├── services/
-│       │   └── api.ts              #   API 调用 + Axios JWT 拦截器
+│       │   └── api.ts              #   API 调用封装
 │       ├── stores/
-│       │   ├── userStore.ts         #   认证状态
+│       │   ├── userStore.ts         #   用户状态
 │       │   └── topicStore.ts        #   话题状态
 │       └── types/
 │           └── index.ts            #   TypeScript 类型定义
@@ -236,29 +225,21 @@ USTC-107-let-ai-think-of-one/
 ├── data/                      # 运行时数据（checkpoint DB，gitignore）
 ├── workspace/                 # 用户文件存储（gitignore）
 ├── chroma_db/                 # ChromaDB 向量数据库（gitignore）
-├── settings.example.json      # LLM 配置模板
-└── TEST_REPORT.md             # 测试报告
+└── settings.example.json      # LLM 配置模板
+
 ```
 
 ## API 总览
 
 ### 主服务（端口 8000）
 
-#### 认证（无需登录）
+#### 通用
 
 | Method | Path | 说明 |
 |---|---|---|
-| POST | `/api/auth/login` | 登录 |
-| POST | `/api/auth/register` | 注册 |
 | GET | `/api/health` | 健康检查 |
 
-#### 认证（需登录）
-
-| Method | Path | 说明 |
-|---|---|---|
-| PUT | `/api/auth/password` | 修改密码 |
-
-#### 话题（需登录）
+#### 话题
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -269,14 +250,14 @@ USTC-107-let-ai-think-of-one/
 | POST | `/api/topics/{id}/summarize` | 自动生成话题标题 |
 | GET | `/api/topics/{id}/history` | 获取话题对话历史 |
 
-#### 对话（需登录）
+#### 对话
 
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`） |
-| WS | `/ws/chat?token=<jwt>` | WebSocket 流式对话 |
+| WS | `/ws/chat` | WebSocket 流式对话 |
 
-#### 个人知识库（需登录）
+#### 个人知识库
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -285,14 +266,14 @@ USTC-107-let-ai-think-of-one/
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 
-#### 搜索（需登录）
+#### 搜索
 
 | Method | Path | 说明 |
 |---|---|---|
 | GET | `/api/search/notices?q=` | 搜索公共通知 |
 | GET | `/api/search/my-data?q=` | 搜索个人数据 |
 
-#### 设置（需登录）
+#### 设置
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -302,7 +283,7 @@ USTC-107-let-ai-think-of-one/
 | GET | `/api/settings/tools` | 获取工具开关状态 |
 | PUT | `/api/settings/tools` | 更新工具开关 |
 
-#### 同步（需登录）
+#### 同步
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -343,22 +324,14 @@ pytest tests/ -v
 # 1. 健康检查
 curl http://localhost:8000/api/health
 
-# 2. 登录
-curl -X POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123"}'
+# 2. 搜索
+curl "http://localhost:8000/api/search/notices?q=讲座"
 
-# 3. 搜索（用返回的 token 替换）
-curl "http://localhost:8000/api/search/notices?q=讲座" \
-  -H "Authorization: Bearer <token>"
+# 3. 个人知识库
+curl "http://localhost:8000/api/personal-data"
 
-# 4. 个人知识库
-curl "http://localhost:8000/api/personal-data" \
-  -H "Authorization: Bearer <token>"
-
-# 5. 同步状态
-curl "http://localhost:8000/api/sync/status" \
-  -H "Authorization: Bearer <token>"
+# 4. 同步状态
+curl "http://localhost:8000/api/sync/status"
 ```
 
 ### 前端测试
@@ -376,16 +349,11 @@ npm run build       # 生产构建
 3. （可选）启动 Sync Server：`cd sync_server && python main.py`
 4. 启动前端：`cd frontend && npm run dev`
 5. 浏览器打开 `http://localhost:3000`
-6. 用 `admin` / `admin123` 登录
-7. 创建话题：侧边栏点击 + 按钮
-8. 测试对话：发送"有什么暑期学校的活动？"
-9. 测试个人知识库：侧边栏"个人数据" → 添加/编辑/删除
-10. 测试同步：侧边栏"同步" → 查看状态 → 触发同步
-11. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
-
-### 测试报告
-
-详细测试记录见 [TEST_REPORT.md](./TEST_REPORT.md)。
+6. 创建话题：侧边栏点击 + 按钮
+7. 测试对话：发送"有什么暑期学校的活动？"
+8. 测试个人知识库：侧边栏"个人数据" → 添加/编辑/删除
+9. 测试同步：侧边栏"同步" → 查看状态 → 触发同步
+10. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
 
 ## 已知注意事项
 
@@ -396,7 +364,7 @@ npm run build       # 生产构建
 - **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致 Ollama 连接 502，`llm_factory.py` 已内置清除逻辑
 - **ChromaDB 持久化**：向量数据存储在项目根目录的 `chroma_db/`，删除后重启服务会自动从 `data/` 重新索引
 - **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
-- **工具偏好**：每个用户可独立启/禁用 Agent 工具，偏好存储在 `users.db` 中，通过设置面板管理
+- **工具偏好**：每个话题可独立启/禁用 Agent 工具，偏好通过设置面板管理
 
 ## 未来规划
 
