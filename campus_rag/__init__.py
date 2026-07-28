@@ -1,3 +1,8 @@
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from .query import search_notices, search_user_data, add_user_data, add_user_files, list_user_data, delete_user_data
 from .query import search_notices_answer, search_user_data_answer
 from .query import search_all, add_public_activity, add_user_activity

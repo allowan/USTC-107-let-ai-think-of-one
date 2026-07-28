@@ -77,8 +77,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    # 直接传入 app 对象而非 "main:app" 字符串，避免 sys.path.insert(0, ..)
+    # 导致 Python 解析到项目根目录的 main.py（不含 app 变量）
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=8001,
         reload=False,

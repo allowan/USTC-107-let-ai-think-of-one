@@ -1,19 +1,17 @@
-import urllib.error
-import urllib.request
+import httpx
 from langchain.tools import tool
 
 @tool("web_search")
 def fetch_text_from_url(url: str) -> str:
-    """Fetch the document from a URL.
-    """
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; quickstart-research/1.0)"},
-    )
+    """Fetch the document from a URL."""
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = resp.read()
-    except urllib.error.URLError as e:
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; quickstart-research/1.0)"},
+            timeout=120.0,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.text
+    except httpx.HTTPError as e:
         return f"Fetch failed: {e}"
-    text = raw.decode("utf-8", errors="replace")
-    return text

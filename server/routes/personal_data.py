@@ -24,16 +24,17 @@ async def get_personal_data(
     seen: dict[str, dict] = {}
     for i in range(len(ids)):
         source = metadatas[i].get("source", "手动输入") if i < len(metadatas) else "手动输入"
+        text = documents[i] if i < len(documents) else ""
         if source not in seen:
             seen[source] = {
                 "source": source,
                 "preview": previews[i] if i < len(previews) else "",
-                "full_content": documents[i] if i < len(documents) else "",
-                "chunks": 0,
+                "full_content": text,
+                "chunks": 1,
             }
-        seen[source]["chunks"] += 1
-        if i < len(documents) and i > 0 and metadatas[i].get("source", "") == source:
-            seen[source]["full_content"] += "\n" + documents[i]
+        else:
+            seen[source]["full_content"] += "\n" + text
+            seen[source]["chunks"] += 1
 
     return {"items": list(seen.values())}
 

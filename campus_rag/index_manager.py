@@ -27,6 +27,8 @@ def _user_collection_name(user_id: str) -> str:
 
 class RAGSystem:
     def __init__(self, persist_dir="./chroma_db"):
+        from .config import init_embed
+        init_embed()
         self.chroma_client = _get_chroma_client(persist_dir)
 
     # ── 公共数据（官方通知）──────────────────────────────────────

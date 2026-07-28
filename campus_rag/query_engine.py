@@ -1,5 +1,4 @@
 # query_engine.py
-import os
 from typing import List, Optional
 from llama_index.core import VectorStoreIndex
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -7,55 +6,62 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.core.prompts import PromptTemplate
 from FlagEmbedding import FlagReranker
 
-from .keyword_retriever import BM25Retriever
 from . import config
 
 _reranker = None
 _reranker_available = True
-_reranker_use_fp16 = True
 
-# Cached retrievers — rebuilt only when underlying data changes
-_bm25_cache: dict[str, BM25Retriever] = {}
-_bm25_mtime_cache: dict[str, float] = {}
-_retriever_cache: dict[int, VectorIndexRetriever] = {}
+_retriever_cache: dict[tuple, VectorIndexRetriever] = {}
+_bm25_cache: dict[str, object] = {}
 
 
-def _get_reranker(use_fp16: bool = True):
-    global _reranker, _reranker_available, _reranker_use_fp16
-    if _reranker is not None and _reranker_available and _reranker_use_fp16 == use_fp16:
+def _get_reranker():
+    global _reranker, _reranker_available
+    if _reranker is not None and _reranker_available:
         return _reranker
     if not _reranker_available:
         return None
     try:
-        _reranker = FlagReranker("BAAI/bge-reranker-base", use_fp16=use_fp16)
-        _reranker_use_fp16 = use_fp16
+        _reranker = FlagReranker("BAAI/bge-reranker-base", use_fp16=False)
     except Exception:
         _reranker_available = False
         _reranker = None
     return _reranker
 
 
-def _get_bm25_cached(data_dir: str) -> BM25Retriever:
-    """Return a cached BM25Retriever, rebuilding only if .txt files changed."""
+def _get_bm25_prefilter(data_dir: str):
+    """Return a cached BM25 retriever over chunked documents (same granularity as vector index)."""
+    import os
+    if data_dir in _bm25_cache:
+        cached_mtime, cached_bm25 = _bm25_cache[data_dir]
+        current_mtime = 0.0
+        if os.path.isdir(data_dir):
+            for fname in os.listdir(data_dir):
+                if fname.endswith(".txt"):
+                    try:
+                        current_mtime = max(current_mtime, os.path.getmtime(os.path.join(data_dir, fname)))
+                    except OSError:
+                        pass
+        if current_mtime == cached_mtime:
+            return cached_bm25
+    from .keyword_retriever import BM25Retriever
+    bm25 = BM25Retriever(data_dir)
+    import os as _os
     mtime = 0.0
-    if os.path.isdir(data_dir):
-        for fname in os.listdir(data_dir):
+    if _os.path.isdir(data_dir):
+        for fname in _os.listdir(data_dir):
             if fname.endswith(".txt"):
                 try:
-                    mtime = max(mtime, os.path.getmtime(os.path.join(data_dir, fname)))
+                    mtime = max(mtime, _os.path.getmtime(_os.path.join(data_dir, fname)))
                 except OSError:
                     pass
-    if data_dir in _bm25_cache and _bm25_mtime_cache.get(data_dir) == mtime:
-        return _bm25_cache[data_dir]
-    bm25 = BM25Retriever(data_dir)
-    _bm25_cache[data_dir] = bm25
-    _bm25_mtime_cache[data_dir] = mtime
+    _bm25_cache[data_dir] = (mtime, bm25)
     return bm25
 
 
 def _get_cached_retriever(index: VectorStoreIndex, top_k: int) -> VectorIndexRetriever:
-    """Cache retrievers by index id + top_k to avoid recreating on every call."""
-    key = hash((id(index), top_k))
+    """Cache retrievers by index_id + top_k to avoid recreating on every call."""
+    key = (index.index_id, top_k)
     if key not in _retriever_cache:
         _retriever_cache[key] = VectorIndexRetriever(index=index, similarity_top_k=top_k)
     return _retriever_cache[key]
@@ -106,10 +112,10 @@ def get_rag_response(
     query: str,
     public_index: Optional[VectorStoreIndex] = None,
     user_index: Optional[VectorStoreIndex] = None,
-    top_k: int = 20,
+    top_k: int = 10,
     rerank: bool = True,
+    data_dir: str = None,
 ) -> str:
-    """向量检索 + 重排序 + LLM 生成回答。"""
     all_nodes: List[NodeWithScore] = []
 
     if public_index is not None:
@@ -124,6 +130,24 @@ def get_rag_response(
         return "未找到相关信息。"
 
     unique_nodes = _dedup_nodes(all_nodes)
+
+    # BM25 pre-filter: keep only nodes whose text overlaps with BM25 top hits
+    if data_dir is not None and len(unique_nodes) > 10:
+        try:
+            bm25 = _get_bm25_prefilter(data_dir)
+            bm25_nodes = bm25.retrieve(query, top_k=max(10, top_k))
+            bm25_texts = {n.node.text for n in bm25_nodes}
+            # Score boost for nodes that match both BM25 and vector search
+            filtered = []
+            for node in unique_nodes:
+                if node.node.text in bm25_texts:
+                    node.score = (node.score or 0) * 1.2  # boost BM25 matches
+                    filtered.append(node)
+            if len(filtered) >= 3:
+                unique_nodes = filtered
+        except Exception:
+            pass
+
     if rerank and len(unique_nodes) > 1:
         final_nodes = rerank_nodes(query, unique_nodes, top_n=10)
     else:
@@ -169,9 +193,8 @@ def get_rag_response_hybrid(
         for node in final_nodes
     ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
+    config.init_llm()
     llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")
-
-
