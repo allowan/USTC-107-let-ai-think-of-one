@@ -1,5 +1,6 @@
 import aiosqlite
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from langchain.agents import create_agent
 from langchain.tools import tool
@@ -8,6 +9,13 @@ from tools.search import fetch_text_from_url
 from campus_rag import search_notices_answer, search_user_data_answer, add_user_data
 from llama_index.core import Document
 import model.config as config
+
+@dataclass
+class AgentContext:
+    agent: object
+    conn: object
+    username: str = ""
+
 
 logger = logging.getLogger("agent")
 
@@ -73,7 +81,7 @@ def _make_add_personal_data(username: str):
     def add_personal_data(content: str) -> str:
         """将文本内容添加到用户的个人知识库中。用户说"帮我记录""保存一下""添加到我的数据"时使用此工具。"""
         try:
-            doc = Document(text=content)
+            doc = Document(text=content, metadata={"source": "手动输入"})
             add_user_data(username, [doc])
             return f"已添加个人数据（{len(content)} 字）"
         except Exception as e:
@@ -146,7 +154,7 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
     return [all_tools[n] for n in names]
 
 
-async def build_agent(username: str = "", enabled_tool_names: list[str] | None = None):
+async def build_agent(username: str = "", enabled_tool_names: list[str] | None = None) -> AgentContext:
     """Create an Agent instance. Tools requiring user context are created via closure
     when *username* is provided."""
     global _SINGLETON_CONN
@@ -163,20 +171,18 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
         system_prompt=SYSTEM_PROMPT,
         checkpointer=checkpointer,
     )
-    agent._checkpointer_conn = conn
+    ctx = AgentContext(agent=agent, conn=conn, username=username)
 
     if not username and enabled_tool_names is None:
         _SINGLETON_CONN = conn
-    return agent
+    return ctx
 
 
-async def close_agent(agent=None):
+async def close_agent(ctx: AgentContext | None = None):
     """Close an agent's checkpoint connection. Without arguments, closes the singleton."""
     global _SINGLETON_CONN
-    if agent is not None:
-        conn = getattr(agent, '_checkpointer_conn', None)
-        if conn is not None:
-            await conn.close()
+    if ctx is not None:
+        await ctx.conn.close()
         return
     if _SINGLETON_CONN is not None:
         await _SINGLETON_CONN.close()
@@ -185,8 +191,8 @@ async def close_agent(agent=None):
 
 async def run_agent(content: str, thread_id: str = "default") -> str:
     """Convenience: run a single-turn agent invocation and return the final reply."""
-    agent = await build_agent()
-    result = await agent.ainvoke(
+    ctx = await build_agent()
+    result = await ctx.agent.ainvoke(
         {"messages": [{"role": "user", "content": content}]},
         config={"configurable": {"thread_id": thread_id}},
     )
@@ -218,11 +224,6 @@ async def get_history(thread_id: str, conn=None) -> list:
         if own_conn:
             await conn.close()
     return []
-
-
-def _checkpointer_conn_for(agent_instance):
-    """Get the checkpointer connection from an agent instance."""
-    return getattr(agent_instance, '_checkpointer_conn', None)
 
 
 if __name__ == "__main__":

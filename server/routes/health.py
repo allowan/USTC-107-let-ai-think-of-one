@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 @router.get("/api/health")
 async def health(chat: ChatService = Depends(get_chat_service)):
-    agent = await chat._get_agent()
-    checks = {"agent": agent is not None}
+    ctx = await chat._get_agent()
+    checks = {"agent": ctx.agent is not None}
 
     try:
         from model.config import init_chat

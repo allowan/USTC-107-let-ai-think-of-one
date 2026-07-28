@@ -14,7 +14,7 @@ async def sync_status(
     sync: SyncService = Depends(get_sync_service),
 ):
     local_version = sync._get_local_version()
-    remote_version = sync.check_remote_version()
+    remote_version = await sync.check_remote_version()
     return {
         "local_version": local_version,
         "remote_version": remote_version,
@@ -28,5 +28,5 @@ async def sync_now(
     user: str = Depends(get_user),
     sync: SyncService = Depends(get_sync_service),
 ):
-    result = sync.sync()
+    result = await sync.sync()
     return result

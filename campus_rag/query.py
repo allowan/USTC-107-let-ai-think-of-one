@@ -31,15 +31,9 @@ def _init():
 
 
 def _ensure_init():
-    """确保 RAG 已初始化，若底层 ChromaDB 被删除则自动重建。"""
+    """确保 RAG 已初始化。ChromaDB 恢复由 get_public_index 内部处理。"""
     global _rag, _public_retriever
     if _rag is None:
-        return _init()
-    try:
-        _rag.chroma_client.list_collections()
-    except Exception:
-        logger.warning("ChromaDB connection lost, reinitializing RAG...")
-        _reset()
         return _init()
     return True
 
@@ -80,7 +74,7 @@ def search_notices_answer(query: str) -> str:
     _ensure_init()
     pub_idx = _rag.get_public_index()
     from .query_engine import get_rag_response
-    return get_rag_response(query, public_index=pub_idx)
+    return get_rag_response(query, public_index=pub_idx, data_dir=str(_base / "data"))
 
 
 def search_user_data_answer(query: str, user_id: str) -> str:

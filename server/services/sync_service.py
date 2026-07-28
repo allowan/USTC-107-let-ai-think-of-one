@@ -4,9 +4,9 @@ Sync service: pulls public notices from sync_server, updates local ChromaDB.
 
 import json
 import logging
-import urllib.request
-import urllib.error
 from pathlib import Path
+
+import httpx
 
 logger = logging.getLogger("server")
 
@@ -35,22 +35,23 @@ class SyncService:
             json.dump({"version": version}, f)
 
     @staticmethod
-    def _fetch(url: str) -> dict | None:
+    async def _fetch(url: str) -> dict | None:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "USTC-Campus-Client/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return json.loads(resp.read().decode())
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, headers={"User-Agent": "USTC-Campus-Client/1.0"})
+                resp.raise_for_status()
+                return resp.json()
         except Exception as e:
             logger.warning("Sync fetch failed: %s — %s", url, e)
             return None
 
-    def check_remote_version(self) -> int:
-        data = self._fetch(f"{SYNC_SERVER_URL}/api/sync/version")
+    async def check_remote_version(self) -> int:
+        data = await self._fetch(f"{SYNC_SERVER_URL}/api/sync/version")
         return data["version"] if data else -1
 
-    def sync(self, force_full: bool = False) -> dict:
+    async def sync(self, force_full: bool = False) -> dict:
         """Run sync. Returns dict with status and details."""
-        remote_version = self.check_remote_version()
+        remote_version = await self.check_remote_version()
         if remote_version < 0:
             return {"status": "error", "message": "无法连接到同步服务器"}
 
@@ -64,7 +65,7 @@ class SyncService:
 
         # Try incremental first
         if local_version > 0 and not force_full:
-            changes = self._fetch(
+            changes = await self._fetch(
                 f"{SYNC_SERVER_URL}/api/sync/changes?since={local_version}"
             )
             if changes and changes.get("version", 0) > local_version:
@@ -79,7 +80,7 @@ class SyncService:
                 }
 
         # Fallback: full sync
-        full = self._fetch(f"{SYNC_SERVER_URL}/api/sync/full")
+        full = await self._fetch(f"{SYNC_SERVER_URL}/api/sync/full")
         if not full:
             return {"status": "error", "message": "全量同步失败"}
 

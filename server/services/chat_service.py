@@ -16,8 +16,9 @@ class ChatService:
     """Manages agent instances and provides streaming chat."""
 
     def __init__(self):
-        self._default_agent = None
-        self._user_agents: dict[str, object] = {}
+        self._default_agent = None  # AgentContext
+        self._user_agents: dict[str, object] = {}  # username -> AgentContext
+        self._pending_closes: set[asyncio.Task] = set()
 
     async def initialize(self):
         from main import build_agent
@@ -27,6 +28,9 @@ class ChatService:
     async def shutdown(self):
         from main import close_agent
         self._clear_agent_cache()
+        # Wait for all pending connection closes
+        if self._pending_closes:
+            await asyncio.gather(*self._pending_closes, return_exceptions=True)
         await close_agent()
         logger.info("ChatService shut down")
 
@@ -37,9 +41,9 @@ class ChatService:
             from campus_rag.auth import get_enabled_tool_names
             from main import build_agent
             enabled = get_enabled_tool_names(username)
-            agent = await build_agent(username=username, enabled_tool_names=enabled)
-            self._user_agents[username] = agent
-            return agent
+            ctx = await build_agent(username=username, enabled_tool_names=enabled)
+            self._user_agents[username] = ctx
+            return ctx
         if self._default_agent is None:
             from main import build_agent
             self._default_agent = await build_agent()
@@ -47,10 +51,10 @@ class ChatService:
 
     def invalidate_user_agent(self, username: str):
         old = self._user_agents.pop(username, None)
-        if old is not None:
-            conn = getattr(old, '_checkpointer_conn', None)
-            if conn is not None:
-                asyncio.create_task(self._close_conn(conn))
+        if old is not None and old.conn is not None:
+            task = asyncio.create_task(self._close_conn(old.conn))
+            self._pending_closes.add(task)
+            task.add_done_callback(self._pending_closes.discard)
 
     def _clear_agent_cache(self):
         for username in list(self._user_agents.keys()):
@@ -71,11 +75,10 @@ class ChatService:
         import aiosqlite
         # Try to use an existing agent's connection first
         conn = None
-        for ag in [self._default_agent] + list(self._user_agents.values()):
-            if ag is not None:
-                conn = getattr(ag, '_checkpointer_conn', None)
-                if conn is not None:
-                    break
+        for ctx in [self._default_agent] + list(self._user_agents.values()):
+            if ctx is not None and ctx.conn is not None:
+                conn = ctx.conn
+                break
         own = conn is None
         if own:
             db_path = ROOT / "data" / "agent_checkpoints.db"
@@ -99,13 +102,13 @@ class ChatService:
         """Async generator yielding SSE-style (event_type, data) tuples."""
         from langchain_core.messages import AIMessageChunk
 
-        agent_instance = await self._get_agent(username)
+        ctx = await self._get_agent(username)
         thread_id = self._thread_id(username, topic_id)
 
         seen_tool_names: set[str] = set()
         yield ("thinking", "")
 
-        async for msg_chunk, _metadata in agent_instance.astream(
+        async for msg_chunk, _metadata in ctx.agent.astream(
             {"messages": [{"role": "user", "content": content}]},
             {"configurable": {"thread_id": thread_id}},
             stream_mode="messages",
@@ -167,12 +170,12 @@ class ChatService:
         """Send streaming tokens + tool_use events over a WebSocket."""
         from langchain_core.messages import AIMessageChunk
 
-        agent_instance = await self._get_agent(username)
+        ctx = await self._get_agent(username)
         thread_id = self._thread_id(username, topic_id)
         seen_tool_names: set[str] = set()
 
         await ws.send_json({"type": "thinking", "content": ""})
-        async for msg_chunk, _metadata in agent_instance.astream(
+        async for msg_chunk, _metadata in ctx.agent.astream(
             {"messages": [{"role": "user", "content": content}]},
             {"configurable": {"thread_id": thread_id}},
             stream_mode="messages",

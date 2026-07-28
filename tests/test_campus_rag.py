@@ -1,7 +1,7 @@
 """campus_rag 全功能测试
 
 覆盖模块：auth, data_loader, keyword_retriever, index_manager,
-         ingest, query, query_engine
+         query, query_engine
 
 用法：
     python test_campus_rag.py               # 运行全部测试
@@ -209,7 +209,6 @@ class TestBM25Retriever(unittest.TestCase):
         bm25 = BM25Retriever(self.tmpdir)
         results = bm25.retrieve("暑假有什么活动", top_k=3)
         self.assertGreater(len(results), 0, "应能检索到结果")
-        # 第一条应最相关（暑期学校）
         self.assertIn("暑期", results[0].node.text)
 
     def test_02_retrieve_competition(self):
@@ -241,6 +240,20 @@ class TestBM25Retriever(unittest.TestCase):
         with patch.dict(sys.modules, {"jieba": None}):
             tokens = _tokenize("2026年暑期学校")
             self.assertGreater(len(tokens), 1, "至少分成多个 token")
+
+    def test_06_from_nodes(self):
+        """通过 from_nodes 创建 BM25 索引，匹配向量检索粒度。"""
+        from campus_rag.keyword_retriever import BM25Retriever
+        from llama_index.core.schema import TextNode
+        nodes = [
+            TextNode(text="操作系统 周三3-4节 3A201"),
+            TextNode(text="数据库 周五1-2节 线上"),
+            TextNode(text="深度学习入门笔记"),
+        ]
+        bm25 = BM25Retriever.from_nodes(nodes)
+        results = bm25.retrieve("操作系统课程", top_k=3)
+        self.assertGreater(len(results), 0)
+        self.assertIn("操作系统", results[0].node.text)
 
 
 # ── index_manager ────────────────────────────────────────────────────
@@ -301,13 +314,13 @@ class TestRAGSystem(unittest.TestCase):
         self.assertIsNotNone(idx)
 
 
-# ── ingest ───────────────────────────────────────────────────────────
+# ── ingest / data management ─────────────────────────────────────────
 
 
-class TestIngest(unittest.TestCase):
-    """动态入库（不依赖 embedding 的部分单独测；依赖的在后面）。"""
+class TestDataManagement(unittest.TestCase):
+    """数据入库（不依赖 embedding 的部分）。"""
 
-    TEST_USER = "test_ingest_runner"
+    TEST_USER = "test_data_runner"
 
     @classmethod
     def tearDownClass(cls):
@@ -317,17 +330,12 @@ class TestIngest(unittest.TestCase):
         except Exception:
             pass
 
-    def test_01_add_public_without_admin_fails(self):
-        from campus_rag import add_public_activity
-        with self.assertRaises(PermissionError):
-            add_public_activity("未授权的通知", admin_check=False)
-
-    def test_02_add_user_files_not_exist(self):
+    def test_01_add_user_files_not_exist(self):
         from campus_rag import add_user_files
         with self.assertRaises(FileNotFoundError):
             add_user_files(self.TEST_USER, "/nonexistent/path/file.txt")
 
-    def test_03_add_user_files_non_txt(self):
+    def test_02_add_user_files_non_txt(self):
         from campus_rag import add_user_files
         tmpdir = tempfile.mkdtemp()
         try:
@@ -339,12 +347,37 @@ class TestIngest(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_03_add_user_data_and_list(self):
+        from campus_rag import add_user_data, list_user_data
+        from llama_index.core import Document
+        uid = "test_list_user"
+        doc = Document(text="算法竞赛 7月15日线上", metadata={"source": "竞赛提醒"})
+        add_user_data(uid, [doc])
+        try:
+            result = list_user_data(uid)
+            self.assertIn("documents", result)
+            self.assertGreater(len(result.get("documents") or []), 0)
+        finally:
+            from campus_rag.index_manager import RAGSystem
+            RAGSystem().clear_user_index(uid)
+
+    def test_04_delete_user_data(self):
+        from campus_rag import add_user_data, delete_user_data, list_user_data
+        from llama_index.core import Document
+        uid = "test_delete_user"
+        doc = Document(text="待删除的测试数据。", metadata={"source": "delete_test"})
+        add_user_data(uid, [doc])
+        count = delete_user_data(uid, "delete_test")
+        self.assertGreater(count, 0, "应至少删除一条数据")
+        result = list_user_data(uid)
+        self.assertEqual(len(result.get("documents") or []), 0)
+
 
 @unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
-class TestIngestWithEmbedding(unittest.TestCase):
+class TestDataManagementWithEmbedding(unittest.TestCase):
     """入库 + 检索联动测试（需要 embedding）。"""
 
-    TEST_USER = "test_ingest_embed_runner"
+    TEST_USER = "test_embed_runner"
 
     @classmethod
     def tearDownClass(cls):
@@ -354,16 +387,20 @@ class TestIngestWithEmbedding(unittest.TestCase):
         except Exception:
             pass
 
-    def test_01_add_user_activity_and_retrieve(self):
-        from campus_rag import add_user_activity, search_user_data
-        add_user_activity(self.TEST_USER, "【算法竞赛】7月15日将在线上举办编程比赛，欢迎参加。")
+    def test_01_add_user_data_and_retrieve(self):
+        from campus_rag import add_user_data, search_user_data
+        from llama_index.core import Document
+        doc = Document(
+            text="【算法竞赛】7月15日将在线上举办编程比赛，欢迎参加。",
+            metadata={"source": "竞赛通知"},
+        )
+        add_user_data(self.TEST_USER, [doc])
         result = search_user_data("编程比赛", user_id=self.TEST_USER)
         self.assertIsInstance(result, str)
         self.assertNotIn("未在个人数据中找到", result, "应能检索到刚入库的内容")
 
     def test_02_add_user_files_from_dir(self):
-        from campus_rag import add_user_files
-        from campus_rag import search_user_data
+        from campus_rag import add_user_files, search_user_data
         tmpdir = tempfile.mkdtemp()
         try:
             with open(os.path.join(tmpdir, "课表.txt"), "w", encoding="utf-8") as f:
@@ -376,8 +413,7 @@ class TestIngestWithEmbedding(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_03_add_user_files_single_file(self):
-        from campus_rag import add_user_files
-        from campus_rag import search_user_data
+        from campus_rag import add_user_files, search_user_data
         tmpdir = tempfile.mkdtemp()
         try:
             fp = os.path.join(tmpdir, "笔记.txt")
@@ -396,7 +432,7 @@ class TestIngestWithEmbedding(unittest.TestCase):
 
 @unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
 class TestQuery(unittest.TestCase):
-    """检索接口：search_notices / search_user_data / search_all。"""
+    """检索接口：search_notices / search_user_data。"""
 
     def test_01_search_notices_returns_string(self):
         from campus_rag import search_notices
@@ -409,31 +445,22 @@ class TestQuery(unittest.TestCase):
         result = search_notices("C9暑期学校")
         self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
 
-    def test_03_search_notices_no_match(self):
+    def test_03_search_notices_no_match_format(self):
         from campus_rag import search_notices
         result = search_notices("火星移民计划")
         self.assertIsInstance(result, str)
-        # 向量检索始终返回最近似的 top_k 条结果，不会返回空列表，
-        # 这里只验证返回格式正确且不含无意义的空内容
-        self.assertNotIn("来源: 未知来源", result, "每条结果应有明确的来源文件名")
+        self.assertNotIn("来源: 未知来源", result)
 
-    def test_04_search_all_returns_labeled(self):
-        from campus_rag import search_all
-        result = search_all("比赛", user_id="test_query_runner")
-        self.assertIsInstance(result, str)
-        # 至少应有官方通知的结果
-        self.assertIn("官方通知", result)
-
-    def test_05_search_user_data_empty(self):
+    def test_04_search_user_data_empty(self):
         from campus_rag import search_user_data
         result = search_user_data("什么数据", user_id="test_query_empty_user")
         self.assertIn("未在个人数据中找到", result)
 
-    def test_06_search_user_data_with_content(self):
+    def test_05_search_user_data_with_content(self):
         from campus_rag import add_user_data, search_user_data
         from llama_index.core import Document
         uid = "test_query_user"
-        doc = Document(text="Python高级编程技巧：装饰器与元类详解。")
+        doc = Document(text="Python高级编程技巧：装饰器与元类详解。", metadata={"source": "notes"})
         add_user_data(uid, [doc])
         try:
             result = search_user_data("Python装饰器", user_id=uid)
@@ -486,21 +513,12 @@ class TestQueryEngine(unittest.TestCase):
         self.assertIsInstance(answer, str)
         self.assertTrue(len(answer) > 0, "应返回非空回答")
 
-    def test_02_get_rag_response_hybrid(self):
-        from campus_rag import RAGSystem, get_rag_response_hybrid
-        rag = RAGSystem(persist_dir=self.CHROMA_DIR)
-        pub_idx = rag.get_public_index()
-        answer = get_rag_response_hybrid("比赛", pub_idx, data_dir=self.DATA_DIR)
-        self.assertIsInstance(answer, str)
-        self.assertTrue(len(answer) > 0)
-
-    def test_03_no_match_graceful(self):
+    def test_02_no_match_graceful(self):
         from campus_rag import RAGSystem, get_rag_response
         rag = RAGSystem(persist_dir=self.CHROMA_DIR)
         pub_idx = rag.get_public_index()
         answer = get_rag_response("火星移民计划详细方案", pub_idx)
         self.assertIsInstance(answer, str)
-        # 理应回复"未找到"或说明信息不足
         self.assertTrue(
             "未找" in answer or "不足" in answer or "没有" in answer or "无法" in answer,
             f"无匹配时应诚实回复，实际返回: {answer[:100]}",
@@ -517,31 +535,25 @@ class TestPublicAPI(unittest.TestCase):
         from campus_rag import (
             search_notices,
             search_user_data,
-            search_all,
+            search_notices_answer,
+            search_user_data_answer,
             add_user_data,
             add_user_files,
-            authenticate,
-            register_user,
-            list_users,
-            add_public_activity,
-            add_user_activity,
+            list_user_data,
+            delete_user_data,
             get_rag_response,
-            get_rag_response_hybrid,
             rerank_nodes,
             RAGSystem,
         )
         self.assertTrue(callable(search_notices))
         self.assertTrue(callable(search_user_data))
-        self.assertTrue(callable(search_all))
+        self.assertTrue(callable(search_notices_answer))
+        self.assertTrue(callable(search_user_data_answer))
         self.assertTrue(callable(add_user_data))
         self.assertTrue(callable(add_user_files))
-        self.assertTrue(callable(authenticate))
-        self.assertTrue(callable(register_user))
-        self.assertTrue(callable(list_users))
-        self.assertTrue(callable(add_public_activity))
-        self.assertTrue(callable(add_user_activity))
+        self.assertTrue(callable(list_user_data))
+        self.assertTrue(callable(delete_user_data))
         self.assertTrue(callable(get_rag_response))
-        self.assertTrue(callable(get_rag_response_hybrid))
         self.assertTrue(callable(rerank_nodes))
         self.assertIsNotNone(RAGSystem)
 
@@ -562,7 +574,7 @@ if __name__ == "__main__":
         print("[OK] LLM 服务可用 → 将运行 LLM 生成测试")
     else:
         print(f"[SKIP] LLM 服务不可用 → {_last_llm_error}")
-        print("       请确认: 1) Ollama 已启动  2) llama3.1:8b 已拉取")
+        print("       请确认: 1) settings.json 已配置")
     print("=" * 60)
     print()
     unittest.main(verbosity=2)

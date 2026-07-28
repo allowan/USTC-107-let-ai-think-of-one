@@ -21,6 +21,7 @@ dependencies = [
     "rank-bm25",
     "FlagEmbedding",
     "jieba",
+    "httpx>=0.27.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "python-jose[cryptography]>=3.3.0",
