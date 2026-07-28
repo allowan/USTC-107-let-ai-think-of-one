@@ -91,6 +91,39 @@ def search_user_data_answer(query: str, user_id: str) -> str:
     return get_rag_response(query, user_index=user_idx)
 
 
+def search_all(query: str, user_id: str) -> str:
+    """同时检索官方通知和个人数据，返回带标签的合并结果。"""
+    _ensure_init()
+    public_result = _format_nodes(
+        _public_retriever.retrieve(query),
+        "未在通知中找到相关信息。",
+    )
+    user_retriever = _get_user_retriever(user_id)
+    user_result = _format_nodes(
+        user_retriever.retrieve(query),
+        "未在个人数据中找到相关信息。",
+    )
+    return f"=== 官方通知 ===\n{public_result}\n\n=== 个人数据 ===\n{user_result}"
+
+
+def add_public_activity(text: str, admin_check: bool = True) -> None:
+    """管理员添加公共通知。admin_check=False 时抛出 PermissionError。"""
+    if not admin_check:
+        raise PermissionError("无权添加公共通知")
+    _ensure_init()
+    doc = Document(text=text, metadata={"source": "manual"})
+    _rag.add_documents_to_public([doc])
+    global _public_retriever
+    _public_retriever = None
+    pub_idx = _rag.get_public_index()
+    _public_retriever = pub_idx.as_retriever(similarity_top_k=10)
+
+
+def add_user_activity(user_id: str, content: str) -> None:
+    """向用户个人知识库添加纯文本活动记录。"""
+    doc = Document(text=content, metadata={"source": "manual"})
+    add_user_data(user_id, [doc])
+
 
 def add_user_data(user_id: str, documents: list):
     """向用户个人索引添加文档（llama_index Document 列表）。"""

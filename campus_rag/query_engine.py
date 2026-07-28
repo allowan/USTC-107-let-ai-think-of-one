@@ -95,7 +95,8 @@ def _dedup_nodes(nodes: List[NodeWithScore]) -> List[NodeWithScore]:
 QA_PROMPT = PromptTemplate(
     "你是一个校园助手。请根据下面的参考资料回答用户问题。\n"
     "如果资料中包含多条相关信息，请用序号列出。\n"
-    "如果资料不足以回答问题，请如实说明。\n\n"
+    "如果资料不足以回答问题，请如实说明。\n"
+    "请在回答末尾列出各条信息的来源文件名或出处。\n\n"
     "参考资料：\n{context_str}\n\n"
     "用户问题：{query_str}\n\n你的回答："
 )
@@ -128,7 +129,45 @@ def get_rag_response(
     else:
         final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
 
-    context = "\n\n".join([node.node.text for node in final_nodes])
+    context = "\n\n".join([
+        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
+        for node in final_nodes
+    ])
+    prompt = QA_PROMPT.format(context_str=context, query_str=query)
+    llm = config.Settings.llm
+    from llama_index.core.llms import ChatMessage
+    response = llm.chat([ChatMessage(role="user", content=prompt)])
+    return str(response.message.content or "")
+
+
+def get_rag_response_hybrid(
+    query: str,
+    public_index: VectorStoreIndex,
+    data_dir: str,
+    top_k: int = 20,
+) -> str:
+    """向量检索 + BM25关键词检索 + 重排序 + LLM 生成回答。"""
+    all_nodes: List[NodeWithScore] = []
+
+    retriever = _get_cached_retriever(public_index, top_k)
+    all_nodes.extend(retriever.retrieve(query))
+
+    bm25 = _get_bm25_cached(data_dir)
+    all_nodes.extend(bm25.retrieve(query, top_k=top_k))
+
+    if not all_nodes:
+        return "未找到相关信息。"
+
+    unique_nodes = _dedup_nodes(all_nodes)
+    if len(unique_nodes) > 1:
+        final_nodes = rerank_nodes(query, unique_nodes, top_n=10)
+    else:
+        final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
+
+    context = "\n\n".join([
+        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
+        for node in final_nodes
+    ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
     llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
