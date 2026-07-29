@@ -9,6 +9,7 @@
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
+- **多跳推理** — Agent 内嵌多跳推理指南，面对复杂问题自动进行多轮检索：先做初次检索，从结果中提取关键线索（活动名称、部门名等）发起二次检索，反复直到信息完整，综合所有结果回答
 - **设置中心** — LLM API Key/Base URL 热更新、模型切换、Agent 工具开关
 
 **特殊说明**：之前做过用户功能但是删掉了，因为设置的客户端数据全在本地用户有点多余，而且数据保存在本地更加安全。
@@ -230,7 +231,20 @@ USTC-107-let-ai-think-of-one/
 
 ## campus_rag 模块详解
 
-首次运行时会自动下载重排序模型 `BAAI/bge-reranker-base`（约 1GB）。
+ **重排序模型部署说明**：项目使用 `BAAI/bge-reranker-base`（约 1GB）做交叉编码重排序。该模型**不会自动下载**——代码默认开启 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），需提前将模型下载到本地 HF 缓存，并将 `HF_HOME` 环境变量指向缓存目录：
+
+```bash
+# 下载模型到本地缓存（任选其一）
+export HF_HOME=/path/to/hf_cache        # 例如 E:\HFCache
+huggingface-cli download BAAI/bge-reranker-base
+
+# 或用 Python 下载
+python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
+AutoTokenizer.from_pretrained('BAAI/bge-reranker-base'); \
+AutoModelForSequenceClassification.from_pretrained('BAAI/bge-reranker-base')"
+```
+
+模型缺失时 `rerank_nodes` 会自动降级为按原始向量分数排序，不阻断检索。
 
 ### `config.py` — 全局配置
 
@@ -367,7 +381,7 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
   ├── 合并去重
-  ├── 重排序 (FlagEmbedding BGE-reranker)
+  ├── 重排序 (bge-reranker-base，AutoTokenizer + AutoModelForSequenceClassification)
   └── LLM 生成回答
 ```
 
@@ -568,6 +582,8 @@ npm run build       # 生产构建
 - **ChromaDB 持久化**：向量数据存储在项目根目录的 `chroma_db/`，删除后重启服务会自动从 `data/` 重新索引
 - **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
 - **工具偏好**：每个话题可独立启/禁用 Agent 工具，偏好通过设置面板管理
+- **重排序模型离线**：`campus_rag/query_engine.py` 默认开启 HF 离线模式，`bge-reranker-base` 需提前下载到 `HF_HOME` 指向的本地缓存（见上文「重排序模型部署说明」）。模型不可用时重排序自动降级为按原始分数排序
+- **DeepSeek `/beta` 端点**：DeepSeek V4 系列模型（`deepseek-v4-flash` / `deepseek-v4-pro`）需通过 `/beta` 路径访问。`llm_factory.py` 会在检测到 `api.deepseek.com` 且 `base_url` 未含 `/beta` 时自动补齐后缀，`settings.json` 中写 `https://api.deepseek.com` 即可，无需手动加 `/beta`
 
 ## 未来规划
 
@@ -581,7 +597,7 @@ npm run build       # 生产构建
 
 肯定强化不了A端模型的能力，下面是一些我们能做的
 
-* **多跳推理**：很多校园问题需要关联多篇文档甚至多种数据源。例如"我有一门课挂了，补考最早什么时候能申请，需要什么材料"，需要从管理规定、补考通知、该课程往年补考安排等多个文档中提取并组合信息。当前单次检索返回的片段很难覆盖全部上下文，LLM 容易遗漏关键条件或产生幻觉。
+* **多跳推理** — ✅ 已实现。Agent system prompt 内嵌多跳推理指南，面对复杂问题自动进行两轮以上检索：先用 `search_campus_notices` 初次检索，从结果中提取关键线索（活动名称、部门名）发起二次检索，也可用 `search_notices_raw` 查看原文判断信息完整性，综合所有结果后回答。相比之下直接使用 RAG 或 LLM 单次问答遗漏信息更少。
 * **个性化**：建立个人档案，在检索时根据个人特征重点检索，比如网安专业对于网安有关的通知应该更加重视
 * **可溯源**：我现在在每条通知的最后都放了原网址，但是ai的回答并不会给出，希望ai回答的时候给出源地址提高可信性和溯源
 

@@ -23,6 +23,11 @@ def get_llm():
         base_url = os.getenv("OPENAI_BASE_URL") or settings.get("base_url", "https://api.deepseek.com")
         model = os.getenv("OPENAI_MODEL") or "deepseek-chat"
 
+        # DeepSeek V4 模型挂在 /beta 端点下，settings.json 的 base_url 若未带该后缀
+        # 会 404。此处幂等地补上 /beta，使配置无论写不写后缀均可正常调用。
+        if "api.deepseek.com" in base_url and not base_url.rstrip("/").endswith("/beta"):
+            base_url = base_url.rstrip("/") + "/beta"
+
         import llama_index.llms.openai.utils as oai_utils
         import llama_index.llms.openai.base as oai_base
         _orig = oai_utils.openai_modelname_to_contextsize

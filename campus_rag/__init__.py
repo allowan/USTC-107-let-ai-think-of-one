@@ -1,3 +1,10 @@
+import os
+
+# Force offline mode for HuggingFace (models cached locally via HF mirror).
+# Must be set before any library imports to prevent network access.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 from pathlib import Path
 from dotenv import load_dotenv
 
