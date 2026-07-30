@@ -25,8 +25,10 @@ _MAX_CHECKPOINT_DB_MB = 200
 
 TOOL_METADATA = [
     {"name": "web_search", "label": "网络搜索", "description": "从URL获取网页文档内容"},
-    {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息"},
-    {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息"},
+    {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
+    {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
+    {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
+    {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
     {"name": "add_personal_data", "label": "添加个人数据", "description": "将文本内容添加到个人知识库，用于后续检索"},
 ]
 
@@ -34,7 +36,9 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 工具使用
 - 校园活动、比赛、课程、讲座、报名 → search_campus_notices
+- 需要查看通知原文或对比多条信息 → search_notices_raw
 - 用户个人课表、成绩、教务信息 → search_my_data
+- 需要查看个人数据原文或对比多条信息 → search_user_data_raw
 - 添加个人数据到知识库 → add_personal_data
 - 网页文档内容获取 → web_search
 
@@ -43,10 +47,14 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 回答规范
 1. 先在心里梳理检索到的信息要点，再用自己的话组织成自然的回答
-2. 严禁输出任何来源标记，包括但不限于：文件名（xxx.txt）、编号（[1]）、URL、分隔符
-3. 严禁使用"根据搜索结果""根据上下文""检索结果显示"等措辞
-4. 如果多条信息相关，直接综合叙述，不要逐条罗列
-5. 如果检索结果为空或完全无关，直接说"未找到相关信息"
+2. 在回答末尾列出信息来源（文件名或出处）
+3. 如果检索结果为空或完全无关，直接说"未找到相关信息"
+
+## 多跳推理指南
+1. 面对复杂问题时，先用 search_notices_raw 或 search_campus_notices 进行第一次检索
+2. 查看检索结果后，判断信息是否完整；如果不完整，从结果中提取关键线索（如具体活动名称、部门名称）进行第二次检索
+3. 可能需要多次检索不同关键词才能覆盖问题的所有方面
+4. 综合所有检索结果后给出完整回答
 """
 
 
@@ -54,12 +62,23 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 @tool
 def search_campus_notices(query: str) -> str:
-    """搜索校园官方通知，获取活动、比赛、课程、讲座、报名等公共信息。"""
+    """搜索校园官方通知，获取活动、比赛、课程、讲座、报名等公共信息（经AI总结）。"""
     try:
         return search_notices_answer(query)
     except Exception as e:
         logger.error("search_campus_notices failed: %s", e, exc_info=True)
         return f"搜索校园通知时出错: {e}"
+
+
+@tool
+def search_notices_raw(query: str) -> str:
+    """获取校园官方通知的原始文本片段。当你需要查看原文或要对比多条信息时使用此工具。"""
+    try:
+        from campus_rag import search_notices
+        return search_notices(query)
+    except Exception as e:
+        logger.error("search_notices_raw failed: %s", e, exc_info=True)
+        return f"搜索通知原文时出错: {e}"
 
 
 # ── Per-user tool factories ───────────────────────────────────────
@@ -88,6 +107,19 @@ def _make_add_personal_data(username: str):
             logger.error("add_personal_data failed: %s", e, exc_info=True)
             return f"添加个人数据时出错: {e}"
     return add_personal_data
+
+
+def _make_search_user_data_raw(username: str):
+    @tool
+    def search_user_data_raw(query: str) -> str:
+        """获取用户个人数据的原始文本片段。当你需要查看原文或要对比多条信息时使用此工具。"""
+        try:
+            from campus_rag import search_user_data
+            return search_user_data(query, username)
+        except Exception as e:
+            logger.error("search_user_data_raw failed: %s", e, exc_info=True)
+            return f"搜索个人数据原文时出错: {e}"
+    return search_user_data_raw
 
 
 _SINGLETON_CONN = None
@@ -131,6 +163,7 @@ async def _prune_checkpoints(conn):
 _shared_tools = {
     "web_search": fetch_text_from_url,
     "search_campus_notices": search_campus_notices,
+    "search_notices_raw": search_notices_raw,
 }
 
 
@@ -139,6 +172,7 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
     user_tools = {
         "search_my_data": _make_search_my_data(username),
         "add_personal_data": _make_add_personal_data(username),
+        "search_user_data_raw": _make_search_user_data_raw(username),
     }
     all_tools = {**_shared_tools, **user_tools}
 
