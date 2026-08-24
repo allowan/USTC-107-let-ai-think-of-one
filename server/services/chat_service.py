@@ -1,5 +1,5 @@
 """
-Chat service: agent lifecycle, streaming (SSE/WS), checkpoint management.
+Chat service: agent lifecycle, SSE streaming, checkpoint management.
 """
 
 import asyncio
@@ -27,14 +27,14 @@ class ChatService:
 
     async def shutdown(self):
         from main import close_agent
-        self._clear_agent_cache()
+        self.clear_agent_cache()
         # Wait for all pending connection closes
         if self._pending_closes:
             await asyncio.gather(*self._pending_closes, return_exceptions=True)
         await close_agent()
         logger.info("ChatService shut down")
 
-    async def _get_agent(self, username: str = ""):
+    async def get_agent(self, username: str = ""):
         if username:
             if username in self._user_agents:
                 return self._user_agents[username]
@@ -56,7 +56,7 @@ class ChatService:
             self._pending_closes.add(task)
             task.add_done_callback(self._pending_closes.discard)
 
-    def _clear_agent_cache(self):
+    def clear_agent_cache(self):
         for username in list(self._user_agents.keys()):
             self.invalidate_user_agent(username)
 
@@ -102,7 +102,7 @@ class ChatService:
         """Async generator yielding SSE-style (event_type, data) tuples."""
         from langchain_core.messages import AIMessageChunk
 
-        ctx = await self._get_agent(username)
+        ctx = await self.get_agent(username)
         thread_id = self._thread_id(username, topic_id)
 
         seen_tool_names: set[str] = set()
@@ -154,8 +154,8 @@ class ChatService:
             if "tool_calls" in err_msg and "tool messages" in err_msg:
                 logger.warning("Checkpoint corrupted for thread %s, retrying", thread_id)
                 await self.delete_thread(thread_id)
-                from campus_rag.query import _reset
-                _reset()
+                from campus_rag import reset_caches
+                reset_caches()
                 try:
                     async for chunk in _stream():
                         yield chunk
@@ -165,44 +165,6 @@ class ChatService:
             else:
                 logger.error("SSE error for thread %s: %s", thread_id, exc, exc_info=True)
                 yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc}'})}\n\n"
-
-    async def handle_ws_stream(self, ws, username: str, content: str, topic_id: str):
-        """Send streaming tokens + tool_use events over a WebSocket."""
-        from langchain_core.messages import AIMessageChunk
-
-        ctx = await self._get_agent(username)
-        thread_id = self._thread_id(username, topic_id)
-        seen_tool_names: set[str] = set()
-
-        await ws.send_json({"type": "thinking", "content": ""})
-        async for msg_chunk, _metadata in ctx.agent.astream(
-            {"messages": [{"role": "user", "content": content}]},
-            {"configurable": {"thread_id": thread_id}},
-            stream_mode="messages",
-        ):
-            if isinstance(msg_chunk, AIMessageChunk):
-                emitted_tool = False
-                if msg_chunk.tool_call_chunks:
-                    for tc in msg_chunk.tool_call_chunks:
-                        name = tc.get("name")
-                        if name and name not in seen_tool_names:
-                            seen_tool_names.add(name)
-                            await ws.send_json({"type": "tool_use", "content": str(name)})
-                            emitted_tool = True
-                if msg_chunk.tool_calls:
-                    for tc in msg_chunk.tool_calls:
-                        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-                        if name and name not in seen_tool_names:
-                            seen_tool_names.add(name)
-                            await ws.send_json({"type": "tool_use", "content": str(name)})
-                            emitted_tool = True
-                if emitted_tool:
-                    continue
-                if msg_chunk.content:
-                    text = msg_chunk.content
-                    if not isinstance(text, str):
-                        text = str(text)
-                    await ws.send_json({"type": "token", "content": text})
 
 
 # ── Singleton ─────────────────────────────────────────────────────

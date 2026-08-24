@@ -1,11 +1,14 @@
 # auth.py
 import uuid
 from datetime import datetime
+from pathlib import Path
 import bcrypt
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = "sqlite:///./users.db"
+# 锚定项目根目录的绝对路径：相对路径 "./users.db" 依赖启动 CWD，
+# 从其他目录启动会静默新建空库导致话题"凭空消失"。
+DATABASE_URL = f"sqlite:///{Path(__file__).resolve().parent.parent / 'users.db'}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()

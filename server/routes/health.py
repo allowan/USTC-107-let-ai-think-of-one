@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 @router.get("/api/health")
 async def health(chat: ChatService = Depends(get_chat_service)):
-    ctx = await chat._get_agent()
+    ctx = await chat.get_agent()
     checks = {"agent": ctx.agent is not None}
 
     try:

@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染
+- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
@@ -22,7 +22,7 @@
 |---|---|---|
 | Python | 3.11+ | 推荐 3.12 |
 | Node.js | 18+ | 推荐 22 |
-| Ollama | latest | 用于本地嵌入模型 |
+| Ollama | 可选 | 仅本地 Ollama 嵌入回退方案需要 |
 | conda | 可选 | 项目提供 `107` 环境 |
 
 **首次克隆后：**
@@ -65,40 +65,31 @@ export LLM_MODEL="deepseek-v4-flash"
 
 环境变量优先级高于 `settings.json`。
 
-### 3. 配置嵌入模型
+### 3. 配置嵌入与重排序模型
+
+嵌入和重排序均通过 API 调用（OpenAI 兼容端点），无需本地模型：
 
 ```bash
 cp campus_rag/.env.example campus_rag/.env
 ```
 
-`campus_rag/.env` 默认使用本地 Ollama：
-
-```env
-EMBED_PROVIDER=ollama
-OLLAMA_EMBED_MODEL=nomic-embed-text
-OLLAMA_HOST=http://127.0.0.1:11434
-```
-
-也可切换为 OpenAI 兼容的云端嵌入：
+编辑 `campus_rag/.env`，填入网关地址、API Key 和模型名：
 
 ```env
 EMBED_PROVIDER=openai
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-your-key
-OPENAI_EMBED_MODEL=deepseek-embedding-v1
+EMBED_API_KEY=sk-your-key
+EMBED_BASE_URL=https://api.llm.ustc.edu.cn/v1
+EMBED_MODEL=qwen3-embedding
+
+RERANK_PROVIDER=api
+RERANK_API_KEY=sk-your-key
+RERANK_BASE_URL=https://api.llm.ustc.edu.cn/v1
+RERANK_MODEL=qwen3-reranker
 ```
 
-### 4. 启动 Ollama
+> 注意：嵌入配置必须使用独立的 `EMBED_*` / `RERANK_*` 变量，不要复用 `OPENAI_*`（那是 LLM 分支的覆盖变量，混用会互相污染）。旧版本支持的本地 Ollama 嵌入仍可作为回退方案（取消注释 `EMBED_PROVIDER=ollama` 相关配置），但向量库需重建。
 
-```bash
-# 首次拉取嵌入模型（约 274 MB）
-ollama pull nomic-embed-text
-
-# 启动 Ollama 服务（默认监听 127.0.0.1:11434）
-ollama serve
-```
-
-### 5. 启动后端
+### 4. 启动后端（Ollama 已不再必需）
 
 ```bash
 python server.py
@@ -137,16 +128,20 @@ npm run dev
 | `LLM_BASE_URL` | `env.base_url` | API 地址 | `https://api.deepseek.com` |
 | `LLM_MODEL` | `env.model` | 模型名 | `deepseek-v4-flash` |
 
-### 嵌入模型配置（`campus_rag/.env`）
+### 嵌入与重排序配置（`campus_rag/.env`）
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `EMBED_PROVIDER` | 嵌入来源：`ollama` 或 `openai` | `ollama` |
-| `OLLAMA_EMBED_MODEL` | Ollama 嵌入模型名 | `nomic-embed-text` |
-| `OLLAMA_HOST` | Ollama 服务地址 | `http://127.0.0.1:11434` |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key | — |
-| `OPENAI_EMBED_MODEL` | 云端嵌入模型名 | `text-embedding-3-small` |
+| `EMBED_PROVIDER` | 嵌入来源：`openai`（API）或 `ollama`（本地回退） | `openai` |
+| `EMBED_API_KEY` | 嵌入 API Key | — |
+| `EMBED_BASE_URL` | OpenAI 兼容 API 地址 | `https://api.llm.ustc.edu.cn/v1` |
+| `EMBED_MODEL` | 嵌入模型名 | `qwen3-embedding` |
+| `RERANK_PROVIDER` | 重排序来源：`api`（未配置时降级为原始分数排序） | — |
+| `RERANK_API_KEY` | 重排序 API Key | — |
+| `RERANK_BASE_URL` | 重排序 API 地址 | `https://api.llm.ustc.edu.cn/v1` |
+| `RERANK_MODEL` | 重排序模型名 | `qwen3-reranker` |
+
+> 旧版变量（`OPENAI_EMBED_MODEL` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`）仍可作为嵌入的回退读取项；`OLLAMA_EMBED_MODEL` / `OLLAMA_HOST` 用于本地 Ollama 回退。
 
 ### 其他配置
 
@@ -165,7 +160,7 @@ USTC-107-let-ai-think-of-one/
 │   ├── lifespan.py            #   启动/关闭生命周期（ChatService 初始化）
 │   ├── deps.py                #   依赖注入（本地用户标识）
 │   ├── routes/                #   路由模块
-│   │   ├── chat.py            #     SSE / WebSocket 流式对话
+│   │   ├── chat.py            #     SSE 流式对话
 │   │   ├── topics.py          #     话题 CRUD、历史、自动标题
 │   │   ├── search.py          #     公共通知 / 个人数据检索
 │   │   ├── personal_data.py   #     个人知识库 CRUD
@@ -231,20 +226,7 @@ USTC-107-let-ai-think-of-one/
 
 ## campus_rag 模块详解
 
- **重排序模型部署说明**：项目使用 `BAAI/bge-reranker-base`（约 1GB）做交叉编码重排序。该模型**不会自动下载**——代码默认开启 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），需提前将模型下载到本地 HF 缓存，并将 `HF_HOME` 环境变量指向缓存目录：
-
-```bash
-# 下载模型到本地缓存（任选其一）
-export HF_HOME=/path/to/hf_cache        # 例如 E:\HFCache
-huggingface-cli download BAAI/bge-reranker-base
-
-# 或用 Python 下载
-python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
-AutoTokenizer.from_pretrained('BAAI/bge-reranker-base'); \
-AutoModelForSequenceClassification.from_pretrained('BAAI/bge-reranker-base')"
-```
-
-模型缺失时 `rerank_nodes` 会自动降级为按原始向量分数排序，不阻断检索。
+**重排序模型说明**：项目通过 API 调用 `qwen3-reranker`（Cohere/Jina 风格 `/rerank` 端点）做交叉重排序，无需下载本地模型。配置见 `campus_rag/.env` 的 `RERANK_*` 变量。API 不可用时 `rerank_nodes` 会自动降级为按原始向量分数排序，不阻断检索。
 
 ### `config.py` — 全局配置
 
@@ -381,11 +363,11 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
   ├── 合并去重
-  ├── 重排序 (bge-reranker-base，AutoTokenizer + AutoModelForSequenceClassification)
+  ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点)
   └── LLM 生成回答
 ```
 
-`rerank_nodes` 内置降级策略：重排序模型不可用时自动退化为按原始分数排序。BM25Retriever 和 VectorIndexRetriever 均有缓存，数据未变化时不会重复构建。
+`rerank_nodes` 内置降级策略：重排序 API 不可用时自动退化为按原始分数排序。BM25Retriever 和 VectorIndexRetriever 均有缓存，数据未变化时不会重复构建。
 
 ### `keyword_retriever.py` — BM25 检索器
 
@@ -443,7 +425,6 @@ from campus_rag import (
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`） |
-| WS | `/ws/chat` | WebSocket 流式对话 |
 
 #### 个人知识库
 
@@ -561,28 +542,27 @@ npm run build       # 生产构建
 
 ### 端到端测试流程
 
-1. 启动 Ollama：`ollama serve`
-2. 启动后端：`python server.py`
-3. （可选）启动 Sync Server：`cd sync_server && python main.py`
-4. 启动前端：`cd frontend && npm run dev`
-5. 浏览器打开 `http://localhost:3000`
-6. 创建话题：侧边栏点击 + 按钮
-7. 测试对话：发送"有什么暑期学校的活动？"
-8. 测试个人知识库：侧边栏"个人数据" → 添加/编辑/删除
-9. 测试同步：侧边栏"同步" → 查看状态 → 触发同步
-10. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
+1. 启动后端：`python server.py`
+2. （可选）启动 Sync Server：`cd sync_server && python main.py`
+3. 启动前端：`cd frontend && npm run dev`
+4. 浏览器打开 `http://localhost:3000`
+5. 创建话题：侧边栏点击 + 按钮
+6. 测试对话：发送“有什么暑期学校的活动？”
+7. 测试个人知识库：侧边栏“个人数据” → 添加/编辑/删除
+8. 测试同步：侧边栏“同步” → 查看状态 → 触发同步
+9. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
 
 ## 已知注意事项
 
 - **首次对话较慢**：Agent 和 RAG 索引采用懒加载，首次调用时需要初始化（约 5-10 秒）
-- **嵌入模型**：本地 Ollama 的 `nomic-embed-text` 首次加载需几十秒；切换为云端嵌入可避免此问题
+- **首次启动会重建公共索引**：嵌入切换为 `qwen3-embedding` 后向量维度与旧库不兼容，首次启动会从 `campus_rag/data/` 自动重建公共索引；个人知识库需重新导入
 - **数据文件格式**：`campus_rag/data/` 下的通知文件必须以 `.txt` 结尾，否则会被跳过
 - **文档分块**：每篇通知会被 `SentenceSplitter` 切分为多个 1024 字符的块，管理面板按文件名聚合显示
-- **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致 Ollama 连接 502，`llm_factory.py` 已内置清除逻辑
+- **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致本地服务连接失败，`llm_factory.py` 的 Ollama 分支已内置清除逻辑
 - **ChromaDB 持久化**：向量数据存储在项目根目录的 `chroma_db/`，删除后重启服务会自动从 `data/` 重新索引
 - **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
 - **工具偏好**：每个话题可独立启/禁用 Agent 工具，偏好通过设置面板管理
-- **重排序模型离线**：`campus_rag/query_engine.py` 默认开启 HF 离线模式，`bge-reranker-base` 需提前下载到 `HF_HOME` 指向的本地缓存（见上文「重排序模型部署说明」）。模型不可用时重排序自动降级为按原始分数排序
+- **重排序 API**：`campus_rag/query_engine.py` 通过 `RERANK_*` 配置调用 qwen3-reranker。API 不可用时重排序自动降级为按原始分数排序
 - **DeepSeek `/beta` 端点**：DeepSeek V4 系列模型（`deepseek-v4-flash` / `deepseek-v4-pro`）需通过 `/beta` 路径访问。`llm_factory.py` 会在检测到 `api.deepseek.com` 且 `base_url` 未含 `/beta` 时自动补齐后缀，`settings.json` 中写 `https://api.deepseek.com` 即可，无需手动加 `/beta`
 
 ## 未来规划

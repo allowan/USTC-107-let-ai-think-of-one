@@ -1,5 +1,6 @@
 #index_manager.py
 import hashlib
+import logging
 import os
 import threading
 import chromadb
@@ -8,8 +9,54 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from .data_loader import load_documents_from_files, split_documents
 from . import config
 
+logger = logging.getLogger("campus_rag.index_manager")
+
 _chroma_client = None
 _lock = threading.Lock()
+
+_embed_dim_cache: int | None = None
+
+
+def _get_live_embed_dim() -> int:
+    """探测当前嵌入模型的输出维度（一次真实 API 调用，进程内缓存）。"""
+    global _embed_dim_cache
+    if _embed_dim_cache is None:
+        # 走 require 而非 Settings.embed_model getter：getter 未初始化时会
+        # 自动 resolve 出 MockEmbedding（维度 1），is None 判断永远不成立
+        embed_model = config.require_embed_model()
+        _embed_dim_cache = len(embed_model.get_text_embedding("dimension probe"))
+    return _embed_dim_cache
+
+
+def _stored_dim(collection) -> int | None:
+    """读取集合中已存向量的维度；空集合返回 None。"""
+    if collection.count() == 0:
+        return None
+    # peek 返回 numpy 数组，真值判断有歧义，必须用 is None / len 判空
+    embs = collection.peek().get("embeddings")
+    if embs is None or len(embs) == 0:
+        return None
+    return len(embs[0])
+
+
+def assert_collection_dim(collection) -> None:
+    """校验既有集合维度与当前嵌入模型一致，不一致时抛出可操作的错误。
+
+    ChromaDB 集合维度在首次写入后锁定；混用嵌入模型（或嵌入服务不可用时
+    llama_index 静默降级的 MockEmbedding，维度 1）会让集合永久不可用，
+    查询时只抛晦涩的底层维度异常，故在索引构建前显式拦截。
+    """
+    stored = _stored_dim(collection)
+    if stored is None:
+        return
+    live = _get_live_embed_dim()
+    if stored != live:
+        raise RuntimeError(
+            f"向量集合 '{collection.name}' 维度({stored})与当前嵌入模型输出"
+            f"维度({live})不一致，该集合已不可用（ChromaDB 维度在首次写入后"
+            "锁定）。请删除该集合并重建：公共数据可从 campus_rag/data 自动"
+            "重建，个人数据需重新导入。"
+        )
 
 
 def _get_chroma_client(persist_dir: str = "./chroma_db") -> chromadb.PersistentClient:
@@ -28,12 +75,21 @@ def _user_collection_name(user_id: str) -> str:
 class RAGSystem:
     def __init__(self, persist_dir="./chroma_db"):
         from .config import init_embed
-        init_embed()
+        # 嵌入不可用时 llama_index 会静默回退 MockEmbedding（维度 1），
+        # 一旦 Mock 向量写入集合，ChromaDB 维度将被永久锁定，后续真实
+        # 嵌入（如 4096 维）查询必报维度不匹配。因此必须 fail fast。
+        if not init_embed():
+            raise RuntimeError(
+                "嵌入服务不可用，已阻止向量索引初始化（避免 MockEmbedding "
+                "污染向量库）。请检查 campus_rag/.env 的 EMBED_* 配置及"
+                "嵌入 API 的网络可达性（校园网关需校园网/VPN）。"
+            )
         self.chroma_client = _get_chroma_client(persist_dir)
 
     # ── 公共数据（官方通知）──────────────────────────────────────
     def create_public_index(self, data_dir="./data"):
         collection = self.chroma_client.get_or_create_collection("public")
+        assert_collection_dim(collection)
         vector_store = ChromaVectorStore(chroma_collection=collection)
         docs = load_documents_from_files(data_dir)
         nodes = split_documents(docs)
@@ -44,6 +100,7 @@ class RAGSystem:
     def create_public_index_via_docs(self, documents: list):
         """从 Document 列表创建公共索引（用于全量同步）。"""
         collection = self.chroma_client.get_or_create_collection("public")
+        assert_collection_dim(collection)
         vector_store = ChromaVectorStore(chroma_collection=collection)
         nodes = split_documents(documents)
         return VectorStoreIndex(nodes, vector_store=vector_store)
@@ -51,24 +108,45 @@ class RAGSystem:
     def get_or_create_public_index(self, data_dir="./data"):
         try:
             collection = self.chroma_client.get_collection("public")
-            if collection.count() > 0:
+        except Exception:
+            collection = None
+        if collection is not None and collection.count() > 0:
+            stored = _stored_dim(collection)
+            if stored == _get_live_embed_dim():
                 vector_store = ChromaVectorStore(chroma_collection=collection)
                 return VectorStoreIndex.from_vector_store(vector_store)
-        except Exception:
-            pass
+            # 维度不匹配：集合由旧嵌入模型（或 MockEmbedding 降级）写入且已
+            # 不可查询。公共数据可从源目录全量重建，故自动删除恢复而非报错。
+            logger.warning(
+                "public 集合维度(%s)与当前嵌入模型(%s)不一致，删除并从 %s 重建",
+                stored, _get_live_embed_dim(), data_dir,
+            )
+            self.chroma_client.delete_collection("public")
         return self.create_public_index(data_dir)
 
     def get_public_index(self):
         try:
             collection = self.chroma_client.get_collection("public")
+            stored = _stored_dim(collection)
+            if stored is not None and stored != _get_live_embed_dim():
+                logger.warning(
+                    "public 集合维度(%s)与当前嵌入模型(%s)不一致，删除并重建",
+                    stored, _get_live_embed_dim(),
+                )
+                self.chroma_client.delete_collection("public")
+                return self.create_public_index()
             vector_store = ChromaVectorStore(chroma_collection=collection)
             return VectorStoreIndex.from_vector_store(vector_store)
+        except RuntimeError:
+            # 嵌入探测失败（网络不可达等）不应触发静默重建，让调用方看到原因
+            raise
         except Exception:
             return self.create_public_index()
 
     def add_documents_to_public(self, documents: list):
         """增量添加文档到公共集合（仅管理员），自动跳过重复内容。"""
         collection = self.chroma_client.get_or_create_collection("public")
+        assert_collection_dim(collection)
         existing_hashes = self._get_existing_hashes("public")
         nodes = split_documents(documents)
         new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
@@ -82,11 +160,13 @@ class RAGSystem:
         coll_name = _user_collection_name(user_id)
         try:
             collection = self.chroma_client.get_collection(coll_name)
-            if collection.count() > 0:
-                vector_store = ChromaVectorStore(chroma_collection=collection)
-                return VectorStoreIndex.from_vector_store(vector_store)
         except Exception:
-            pass
+            collection = None
+        if collection is not None and collection.count() > 0:
+            # 个人数据无法自动重建：维度不匹配时显式报错，而不是静默忽略
+            assert_collection_dim(collection)
+            vector_store = ChromaVectorStore(chroma_collection=collection)
+            return VectorStoreIndex.from_vector_store(vector_store)
 
         collection = self.chroma_client.get_or_create_collection(coll_name)
         vector_store = ChromaVectorStore(chroma_collection=collection)
@@ -101,6 +181,7 @@ class RAGSystem:
         """获取用户个人索引（集合需已存在）。"""
         coll_name = _user_collection_name(user_id)
         collection = self.chroma_client.get_collection(coll_name)
+        assert_collection_dim(collection)
         vector_store = ChromaVectorStore(chroma_collection=collection)
         return VectorStoreIndex.from_vector_store(vector_store)
 
@@ -108,6 +189,7 @@ class RAGSystem:
         """向用户的私有索引中追加文档，自动跳过重复内容。"""
         coll_name = _user_collection_name(user_id)
         collection = self.chroma_client.get_or_create_collection(coll_name)
+        assert_collection_dim(collection)
         existing_hashes = self._get_existing_hashes(coll_name)
         nodes = split_documents(documents)
         new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
@@ -229,6 +311,7 @@ class RAGSystem:
         user_idx = None
         try:
             user_idx = self.get_user_index(user_id)
-        except Exception:
-            pass
+        except Exception as e:
+            # 个人索引不可用（含维度不匹配）时降级为仅公共检索，但必须留痕
+            logger.warning("用户 %s 的个人索引不可用: %s", user_id, e)
         return pub_idx, user_idx

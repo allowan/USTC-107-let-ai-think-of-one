@@ -5,13 +5,6 @@ const api = axios.create({
   timeout: 30000,
 });
 
-export const chatApi = {
-  getWebSocketUrl: () => {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${protocol}://${window.location.host}/ws/chat`;
-  },
-};
-
 export const topicApi = {
   list: () =>
     api.get<{ topics: import('@/types').TopicInfo[] }>('/topics'),
@@ -61,8 +54,10 @@ export const syncApi = {
   getStatus: () =>
     api.get<import('@/types').SyncStatus>('/sync/status'),
 
+  // 全量同步包含逐篇嵌入写入，耗时可能远超全局 30s 超时；
+  // 若前端提前断开会误报"同步失败"而后端实际继续完成，造成状态认知错乱。
   syncNow: () =>
-    api.post<import('@/types').SyncResult>('/sync/now'),
+    api.post<import('@/types').SyncResult>('/sync/now', {}, { timeout: 0 }),
 };
 
 export const personalDataApi = {

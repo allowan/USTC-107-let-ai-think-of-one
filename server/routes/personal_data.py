@@ -1,13 +1,14 @@
 """Personal data routes: /api/personal-data/*"""
 
-from urllib.parse import unquote
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from server.deps import get_user
 from server.services.rag_service import RAGService, get_rag_service
 
 router = APIRouter(prefix="/api/personal-data", tags=["personal-data"])
+
+# 注意：路径参数已由框架解码一次，禁止再次 unquote——双重解码会把字面含 %
+# 的 source（如 "100%进度"、"a%20b"）损坏，导致更新/删除找错目标。
 
 
 @router.get("")
@@ -60,7 +61,6 @@ async def update_personal_data(
     user: str = Depends(get_user),
     rag: RAGService = Depends(get_rag_service),
 ):
-    source = unquote(source)
     content = (body.get("content") or "").strip()
     if not content:
         raise HTTPException(status_code=400, detail="内容不能为空")
@@ -74,7 +74,6 @@ async def delete_personal_data(
     user: str = Depends(get_user),
     rag: RAGService = Depends(get_rag_service),
 ):
-    source = unquote(source)
     count = rag.delete_user_data(user, source)
     if count == 0:
         raise HTTPException(status_code=404, detail="数据不存在")

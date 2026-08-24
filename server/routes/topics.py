@@ -90,7 +90,8 @@ async def summarize_topic(
         title = str(result.content).strip()[:20]
         if not title:
             title = "默认话题"
-    except (Exception, asyncio.TimeoutError):
+    except Exception:
+        # asyncio.TimeoutError 在 3.11+ 已是 Exception 子类，无需重复列出
         logger.warning("Topic summarization failed for user %s, topic %s", user, topic_id, exc_info=True)
         title = "默认话题"
 

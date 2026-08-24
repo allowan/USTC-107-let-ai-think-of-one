@@ -78,10 +78,16 @@ def get_embed_model():
 
     elif provider == "openai":
         from llama_index.embeddings.openai import OpenAIEmbedding
+        # 独立 EMBED_* 变量优先，避免与 LLM 分支的 OPENAI_* 变量互相污染
+        # （OPENAI_* 同时也是 get_llm 的覆盖项，不能用于嵌入配置）。
+        # 注意：必须用 model_name 关键字传自定义模型名，直接传 model= 会触发
+        # OpenAIEmbeddingModelType 枚举校验（仅认 OpenAI 官方模型名）报错。
         return OpenAIEmbedding(
-            model=os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small"),
-            api_key=os.getenv("OPENAI_API_KEY") or settings.get("api_key", ""),
-            api_base=os.getenv("OPENAI_BASE_URL") or settings.get("base_url", "https://api.deepseek.com"),
+            model_name=os.getenv("EMBED_MODEL") or os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small"),
+            api_key=os.getenv("EMBED_API_KEY") or os.getenv("OPENAI_API_KEY") or settings.get("api_key", ""),
+            api_base=os.getenv("EMBED_BASE_URL") or os.getenv("OPENAI_BASE_URL") or settings.get("base_url", ""),
+            timeout=60.0,
+            max_retries=3,  # 默认 10 次在网络不可达时挂起太久，交互式场景收敛为 3 次
         )
     else:
         raise ValueError(f"Unsupported embedding provider: {provider}")

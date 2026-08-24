@@ -47,7 +47,8 @@ export default function ChatPage() {
   // Auto-create first topic after loaded
   useEffect(() => {
     if (loaded && topics.length === 0) {
-      createTopic();
+      // 后端瞬时不可用时避免未处理的 rejection
+      createTopic().catch(() => {});
     }
   }, [loaded, topics.length]);
 

@@ -20,7 +20,7 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const {
-    topics, activeTopicId, loading: topicsLoading,
+    topics, activeTopicId, loading: topicsLoading, loadError,
     fetchTopics, createTopic, deleteTopic, renameTopic, setActiveTopicId,
   } = useTopicStore();
 
@@ -125,7 +125,16 @@ export default function AppLayout() {
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '0 4px' }}>
-          {topicsLoading ? (
+          {loadError ? (
+            <div
+              onClick={() => fetchTopics()}
+              style={{ textAlign: 'center', padding: 16, color: '#ff4d4f', fontSize: 12, lineHeight: 1.6, cursor: 'pointer' }}
+            >
+              后端连接失败，请确认已运行 python server.py
+              <br />
+              <span style={{ color: '#1677ff' }}>点击重试</span>
+            </div>
+          ) : topicsLoading ? (
             <div style={{ textAlign: 'center', padding: 16 }}><Spin size="small" /></div>
           ) : topics.length === 0 ? (
             <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>

@@ -12,7 +12,8 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from .query import search_notices, search_user_data, add_user_data, add_user_files, list_user_data, delete_user_data
 from .query import search_notices_answer, search_user_data_answer
-from .query import search_all, add_public_activity, add_user_activity
+from .query import update_user_data, add_public_documents, delete_public_data, replace_public_documents
+from .query import reset_caches
 from .auth import authenticate, register_user, list_users
 from .auth import create_topic, list_topics, delete_topic, get_topic, rename_topic
 from .query_engine import get_rag_response, rerank_nodes, get_rag_response_hybrid

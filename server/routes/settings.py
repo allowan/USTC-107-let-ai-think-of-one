@@ -32,7 +32,7 @@ async def update_settings(
             env[key] = body[key]
     with open(_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-    chat._clear_agent_cache()
+    chat.clear_agent_cache()
     return {"message": "全局设置已更新"}
 
 
@@ -52,7 +52,7 @@ async def switch_model(
         config_change_model(group, model)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    chat._clear_agent_cache()
+    chat.clear_agent_cache()
     return {"message": "模型已切换", "model": model}
 
 

@@ -442,8 +442,10 @@ class TestQuery(unittest.TestCase):
 
     def test_02_search_notices_finds_content(self):
         from campus_rag import search_notices
-        result = search_notices("C9暑期学校")
-        self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
+        # 语料中已无 C9 暑期学校通知（旧用例时代的数据），
+        # 改用当前 data/ 中真实存在的暑期实习主题验证检索命中率
+        result = search_notices("暑期实习安全管理")
+        self.assertIn("暑期", result, "应能搜到暑期实习相关通知")
 
     def test_03_search_notices_no_match_format(self):
         from campus_rag import search_notices
@@ -474,10 +476,10 @@ class TestQuery(unittest.TestCase):
 
 
 class TestRerankNodes(unittest.TestCase):
-    """重排序（需要 reranker 模型，首次运行会下载）。"""
+    """重排序（API reranker，不可用时降级为原始分数排序）。"""
 
     def test_rerank_sorts_by_relevance(self):
-        from campus_rag.query_engine import rerank_nodes, _reranker_available
+        from campus_rag import query_engine
         from llama_index.core.schema import NodeWithScore, TextNode
 
         nodes = [
@@ -485,9 +487,10 @@ class TestRerankNodes(unittest.TestCase):
             NodeWithScore(node=TextNode(text="深度学习使用反向传播算法。"), score=0.5),
             NodeWithScore(node=TextNode(text="机器学习是人工智能的分支。"), score=0.5),
         ]
-        reranked = rerank_nodes("神经网络训练方法", nodes, top_n=2)
+        reranked = query_engine.rerank_nodes("神经网络训练方法", nodes, top_n=2)
         self.assertEqual(len(reranked), 2, "应返回 top_n 条结果")
-        if _reranker_available:
+        # rerank 降级会在调用后置 _reranker_available=False，需实时读模块标志
+        if query_engine._reranker_available:
             self.assertIn("反向传播", reranked[0].node.text,
                           "机器学习相关节点应排在最前")
 
@@ -512,6 +515,12 @@ class TestQueryEngine(unittest.TestCase):
         answer = get_rag_response("今年暑假有什么活动", pub_idx)
         self.assertIsInstance(answer, str)
         self.assertTrue(len(answer) > 0, "应返回非空回答")
+        # MockLLM 会原样回声 prompt；以下两句是 QA_PROMPT 原文，真实 LLM
+        # 回答中不应出现（防止静默降级假通过）
+        self.assertNotIn("如果资料不足以回答问题", answer,
+                         "回答疑似 MockLLM 的 prompt 回声，而非真实 LLM 生成")
+        self.assertNotIn("参考资料：", answer,
+                         "回答疑似 MockLLM 的 prompt 回声，而非真实 LLM 生成")
 
     def test_02_no_match_graceful(self):
         from campus_rag import RAGSystem, get_rag_response
@@ -523,6 +532,201 @@ class TestQueryEngine(unittest.TestCase):
             "未找" in answer or "不足" in answer or "没有" in answer or "无法" in answer,
             f"无匹配时应诚实回复，实际返回: {answer[:100]}",
         )
+        # MockLLM 回声会包含 prompt 原文而同样命中上面的关键词，需额外拦截
+        self.assertNotIn("如果资料不足以回答问题", answer,
+                         "回答疑似 MockLLM 的 prompt 回声，而非真实 LLM 生成")
+        self.assertNotIn("参考资料：", answer,
+                         "回答疑似 MockLLM 的 prompt 回声，而非真实 LLM 生成")
+
+
+class TestMockFallbackGuard(unittest.TestCase):
+    """LLM/嵌入不可用时必须报错，禁止静默降级到 MockLLM/MockEmbedding。"""
+
+    def test_require_llm_fails_fast_when_unavailable(self):
+        from campus_rag import config
+        # 模拟 LLM 初始化失败：require_llm 必须抛异常而非返回 MockLLM
+        with patch.object(config, "init_llm", return_value=False):
+            with self.assertRaises(RuntimeError):
+                config.require_llm()
+
+    def test_require_embed_fails_fast_when_unavailable(self):
+        from campus_rag import config
+        with patch.object(config, "init_embed", return_value=False):
+            with self.assertRaises(RuntimeError):
+                config.require_embed_model()
+
+    def test_import_does_not_pollute_settings_with_mocks(self):
+        # 导入后不应产生 MockLLM/MockEmbedding 全局污染：历史上
+        # Settings.llm = None 会被 llama_index setter 立即 resolve 成 Mock
+        # 对象，导致后续直接读 Settings.llm 的代码静默降级。用私有属性
+        # _llm/_embed_model 检查：公开 getter 未初始化时会自动 resolve 出
+        # Mock，无法区分"未初始化"和"已污染"。
+        from llama_index.core import Settings
+        from llama_index.core.llms.mock import MockLLM
+        from llama_index.core.embeddings.mock_embed_model import MockEmbedding
+        self.assertNotIsInstance(Settings._llm, MockLLM,
+                                 "全局 Settings._llm 被 MockLLM 污染")
+        self.assertNotIsInstance(Settings._embed_model, MockEmbedding,
+                                 "全局 Settings._embed_model 被 MockEmbedding 污染")
+
+
+# ── 维度一致性守卫 ──────────────────────────────────────────
+
+
+@unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
+class TestDimensionGuard(unittest.TestCase):
+    """防止混用嵌入模型 / MockEmbedding 污染集合（维度不匹配守卫）。"""
+
+    _RAG_BASE = Path(__file__).resolve().parent.parent / "campus_rag"
+
+    @classmethod
+    def setUpClass(cls):
+        # _get_live_embed_dim 依赖全局 Settings.embed_model，需先初始化
+        from campus_rag.config import init_embed
+        if not init_embed():
+            raise unittest.SkipTest("嵌入服务初始化失败")
+
+    def setUp(self):
+        import chromadb
+        self.tmpdir = tempfile.mkdtemp()
+        self.client = chromadb.PersistentClient(path=self.tmpdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_01_stored_dim_empty_and_nonempty(self):
+        from campus_rag.index_manager import _stored_dim
+        col = self.client.get_or_create_collection("dim_guard")
+        self.assertIsNone(_stored_dim(col), "空集合应返回 None")
+        col.add(ids=["a"], embeddings=[[0.5]], documents=["x"])
+        self.assertEqual(_stored_dim(col), 1)
+
+    def test_02_assert_raises_on_mock_pollution(self):
+        # 模拟 MockEmbedding 污染：写入维度 1 的向量，与真实模型维度不符
+        from campus_rag.index_manager import assert_collection_dim
+        col = self.client.get_or_create_collection("polluted")
+        col.add(ids=["m1"], embeddings=[[0.5]], documents=["mock"])
+        with self.assertRaises(RuntimeError):
+            assert_collection_dim(col)
+
+    def test_03_assert_passes_when_matching(self):
+        from campus_rag.index_manager import _get_live_embed_dim, assert_collection_dim
+        col = self.client.get_or_create_collection("healthy")
+        col.add(ids=["r1"], embeddings=[[0.1] * _get_live_embed_dim()], documents=["real"])
+        assert_collection_dim(col)  # 维度一致时不应抛异常
+
+    def test_04_public_auto_rebuild_on_mismatch(self):
+        # 污染的 public 集合应被自动删除并从 campus_rag/data 重建
+        import chromadb
+        from campus_rag import index_manager
+        from campus_rag.index_manager import RAGSystem, _get_live_embed_dim, _stored_dim
+        db_dir = os.path.join(self.tmpdir, "chroma_db")
+        client = chromadb.PersistentClient(path=db_dir)
+        col = client.get_or_create_collection("public")
+        col.add(ids=["m1"], embeddings=[[0.5]], documents=["mock pollution"])
+        old_client = index_manager._chroma_client
+        try:
+            # RAGSystem 的 chroma client 是模块级缓存，测试中临时指向临时库
+            index_manager._chroma_client = client
+            rag = RAGSystem(persist_dir=db_dir)
+            rag.get_or_create_public_index(data_dir=str(self._RAG_BASE / "data"))
+            rebuilt = client.get_collection("public")
+            self.assertGreater(rebuilt.count(), 0, "应从源数据重建公共索引")
+            self.assertEqual(_stored_dim(rebuilt), _get_live_embed_dim(),
+                             "重建后的向量维度应与当前嵌入模型一致")
+        finally:
+            index_manager._chroma_client = old_client
+
+
+# ── 写路径数据安全守卫 ──────────────────────────────────────────────────
+
+
+@unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
+class TestDataSafetyGuard(unittest.TestCase):
+    """先删后写的更新路径：嵌入不可用时必须拒绝且原数据不受影响。"""
+
+    def setUp(self):
+        import chromadb
+        from campus_rag import index_manager
+        self.tmpdir = tempfile.mkdtemp()
+        self.client = chromadb.PersistentClient(path=self.tmpdir)
+        self.old_client = index_manager._chroma_client
+        index_manager._chroma_client = self.client
+
+    def tearDown(self):
+        from campus_rag import index_manager, reset_caches
+        index_manager._chroma_client = self.old_client
+        reset_caches()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_update_user_data_rejected_when_embed_unavailable(self):
+        from campus_rag import config, update_user_data
+        with patch.object(config, "init_embed", return_value=False):
+            with self.assertRaises(RuntimeError):
+                update_user_data("safety_user", "课表", "新内容")
+
+    def test_replace_public_documents_rejected_when_embed_unavailable(self):
+        from campus_rag import config, replace_public_documents
+        with patch.object(config, "init_embed", return_value=False):
+            with self.assertRaises(RuntimeError):
+                replace_public_documents([])
+
+    def test_update_user_data_roundtrip(self):
+        from campus_rag import add_user_data, delete_user_data, list_user_data, update_user_data
+        from llama_index.core import Document
+        user = "test_update_safety"
+        try:
+            add_user_data(user, [Document(text="旧课表内容", metadata={"source": "课表"})])
+            update_user_data(user, "课表", "新课表内容已更新")
+            data = list_user_data(user)
+            joined = "\n".join(data.get("documents") or [])
+            self.assertIn("新课表内容已更新", joined, "更新后应包含新内容")
+            self.assertNotIn("旧课表内容", joined, "更新后旧内容应被删除")
+        finally:
+            delete_user_data(user, "课表")
+            self.client.delete_collection(f"user_{user}")
+
+
+# ── 工具偏好与 agent 配置 ─────────────────────────────────────────────
+
+
+class TestToolPreferenceBehavior(unittest.TestCase):
+    """显式禁用全部工具必须被尊重，不得静默回退全启用。"""
+
+    def test_all_disabled_yields_empty_tool_list(self):
+        from main import _build_tool_list
+        tools = _build_tool_list("probe_user", enabled_tool_names=[])
+        self.assertEqual(tools, [], "用户显式禁用全部工具时应返回空列表")
+
+    def test_none_means_default_all_enabled(self):
+        from main import _build_tool_list
+        tools = _build_tool_list("probe_user", enabled_tool_names=None)
+        self.assertGreater(len(tools), 0, "未设置偏好时应默认启用全部工具")
+
+    def test_unknown_names_filtered(self):
+        from main import _build_tool_list
+        tools = _build_tool_list("probe_user", enabled_tool_names=["not_a_tool", "web_search"])
+        self.assertEqual(len(tools), 1, "未知工具名应被过滤")
+        self.assertEqual(tools[0].name, "web_search")
+
+
+# ── 同步服务配置 ────────────────────────────────────────────────────
+
+
+class TestSyncConfig(unittest.TestCase):
+    """SYNC_SERVER_URL 必须支持环境变量覆盖（部署位置可变）。"""
+
+    def test_env_var_override(self):
+        import importlib
+        from server.services import sync_service
+        old_url = sync_service.SYNC_SERVER_URL
+        try:
+            with patch.dict(os.environ, {"SYNC_SERVER_URL": "http://10.0.0.9:9999"}):
+                importlib.reload(sync_service)
+            self.assertEqual(sync_service.SYNC_SERVER_URL, "http://10.0.0.9:9999")
+        finally:
+            importlib.reload(sync_service)
+            sync_service.SYNC_SERVER_URL = old_url
 
 
 # ── 公开 API 完整性 ──────────────────────────────────────────────────
@@ -541,6 +745,11 @@ class TestPublicAPI(unittest.TestCase):
             add_user_files,
             list_user_data,
             delete_user_data,
+            update_user_data,
+            add_public_documents,
+            delete_public_data,
+            replace_public_documents,
+            reset_caches,
             get_rag_response,
             rerank_nodes,
             RAGSystem,
@@ -553,6 +762,11 @@ class TestPublicAPI(unittest.TestCase):
         self.assertTrue(callable(add_user_files))
         self.assertTrue(callable(list_user_data))
         self.assertTrue(callable(delete_user_data))
+        self.assertTrue(callable(update_user_data))
+        self.assertTrue(callable(add_public_documents))
+        self.assertTrue(callable(delete_public_data))
+        self.assertTrue(callable(replace_public_documents))
+        self.assertTrue(callable(reset_caches))
         self.assertTrue(callable(get_rag_response))
         self.assertTrue(callable(rerank_nodes))
         self.assertIsNotNone(RAGSystem)
@@ -569,7 +783,7 @@ if __name__ == "__main__":
         print("[OK] Embedding 服务可用 → 将运行全部测试")
     else:
         print(f"[SKIP] Embedding 服务不可用 → {_last_embed_error}")
-        print("       请确认: 1) Ollama 已启动  2) nomic-embed-text 已拉取")
+        print("       请确认: campus_rag/.env 已配置 EMBED_* 且 API 可达")
     if has_llm():
         print("[OK] LLM 服务可用 → 将运行 LLM 生成测试")
     else:

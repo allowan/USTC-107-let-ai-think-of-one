@@ -1,10 +1,6 @@
 # query_engine.py
 import os
 
-# Force offline mode for HuggingFace (model already cached locally).
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
 from typing import List, Optional
 from llama_index.core import VectorStoreIndex
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -14,43 +10,47 @@ from llama_index.core.prompts import PromptTemplate
 from . import config
 
 
-class _CrossEncoderReranker:
-    """bge-reranker-base 的本地轻量封装。
+class _APIReranker:
+    """qwen3-reranker 的 API 封装（Cohere/Jina 风格 /rerank 端点）。
 
-    不直接用 FlagEmbedding.FlagReranker 的原因：FlagEmbedding 1.4.0 内部调用
-    tokenizer.prepare_for_model()，该方法在 transformers 5.x 中已被移除，会抛
-    AttributeError。这里改用 AutoTokenizer + AutoModelForSequenceClassification
-    走标准的 __call__ tokenize 路径（该路径在 transformers 5.x 下正常），并保留
-    compute_score(pairs, normalize) 接口，使调用处无需改动。若日后 FlagEmbedding
-    修复了该兼容问题，可直接切回 FlagReranker。
+    保留 compute_score(pairs, normalize) 接口与本地 cross-encoder 一致，
+    使 rerank_nodes 调用处无需改动；normalize 参数仅为兼容接口保留，
+    API 返回的 relevance_score 本身已是归一化相关性分数。
 
-    运行前提：bge-reranker-base 模型需提前下载到本地 HF 缓存（约 1GB），并将
-    HF_HOME 环境变量指向缓存目录（本项目示例为 E:\\HFCache）。模型缺失时
-    _get_reranker 会捕获异常并优雅降级为按原始分数排序，不影响检索功能。
+    配置来自 campus_rag/.env 的 RERANK_* 变量。端点不可用时由
+    _get_reranker / rerank_nodes 的既有异常处理降级为按原始
+    向量分数排序，不影响检索功能。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-base") -> None:
-        import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        self._torch = torch
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self._model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self._model.eval()
+    def __init__(self, model: str, api_key: str, base_url: str) -> None:
+        import httpx
+        self._model = model
+        self._url = base_url.rstrip("/") + "/rerank"
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        self._client = httpx.Client(timeout=30.0)
 
     def compute_score(self, pairs: List[List[str]], normalize: bool = True):
-        queries = [p[0] for p in pairs]
-        passages = [p[1] for p in pairs]
-        with self._torch.no_grad():
-            enc = self._tokenizer(
-                queries,
-                passages,
-                padding=True,
-                truncation=True,
-                max_length=512,
-                return_tensors="pt",
-            )
-            logits = self._model(**enc).logits.view(-1).float()
-            return self._torch.sigmoid(logits) if normalize else logits
+        query = pairs[0][0]
+        documents = [p[1] for p in pairs]
+        resp = self._client.post(
+            self._url,
+            headers=self._headers,
+            json={
+                "model": self._model,
+                "query": query,
+                "documents": documents,
+                "top_n": len(documents),
+            },
+        )
+        resp.raise_for_status()
+        # 兼容 relevance_score / score 两种字段命名
+        scores = [0.0] * len(documents)
+        for r in resp.json()["results"]:
+            scores[int(r["index"])] = float(r.get("relevance_score", r.get("score", 0.0)))
+        return scores
 
 
 _reranker = None
@@ -61,13 +61,20 @@ _bm25_cache: dict[str, object] = {}
 
 
 def _get_reranker():
+    """按 .env 的 RERANK_* 配置构建 API reranker；未配置或失败时返回 None。"""
     global _reranker, _reranker_available
     if _reranker is not None and _reranker_available:
         return _reranker
     if not _reranker_available:
         return None
+    if os.getenv("RERANK_PROVIDER") != "api":
+        return None  # 未配置 API reranker，走原始分数排序
     try:
-        _reranker = _CrossEncoderReranker("BAAI/bge-reranker-base")
+        _reranker = _APIReranker(
+            model=os.getenv("RERANK_MODEL", "qwen3-reranker"),
+            api_key=os.getenv("RERANK_API_KEY", ""),
+            base_url=os.getenv("RERANK_BASE_URL", ""),
+        )
     except Exception:
         _reranker_available = False
         _reranker = None
@@ -208,7 +215,8 @@ def get_rag_response(
         for node in final_nodes
     ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    llm = config.Settings.llm
+    # require_llm：未初始化时抛异常，避免静默使用 MockLLM 回声 prompt 假回答
+    llm = config.require_llm()
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")
@@ -244,8 +252,7 @@ def get_rag_response_hybrid(
         for node in final_nodes
     ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    config.init_llm()
-    llm = config.Settings.llm
+    llm = config.require_llm()
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")

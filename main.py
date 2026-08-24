@@ -168,7 +168,11 @@ _shared_tools = {
 
 
 def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None):
-    """Build the list of tools for a given user, filtering by enabled_tool_names."""
+    """Build the list of tools for a given user, filtering by enabled_tool_names.
+
+    None 表示用户未设置偏好（默认全部启用）；空列表是用户显式禁用全部工具，
+    必须尊重而非回退全启用，否则前端设置被静默忽略。
+    """
     user_tools = {
         "search_my_data": _make_search_my_data(username),
         "add_personal_data": _make_add_personal_data(username),
@@ -182,8 +186,8 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
         names = [n for n in enabled_tool_names if n in all_tools]
 
     if not names:
-        logger.warning("No tools enabled, using all tools")
-        names = list(all_tools.keys())
+        logger.warning("用户 %s 未启用任何工具，agent 将以纯对话模式运行",
+                       username or "<default>")
 
     return [all_tools[n] for n in names]
 
@@ -233,6 +237,28 @@ async def run_agent(content: str, thread_id: str = "default") -> str:
     return result["messages"][-1].content
 
 
+def _checkpoint_messages_to_history(raw_messages: list) -> list:
+    """把 checkpoint 中的 LangChain 消息列表转为前端可渲染的历史。
+
+    规则：跳过非 human/ai 消息（如 tool）；仅带 tool_calls 的 AI 消息
+    content 为空，直接发给前端会渲染出空气泡；多跳推理产生的多条连续
+    AI 消息合并为一条，与流式渲染时的单气泡视觉一致。
+    """
+    result = []
+    for m in raw_messages:
+        if hasattr(m, 'type') and hasattr(m, 'content'):
+            if m.type in ('human', 'ai'):
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                if m.type == 'ai' and not content.strip():
+                    continue
+                role = "user" if m.type == "human" else "assistant"
+                if result and result[-1]["role"] == role == "assistant":
+                    result[-1]["content"] += "\n\n" + content
+                else:
+                    result.append({"role": role, "content": content})
+    return result
+
+
 async def get_history(thread_id: str, conn=None) -> list:
     """Get conversation history for a thread_id. Uses the provided connection or opens one."""
     own_conn = conn is None
@@ -244,16 +270,7 @@ async def get_history(thread_id: str, conn=None) -> list:
         state = await checkpointer.aget_tuple(config)
         if state and state.checkpoint:
             channel_values = state.checkpoint.get("channel_values", {})
-            raw_messages = channel_values.get("messages", [])
-            result = []
-            for m in raw_messages:
-                if hasattr(m, 'type') and hasattr(m, 'content'):
-                    if m.type in ('human', 'ai'):
-                        result.append({
-                            "role": "user" if m.type == "human" else "assistant",
-                            "content": m.content if isinstance(m.content, str) else str(m.content),
-                        })
-            return result
+            return _checkpoint_messages_to_history(channel_values.get("messages", []))
     finally:
         if own_conn:
             await conn.close()
