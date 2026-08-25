@@ -79,4 +79,11 @@ export const personalDataApi = {
     api.delete<{ message: string }>(`/personal-data/${encodeURIComponent(source)}`),
 };
 
+export const scheduleApi = {
+  list: (semester?: string) =>
+    api.get<import('@/types').ScheduleData>('/schedule', { params: semester ? { semester } : {} }),
+  import: (payload: import('@/types').ScheduleImportPayload) =>
+    api.post<{ message: string; semester: string; meeting_count: number }>('/schedule/import', payload),
+};
+
 export default api;

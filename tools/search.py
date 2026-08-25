@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import ipaddress
 import json
+import logging
 import re
 import socket
 from html.parser import HTMLParser
@@ -17,8 +18,14 @@ from langchain.tools import tool
 USER_AGENT = "Mozilla/5.0 (compatible; USTC-Campus-Agent/1.0)"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_TOOL_CHARS = 20_000
+# Keep a failed proxy/DNS request from making the whole conversation appear
+# frozen. The connect timeout is intentionally shorter than the read timeout:
+# a reachable site may still need a few seconds to return its HTML.
+SEARCH_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+FETCH_TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 TRUSTED_PROXY_HOST_SUFFIXES = ("ustc.edu.cn",)
 USTC_SITES_PATH = Path(__file__).resolve().parent.parent / "campus_rag" / "ustc_sites.json"
+logger = logging.getLogger("tools.search")
 
 
 def _is_trusted_proxy_host(host: str) -> bool:
@@ -109,7 +116,7 @@ def fetch_page_text(
 ) -> str:
     safe_url = _validate_public_url(url)
     with httpx.Client(
-        headers={"User-Agent": USER_AGENT}, timeout=30.0, follow_redirects=True
+        headers={"User-Agent": USER_AGENT}, timeout=FETCH_TIMEOUT, follow_redirects=True
     ) as client:
         with client.stream("GET", safe_url) as response:
             response.raise_for_status()
@@ -169,7 +176,7 @@ def _search_web_results(query: str, max_results: int = 5) -> list[dict[str, str]
     response = httpx.get(
         f"https://html.duckduckgo.com/html/?q={quote_plus(query)}",
         headers={"User-Agent": USER_AGENT},
-        timeout=30.0,
+        timeout=SEARCH_TIMEOUT,
         follow_redirects=True,
     )
     response.raise_for_status()
@@ -182,9 +189,25 @@ def _format_search_results(results: list[dict[str, str]]) -> str:
     if not results:
         return "未找到网页搜索结果。"
     return "\n".join(
-        f"{index}. {item['title']}\n{item['url']}"
+        f"{index}. {_format_markdown_link(item['title'], item['url'])}"
         for index, item in enumerate(results, start=1)
     )
+
+
+def _format_markdown_link(label: str, url: str) -> str:
+    """Format a trusted HTTP(S) result as a Markdown link for the Agent.
+
+    Search results are passed to the model as tool output. Keeping the title
+    and URL together in Markdown makes it possible for the final chat UI to
+    render the source as a clickable link instead of showing a bare URL.
+    """
+    safe_label = re.sub(r"\s+", " ", label).strip()
+    safe_label = safe_label.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    # A closing parenthesis would terminate the Markdown destination early.
+    # Percent-encoding it preserves the destination while keeping the link
+    # valid for CommonMark parsers.
+    safe_url = url.strip().replace(")", "%29")
+    return f"[{safe_label}]({safe_url})"
 
 
 def search_web_text(query: str, max_results: int = 5) -> str:
@@ -231,17 +254,19 @@ def search_web(query: str) -> str:
     """Search the public web and return result titles and URLs."""
     try:
         return search_web_text(query)
-    except (httpx.HTTPError, ValueError) as exc:
-        return f"Search failed: {exc}"
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("public web search failed for %r: %s", query, exc)
+        return f"搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
 
 
 @tool("web_fetch")
 def fetch_text_from_url(url: str) -> str:
     """Fetch a public HTTP/HTTPS page and return extracted visible text."""
     try:
-        return f"来源: {url}\n\n{fetch_page_text(url)}"
-    except (httpx.HTTPError, ValueError) as exc:
-        return f"Fetch failed: {exc}"
+        return f"来源: {_format_markdown_link('网页原文', url)}\n\n{fetch_page_text(url)}"
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("web fetch failed for %s: %s", url, exc)
+        return f"网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
 
 
 @tool("ustc_web_search")
@@ -249,14 +274,16 @@ def search_ustc_web(query: str) -> str:
     """Search configured official USTC websites for up-to-date public information."""
     try:
         return search_ustc_web_text(query)
-    except (httpx.HTTPError, ValueError) as exc:
-        return f"USTC search failed: {exc}"
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("USTC web search failed for %r: %s", query, exc)
+        return f"科大网站搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
 
 
 @tool("ustc_web_fetch")
 def fetch_ustc_text_from_url(url: str) -> str:
     """Fetch visible text from a URL on the configured official USTC website whitelist."""
     try:
-        return f"来源: {url}\n\n{fetch_ustc_page_text(url)}"
-    except (httpx.HTTPError, ValueError) as exc:
-        return f"USTC fetch failed: {exc}"
+        return f"来源: {_format_markdown_link('网页原文', url)}\n\n{fetch_ustc_page_text(url)}"
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("USTC fetch failed for %s: %s", url, exc)
+        return f"科大网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"

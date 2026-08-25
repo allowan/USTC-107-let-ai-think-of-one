@@ -14,7 +14,12 @@ sync_server/data/*.db
 sync_server/data/*.db-journal
 campus_rag/.env
 users.db
+schedule.db
 workspace/
+output/
+
+# macOS
+.DS_Store
 *.db-journal
 *.db-shm
 *.db-wal

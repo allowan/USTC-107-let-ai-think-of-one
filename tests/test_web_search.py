@@ -6,6 +6,8 @@ from unittest.mock import patch
 from scripts.sync_web_sources import _safe_output_path
 from tools.search import (
     _DuckDuckGoParser,
+    _format_markdown_link,
+    _format_search_results,
     _validate_public_url,
     _validate_ustc_url,
     extract_page_text,
@@ -33,6 +35,37 @@ class WebSearchTest(unittest.TestCase):
         )
         self.assertEqual(parser.results[0]["title"], "通知")
         self.assertEqual(parser.results[0]["url"], "https://ustc.edu.cn/news")
+
+    def test_formats_search_results_as_clickable_markdown_links(self):
+        result = _format_search_results([
+            {"title": "科大通知", "url": "https://ustc.edu.cn/news?id=1"},
+        ])
+        self.assertEqual(result, "1. [科大通知](https://ustc.edu.cn/news?id=1)")
+
+    def test_escapes_markdown_label_and_closing_parenthesis(self):
+        result = _format_markdown_link(
+            "通知 [2026]", "https://example.com/article_(latest)"
+        )
+        self.assertEqual(
+            result,
+            r"[通知 \[2026\]](https://example.com/article_(latest%29)",
+        )
+
+    def test_fetch_tools_format_page_source_as_markdown(self):
+        from tools.search import fetch_text_from_url, fetch_ustc_text_from_url
+
+        with patch("tools.search.fetch_page_text", return_value="网页正文"):
+            result = fetch_text_from_url.invoke({"url": "https://example.com/article"})
+        self.assertIn("来源: [网页原文](https://example.com/article)", result)
+
+        with patch("tools.search.fetch_ustc_page_text", return_value="科大正文"):
+            result = fetch_ustc_text_from_url.invoke(
+                {"url": "https://www.ustc.edu.cn/info/1366/25592.htm"}
+            )
+        self.assertIn(
+            "来源: [网页原文](https://www.ustc.edu.cn/info/1366/25592.htm)",
+            result,
+        )
 
     def test_blocks_private_network(self):
         with patch("tools.search.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 80))]):

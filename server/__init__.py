@@ -21,6 +21,7 @@ from server.routes.personal_data import router as personal_data_router
 from server.routes.settings import router as settings_router
 from server.routes.sync import router as sync_router
 from server.routes.health import router as health_router
+from server.routes.schedule import router as schedule_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(sync_router)
     app.include_router(health_router)
+    app.include_router(schedule_router)
 
     # Serve frontend static files (production build must exist)
     frontend_dist = ROOT / "frontend" / "dist"

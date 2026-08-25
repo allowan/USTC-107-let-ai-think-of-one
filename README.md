@@ -4,7 +4,7 @@
 
 ## 功能特性
 
-- **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染
+- **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染和“停止生成”打断
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
@@ -63,7 +63,8 @@ export LLM_BASE_URL="https://api.deepseek.com"
 export LLM_MODEL="deepseek-v4-flash"
 ```
 
-环境变量优先级高于 `settings.json`。
+环境变量优先级高于 `settings.json`。对话 Agent 和 RAG 总结共用这组
+`LLM_*` 配置；如果同时设置了 `OPENAI_*`，RAG 会优先使用 `OPENAI_*`。
 
 ### 3. 配置嵌入模型
 
@@ -136,6 +137,7 @@ npm run dev
 | `LLM_API_KEY` | `env.api_key` | API Key | **必填** |
 | `LLM_BASE_URL` | `env.base_url` | API 地址 | `https://api.deepseek.com` |
 | `LLM_MODEL` | `env.model` | 模型名 | `deepseek-v4-flash` |
+| `LLM_TIMEOUT_SECONDS` | — | RAG 总结请求超时（5–120 秒） | `45` |
 
 ### 嵌入模型配置（`campus_rag/.env`）
 
@@ -442,7 +444,7 @@ from campus_rag import (
 
 | Method | Path | 说明 |
 |---|---|---|
-| POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`） |
+| POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`）；客户端断开即可停止当前生成 |
 | WS | `/ws/chat` | WebSocket 流式对话 |
 
 #### 个人知识库
@@ -549,13 +551,15 @@ Agent 提供四个互补的联网工具：`web_search` 按关键词查找公开�
 限制单页响应大小为 2 MiB、工具输出为 20000 字符；中国科大官方域名允许兼容
 本地代理的 Fake-IP DNS 映射。
 
+搜索工具会将网页标题和 URL 组合成 Markdown 链接（`[标题](URL)`），Agent 在回答中应保留这种格式；聊天页面也会将裸 URL 渲染为可点击链接，并把链接外的括号、句号等标点保留在链接外，在新标签页打开。
+
 ### RAG 模块测试
 
 ```bash
 # 公共数据检索
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
 
-# LLM 总结检索（需配置 settings.json 中的 api_key）
+# LLM 总结检索（需配置 settings.json 中的 api_key 或 LLM_API_KEY）
 python -c "from campus_rag import search_notices_answer; print(search_notices_answer('今年暑假有什么活动？'))"
 
 # 个人数据入库与检索
@@ -584,6 +588,49 @@ pub_idx, user_idx = rag.get_combined_query_engine('local_user')
 print(get_rag_response('今年暑假有什么活动？', pub_idx, user_idx))
 "
 ```
+
+### 课表导入与离线查看
+
+“我的课表”是项目自己的 UI，课程数据保存在本机 `schedule.db`，查看不依赖 Chrome
+或教务系统。进入页面后使用“导入课表文件”导入 JSON/CSV，使用“刷新本地课表”重新
+读取本机数据。若要从教务系统更新，请在教务系统中导出课表后再导入；项目不保存账号、
+密码或浏览器 Cookie，也不通过浏览器插件读取课表。
+
+JSON 格式示例：
+
+```json
+{
+  "semester": "2026年秋季学期",
+  "courses": [
+    {
+      "course_code": "210716.01",
+      "name": "课程名称",
+      "teachers": ["教师姓名"],
+      "credits": 2,
+      "meetings": [
+        {
+          "weekday": 5,
+          "sections": [8, 9],
+          "weeks": [1, 2, 3],
+          "start_time": "15:55",
+          "end_time": "17:30",
+          "location": "教室"
+        }
+      ]
+    }
+  ]
+}
+```
+
+CSV 至少包含 `name,weekday,sections,weeks,location,start_time,end_time` 列。
+课表卡片会同时显示具体时间和节次；未提供具体时间时，系统会对常见节次使用默认时间段。
+
+课表接口：
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/schedule` | 获取当前用户的本地课表 |
+| POST | `/api/schedule/import` | 用结构化课程数据替换指定学期课表 |
 
 ### 后端测试
 
@@ -622,6 +669,7 @@ npm run build       # 生产构建
 ## 已知注意事项
 
 - **首次对话较慢**：Agent 和 RAG 索引采用懒加载，首次调用时需要初始化（约 5-10 秒）
+- **联网搜索超时**：`web_search`/`ustc_web_search` 的连接超时为 5 秒、读取超时为 15 秒；网页正文抓取读取超时为 20 秒，失败会返回明确错误，不会无限等待
 - **嵌入模型**：本地 Ollama 的 `nomic-embed-text` 首次加载需几十秒；切换为云端嵌入可避免此问题
 - **数据文件格式**：`campus_rag/data/` 下的通知文件必须以 `.txt` 结尾，否则会被跳过
 - **文档分块**：每篇通知会被 `SentenceSplitter` 切分为多个 1024 字符的块，管理面板按文件名聚合显示

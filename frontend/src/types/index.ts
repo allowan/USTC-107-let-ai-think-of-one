@@ -72,3 +72,50 @@ export interface SyncResult {
   deleted?: number;
   document_count?: number;
 }
+
+export interface ScheduleCourse {
+  id: number;
+  semester: string;
+  course_code: string;
+  name: string;
+  teachers: string[];
+  weekday: number | null;
+  start_section: number | null;
+  end_section: number | null;
+  weeks: number[];
+  location: string;
+  credits: number | null;
+  start_time: string | null;
+  end_time: string | null;
+  raw_schedule: string;
+  updated_at: string;
+}
+
+export interface ScheduleData {
+  semester: string | null;
+  semesters: string[];
+  courses: ScheduleCourse[];
+}
+
+export interface ScheduleMeetingInput {
+  weekday?: number | null;
+  sections?: number[];
+  weeks?: number[];
+  location?: string;
+  start_time?: string | null;
+  end_time?: string | null;
+}
+
+export interface ScheduleCourseInput {
+  course_code?: string;
+  name: string;
+  teachers?: string[];
+  credits?: number | null;
+  raw_schedule?: string;
+  meetings?: ScheduleMeetingInput[];
+}
+
+export interface ScheduleImportPayload {
+  semester: string;
+  courses: ScheduleCourseInput[];
+}
