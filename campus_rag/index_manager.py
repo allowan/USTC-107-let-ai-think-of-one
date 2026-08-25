@@ -8,17 +8,17 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 from .data_loader import load_documents_from_files, split_documents
 from . import config
 
-_chroma_client = None
+_chroma_clients = {}
 _lock = threading.Lock()
 
 
 def _get_chroma_client(persist_dir: str = "./chroma_db") -> chromadb.PersistentClient:
-    global _chroma_client
-    if _chroma_client is None:
+    path = os.path.abspath(persist_dir)
+    if path not in _chroma_clients:
         with _lock:
-            if _chroma_client is None:
-                _chroma_client = chromadb.PersistentClient(path=persist_dir)
-    return _chroma_client
+            if path not in _chroma_clients:
+                _chroma_clients[path] = chromadb.PersistentClient(path=path)
+    return _chroma_clients[path]
 
 
 def _user_collection_name(user_id: str) -> str:

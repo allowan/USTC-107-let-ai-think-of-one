@@ -347,6 +347,7 @@ class TestDataManagement(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    @unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
     def test_03_add_user_data_and_list(self):
         from campus_rag import add_user_data, list_user_data
         from llama_index.core import Document
@@ -361,6 +362,7 @@ class TestDataManagement(unittest.TestCase):
             from campus_rag.index_manager import RAGSystem
             RAGSystem().clear_user_index(uid)
 
+    @unittest.skipUnless(has_embedding(), "需要 Embedding 服务")
     def test_04_delete_user_data(self):
         from campus_rag import add_user_data, delete_user_data, list_user_data
         from llama_index.core import Document
@@ -441,9 +443,25 @@ class TestQuery(unittest.TestCase):
         self.assertTrue(len(result) > 0)
 
     def test_02_search_notices_finds_content(self):
-        from campus_rag import search_notices
-        result = search_notices("C9暑期学校")
-        self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
+        from campus_rag import query as query_module
+        from llama_index.core import Document
+
+        source = "test_query_c9_fixture"
+        query_module._ensure_init()
+        query_module._rag.add_documents_to_public([
+            Document(
+                text="2026年暑期学校报名通知：南京大学将举办C9暑期学校，欢迎报名参加。",
+                metadata={"source": source},
+            )
+        ])
+        query_module._public_retriever = query_module._rag.get_public_index().as_retriever(
+            similarity_top_k=10
+        )
+        try:
+            result = query_module.search_notices("C9暑期学校")
+            self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
+        finally:
+            query_module._rag.delete_public_documents_by_source(source)
 
     def test_03_search_notices_no_match_format(self):
         from campus_rag import search_notices
@@ -477,7 +495,7 @@ class TestRerankNodes(unittest.TestCase):
     """重排序（需要 reranker 模型，首次运行会下载）。"""
 
     def test_rerank_sorts_by_relevance(self):
-        from campus_rag.query_engine import rerank_nodes, _reranker_available
+        from campus_rag import query_engine
         from llama_index.core.schema import NodeWithScore, TextNode
 
         nodes = [
@@ -485,9 +503,9 @@ class TestRerankNodes(unittest.TestCase):
             NodeWithScore(node=TextNode(text="深度学习使用反向传播算法。"), score=0.5),
             NodeWithScore(node=TextNode(text="机器学习是人工智能的分支。"), score=0.5),
         ]
-        reranked = rerank_nodes("神经网络训练方法", nodes, top_n=2)
+        reranked = query_engine.rerank_nodes("神经网络训练方法", nodes, top_n=2)
         self.assertEqual(len(reranked), 2, "应返回 top_n 条结果")
-        if _reranker_available:
+        if query_engine._reranker_available:
             self.assertIn("反向传播", reranked[0].node.text,
                           "机器学习相关节点应排在最前")
 

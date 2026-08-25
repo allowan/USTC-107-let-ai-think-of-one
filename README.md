@@ -502,6 +502,53 @@ from campus_rag import (
 
 ## 测试
 
+### 网页采集与更新
+
+需要长期跟踪的公开网页配置在 `campus_rag/web_sources.json`：
+
+```json
+[
+  {
+    "name": "中国科大网络信息中心柜面服务",
+    "url": "https://ustcnet.ustc.edu.cn/40939/list.htm",
+    "output": "ustcnet_40939_counter_service.txt"
+  }
+]
+```
+
+抓取并比较网页正文；只有内容变化时才更新本地 TXT：
+
+```bash
+python scripts/sync_web_sources.py
+```
+
+抓取完成后同时重建公共 ChromaDB 向量索引：
+
+```bash
+python scripts/sync_web_sources.py --reindex
+```
+
+通知栏目批量采集配置在 `campus_rag/ustc_columns.json`。默认同步中国科大主页
+“服务类通知”最近一页中的 10 条文章，并将每篇公开正文保存成独立 TXT：
+
+```bash
+python scripts/sync_ustc_columns.py
+python scripts/sync_ustc_columns.py --reindex
+```
+
+`max_pages` 控制追溯页数，`max_articles` 控制单次文章上限。旧版通知若跳转到
+统一身份认证，将记为 `skipped`，不会尝试绕过登录。
+
+Agent 提供四个互补的联网工具：`web_search` 按关键词查找公开网页，
+`web_fetch` 在已知 URL 时提取网页可见正文；`ustc_web_search` 只搜索配置中的
+中国科大官方网站，`ustc_web_fetch` 只读取白名单校站。校站清单配置在
+`campus_rag/ustc_sites.json`，默认包括学校主页、网络信息中心、本科生院教务处、
+研究生院、就业信息网和图书馆。
+
+抓取器拒绝本机和私有网络地址，
+限制单页响应大小为 2 MiB、工具输出为 20000 字符；中国科大官方域名允许兼容
+本地代理的 Fake-IP DNS 映射。
+
 ### RAG 模块测试
 
 ```bash
@@ -609,7 +656,7 @@ npm run build       # 生产构建
 
 ### 工具扩展
 
-- [ ] **联网搜索工具** — 集成 Tavily / DuckDuckGo Search API 作为 Agent 工具，弥补本地知识库的时效性缺口（参考 `tools/search.py` 现有网页抓取逻辑，可复用）
+- [x] **联网搜索工具** — 使用 DuckDuckGo 查找公开网页，并通过独立 `web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
 - [ ] **知识图谱工具** — 基于 Neo4j 或 NetworkX 构建课程依赖、教师关系等结构化知识
 - [ ] **邮件/通知推送工具** — Agent 可代用户订阅关键词，匹配到新通知时推送提醒
 - [ ] **日程解析工具** — 从通知中提取时间、地点、事件，自动生成日历事件

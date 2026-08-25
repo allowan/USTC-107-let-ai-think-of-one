@@ -1,5 +1,7 @@
 *.log
 data/
+!campus_rag/data/
+!campus_rag/data/*.txt
 chroma_db/
 campus_rag/chroma_db/
 node_modules/

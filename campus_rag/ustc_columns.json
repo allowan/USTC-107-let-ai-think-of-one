@@ -1,0 +1,9 @@
+[
+  {
+    "name": "中国科大服务类通知",
+    "url": "https://www.ustc.edu.cn/tzgg/fwltz.htm",
+    "max_pages": 1,
+    "max_articles": 10,
+    "output_prefix": "ustc_service_notice"
+  }
+]

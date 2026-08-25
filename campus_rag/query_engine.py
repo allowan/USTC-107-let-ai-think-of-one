@@ -208,6 +208,8 @@ def get_rag_response(
         for node in final_nodes
     ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
+    if not config.init_llm():
+        raise RuntimeError("LLM 未配置或初始化失败")
     llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
@@ -244,7 +246,8 @@ def get_rag_response_hybrid(
         for node in final_nodes
     ])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    config.init_llm()
+    if not config.init_llm():
+        raise RuntimeError("LLM 未配置或初始化失败")
     llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])

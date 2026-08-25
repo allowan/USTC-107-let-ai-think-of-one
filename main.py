@@ -5,7 +5,12 @@ from pathlib import Path
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from tools.search import fetch_text_from_url
+from tools.search import (
+    fetch_text_from_url,
+    fetch_ustc_text_from_url,
+    search_ustc_web,
+    search_web,
+)
 from campus_rag import search_notices_answer, search_user_data_answer, add_user_data
 from llama_index.core import Document
 import model.config as config
@@ -24,7 +29,10 @@ _MAX_CHECKPOINTS_PER_THREAD = 50
 _MAX_CHECKPOINT_DB_MB = 200
 
 TOOL_METADATA = [
-    {"name": "web_search", "label": "网络搜索", "description": "从URL获取网页文档内容"},
+    {"name": "web_search", "label": "网络搜索", "description": "按关键词搜索公开网页并返回标题和URL"},
+    {"name": "web_fetch", "label": "网页正文", "description": "读取指定公开URL并提取正文"},
+    {"name": "ustc_web_search", "label": "科大网站搜索", "description": "只搜索配置白名单中的中国科大官方网站"},
+    {"name": "ustc_web_fetch", "label": "科大网页正文", "description": "读取白名单内中国科大官方网页正文"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
@@ -40,7 +48,9 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 - 用户个人课表、成绩、教务信息 → search_my_data
 - 需要查看个人数据原文或对比多条信息 → search_user_data_raw
 - 添加个人数据到知识库 → add_personal_data
-- 网页文档内容获取 → web_search
+- 不知道网页地址、需要查找最新公开信息 → web_search
+- 已知网页地址、需要读取完整正文 → web_fetch
+- 中国科大校内信息优先使用 ustc_web_search；拿到URL后使用 ustc_web_fetch 阅读原文
 
 ## 重要规则
 - 用户要求写文章时直接在对话中回复
@@ -161,7 +171,10 @@ async def _prune_checkpoints(conn):
 
 
 _shared_tools = {
-    "web_search": fetch_text_from_url,
+    "web_search": search_web,
+    "web_fetch": fetch_text_from_url,
+    "ustc_web_search": search_ustc_web,
+    "ustc_web_fetch": fetch_ustc_text_from_url,
     "search_campus_notices": search_campus_notices,
     "search_notices_raw": search_notices_raw,
 }
