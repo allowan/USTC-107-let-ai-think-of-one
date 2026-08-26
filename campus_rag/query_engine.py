@@ -229,8 +229,9 @@ def get_rag_response(
 
     context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    # require_llm：未初始化时抛异常，避免静默使用 MockLLM 回声 prompt 假回答
-    llm = config.require_llm()
+    if not config.init_llm():
+        raise RuntimeError("LLM 未配置或初始化失败")
+    llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")
@@ -263,7 +264,9 @@ def get_rag_response_hybrid(
 
     context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    llm = config.require_llm()
+    if not config.init_llm():
+        raise RuntimeError("LLM 未配置或初始化失败")
+    llm = config.Settings.llm
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")

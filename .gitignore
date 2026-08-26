@@ -1,5 +1,7 @@
 *.log
 data/
+!campus_rag/data/
+!campus_rag/data/*.txt
 chroma_db/
 campus_rag/chroma_db/
 node_modules/
@@ -12,7 +14,12 @@ sync_server/data/*.db
 sync_server/data/*.db-journal
 campus_rag/.env
 users.db
+schedule.db
 workspace/
+output/
+
+# macOS
+.DS_Store
 *.db-journal
 *.db-shm
 *.db-wal

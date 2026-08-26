@@ -47,6 +47,65 @@ html, body, #root {
   color: #666;
   margin: 0.4em 0;
 }
+.chat-markdown a.chat-markdown-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #1677ff;
+  vertical-align: text-bottom;
+}
+.chat-markdown-link-icon {
+  display: inline-flex;
+  flex: 0 0 18px;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  overflow: hidden;
+  border: 1px solid #b7d4f7;
+  border-radius: 50%;
+  background: #fff;
+  color: #1677ff;
+  font-size: 12px;
+}
+.chat-markdown-link-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.chat-markdown-link-label {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-markdown a.chat-markdown-link:hover {
+  color: #0958d9;
+}
+.chat-markdown-table {
+  max-width: 100%;
+  margin: 0.6em 0;
+  overflow-x: auto;
+}
+.chat-markdown table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 0.95em;
+  line-height: 1.45;
+}
+.chat-markdown th,
+.chat-markdown td {
+  padding: 6px 10px;
+  border: 1px solid #d9d9d9;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-markdown th {
+  background: #f5f7fa;
+  font-weight: 600;
+}
+.chat-markdown tr:nth-child(even) td {
+  background: #fafafa;
+}
 
 /* Stream status indicator */
 .stream-status {
@@ -65,4 +124,137 @@ html, body, #root {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+/* Weekly schedule grid */
+.schedule-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+
+.schedule-scroll {
+  overflow-x: auto;
+  border: 1px solid #d9e2f0;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 4px 18px rgba(31, 61, 99, 0.08);
+}
+
+.schedule-grid {
+  display: grid;
+  min-width: 1230px;
+  position: relative;
+  background: #f8fbff;
+}
+
+.schedule-corner,
+.schedule-section-header,
+.schedule-day-header,
+.schedule-period-label,
+.schedule-section-number,
+.schedule-cell {
+  border-right: 1px solid #d9e2f0;
+  border-bottom: 1px solid #d9e2f0;
+}
+
+.schedule-corner,
+.schedule-section-header,
+.schedule-day-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #eef5ff;
+  color: #24466f;
+  font-weight: 600;
+}
+
+.schedule-corner {
+  grid-column: 1;
+  grid-row: 1;
+  font-size: 12px;
+}
+
+.schedule-section-header {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 12px;
+}
+
+.schedule-day-header {
+  font-size: 14px;
+}
+
+.schedule-period-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  writing-mode: vertical-rl;
+  letter-spacing: 4px;
+  background: #fffbe6;
+  color: #876800;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.schedule-period-label.afternoon {
+  background: #f0fff0;
+  color: #3f7b3f;
+}
+
+.schedule-period-label.evening {
+  background: #f4f0ff;
+  color: #64518a;
+}
+
+.schedule-section-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fbfdff;
+  color: #61738a;
+  font-size: 12px;
+}
+
+.schedule-cell {
+  background: #fff;
+}
+
+.schedule-course-block {
+  z-index: 2;
+  min-width: 0;
+  margin: 4px;
+  padding: 7px 6px;
+  overflow: hidden;
+  border: 1px solid #9bc5ec;
+  border-radius: 7px;
+  background: linear-gradient(145deg, #e4f2ff, #cfe7fb);
+  color: #1f4f7b;
+  box-shadow: 0 2px 6px rgba(71, 135, 190, 0.18);
+  text-align: center;
+}
+
+.schedule-course-time {
+  color: #5b7894;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.schedule-course-name {
+  margin: 2px 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedule-course-meta {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

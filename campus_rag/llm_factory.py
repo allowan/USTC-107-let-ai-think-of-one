@@ -19,9 +19,35 @@ def get_llm():
     provider = os.getenv("LLM_PROVIDER", "openai")
 
     if provider == "openai":
-        api_key = os.getenv("OPENAI_API_KEY") or settings.get("api_key", "")
-        base_url = os.getenv("OPENAI_BASE_URL") or settings.get("base_url", "https://api.deepseek.com")
-        model = os.getenv("OPENAI_MODEL") or "deepseek-chat"
+        # The chat agent uses the LLM_* names. Keep OPENAI_* as an override so
+        # the RAG summarizer works with the same local configuration instead of
+        # constructing a client with an empty key and failing much later.
+        api_key = (
+            os.getenv("OPENAI_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or settings.get("api_key", "")
+        )
+        base_url = (
+            os.getenv("OPENAI_BASE_URL")
+            or os.getenv("LLM_BASE_URL")
+            or settings.get("base_url", "https://api.deepseek.com")
+        )
+        model = (
+            os.getenv("OPENAI_MODEL")
+            or os.getenv("LLM_MODEL")
+            or settings.get("model", "deepseek-chat")
+        )
+        if not api_key:
+            raise RuntimeError(
+                "未配置 LLM API Key。请设置 LLM_API_KEY 或 OPENAI_API_KEY，"
+                "或在 settings.json 的 env.api_key 中配置。"
+            )
+
+        try:
+            request_timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+        except ValueError:
+            request_timeout = 45.0
+        request_timeout = max(5.0, min(request_timeout, 120.0))
 
         # DeepSeek V4 模型挂在 /beta 端点下，settings.json 的 base_url 若未带该后缀
         # 会 404。此处幂等地补上 /beta，使配置无论写不写后缀均可正常调用。
@@ -44,7 +70,7 @@ def get_llm():
             api_key=api_key,
             api_base=base_url,
             temperature=0.1,
-            timeout=120.0,
+            timeout=request_timeout,
             max_tokens=4096,
         )
 

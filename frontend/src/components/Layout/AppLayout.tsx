@@ -9,6 +9,7 @@ import {
   PlusOutlined,
   DeleteOutlined,
   CommentOutlined,
+  CalendarOutlined,
 } from '@ant-design/icons';
 import { useTopicStore } from '@/stores/topicStore';
 import SettingsModal from './SettingsModal';
@@ -38,6 +39,7 @@ export default function AppLayout() {
   const menuItems = [
     { key: '/chat', icon: <MessageOutlined />, label: '对话' },
     { key: '/personal-data', icon: <DatabaseOutlined />, label: '个人数据' },
+    { key: '/schedule', icon: <CalendarOutlined />, label: '我的课表' },
     { key: '/sync', icon: <SyncOutlined />, label: '数据同步' },
   ];
 

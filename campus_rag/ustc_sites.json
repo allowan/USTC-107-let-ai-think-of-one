@@ -1,0 +1,32 @@
+[
+  {
+    "name": "中国科学技术大学主页",
+    "url": "https://www.ustc.edu.cn/",
+    "topics": "学校新闻、通知公告、院系与机构入口"
+  },
+  {
+    "name": "网络信息中心",
+    "url": "https://ustcnet.ustc.edu.cn/",
+    "topics": "校园网络、邮箱、统一身份认证、正版软件、柜面服务"
+  },
+  {
+    "name": "本科生院教务处",
+    "url": "https://www.teach.ustc.edu.cn/",
+    "topics": "本科教学、选课、考试、培养方案、教务通知"
+  },
+  {
+    "name": "研究生院",
+    "url": "https://gradschool.ustc.edu.cn/",
+    "topics": "研究生招生、培养、学位、奖助、通知公告"
+  },
+  {
+    "name": "就业信息网",
+    "url": "https://job.ustc.edu.cn/",
+    "topics": "招聘、宣讲会、双选会、就业手续"
+  },
+  {
+    "name": "图书馆",
+    "url": "https://lib.ustc.edu.cn/",
+    "topics": "馆藏检索、数据库、开放时间、读者服务"
+  }
+]

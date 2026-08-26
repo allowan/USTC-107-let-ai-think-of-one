@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from server.deps import get_user
@@ -15,6 +15,7 @@ router = APIRouter(tags=["chat"])
 
 @router.post("/api/chat/stream")
 async def chat_stream(
+    request: Request,
     body: dict,
     user: str = Depends(get_user),
     chat: ChatService = Depends(get_chat_service),
@@ -27,6 +28,6 @@ async def chat_stream(
         raise HTTPException(status_code=400, detail="消息长度不能超过 10000 字符")
 
     return StreamingResponse(
-        chat.sse_generator(user, content, topic_id),
+        chat.sse_generator(user, content, topic_id, request=request),
         media_type="text/event-stream; charset=utf-8",
     )

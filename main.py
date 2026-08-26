@@ -5,7 +5,12 @@ from pathlib import Path
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from tools.search import fetch_url, search_web
+from tools.search import (
+    fetch_text_from_url,
+    fetch_ustc_text_from_url,
+    search_ustc_web,
+    search_web,
+)
 from campus_rag import search_notices_answer, search_user_data_answer, add_user_data
 from llama_index.core import Document
 import model.config as config
@@ -24,8 +29,10 @@ _MAX_CHECKPOINTS_PER_THREAD = 50
 _MAX_CHECKPOINT_DB_MB = 200
 
 TOOL_METADATA = [
-    {"name": "web_search", "label": "联网搜索", "description": "联网搜索关键词，返回搜索结果列表（标题/摘要/链接），弥补本地知识库时效性缺口"},
-    {"name": "fetch_url", "label": "网页抓取", "description": "获取指定 URL 网页的正文文本，配合联网搜索精读某条结果"},
+    {"name": "web_search", "label": "网络搜索", "description": "按关键词搜索公开网页并返回标题和URL"},
+    {"name": "web_fetch", "label": "网页正文", "description": "读取指定公开URL并提取正文"},
+    {"name": "ustc_web_search", "label": "科大网站搜索", "description": "只搜索配置白名单中的中国科大官方网站"},
+    {"name": "ustc_web_fetch", "label": "科大网页正文", "description": "读取白名单内中国科大官方网页正文"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
@@ -41,16 +48,19 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 - 用户个人课表、成绩、教务信息 → search_my_data
 - 需要查看个人数据原文或对比多条信息 → search_user_data_raw
 - 添加个人数据到知识库 → add_personal_data
-- 本地知识库查不到的时效性、校外信息 → web_search（联网搜索）；本地检索无结果或与问题无关时**必须**改用 web_search，不要只建议用户自行上网查询
-- 需要精读某条联网搜索结果的完整内容 → fetch_url
+- 不知道网页地址、需要查找最新公开信息 → web_search
+- 已知网页地址、需要读取完整正文 → web_fetch
+- 中国科大校内信息优先使用 ustc_web_search；拿到URL后使用 ustc_web_fetch 阅读原文
 
 ## 重要规则
 - 用户要求写文章时直接在对话中回复
 
 ## 回答规范
 1. 先在心里梳理检索到的信息要点，再用自己的话组织成自然的回答
-2. 在回答末尾列出信息来源：校园通知引文件名与源链接，联网搜索结果引网页链接，方便用户溯源
-3. 如果检索结果为空或完全无关，直接说"未找到相关信息"
+2. 在回答末尾列出信息来源（文件名或出处）；网页来源必须使用 Markdown 链接格式 `[标题](URL)`，不要只输出裸 URL
+3. 如果搜索工具已经返回 Markdown 链接，请保留链接格式并在最终来源列表中复用
+4. 如果需要在链接外加括号或句号，把这些标点放在 Markdown 链接语法之外
+5. 如果检索结果为空或完全无关，直接说"未找到相关信息"
 
 ## 多跳推理指南
 1. 面对复杂问题时，先用 search_notices_raw 或 search_campus_notices 进行第一次检索
@@ -164,7 +174,9 @@ async def _prune_checkpoints(conn):
 
 _shared_tools = {
     "web_search": search_web,
-    "fetch_url": fetch_url,
+    "web_fetch": fetch_text_from_url,
+    "ustc_web_search": search_ustc_web,
+    "ustc_web_fetch": fetch_ustc_text_from_url,
     "search_campus_notices": search_campus_notices,
     "search_notices_raw": search_notices_raw,
 }

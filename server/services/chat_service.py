@@ -141,18 +141,32 @@ class ChatService:
                         text = str(text)
                     yield ("token", text)
 
-    async def sse_generator(self, username: str, content: str, topic_id: str):
+    async def sse_generator(self, username: str, content: str, topic_id: str, request=None):
         """Full SSE response generator with error handling and retry on corrupted checkpoints."""
         thread_id = self._thread_id(username, topic_id)
 
         async def _stream():
+            # The browser's AbortController closes the HTTP connection. Check
+            # it between events so a disconnected client cannot keep draining
+            # the model stream or trigger the checkpoint-retry path.
+            if request is not None and await request.is_disconnected():
+                logger.info("SSE client disconnected before streaming thread %s", thread_id)
+                return
             async for event_type, data in self.stream_chat_events(username, content, topic_id):
+                if request is not None and await request.is_disconnected():
+                    logger.info("SSE client disconnected during thread %s", thread_id)
+                    return
                 yield f"data: {json.dumps({'type': event_type, 'content': data})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         try:
             async for chunk in _stream():
                 yield chunk
+        except asyncio.CancelledError:
+            # A disconnected StreamingResponse is cancelled by ASGI. It is a
+            # normal user interruption, not a model/checkpoint failure.
+            logger.info("SSE stream cancelled for thread %s", thread_id)
+            raise
         except Exception as exc:
             err_msg = str(exc)
             if "tool_calls" in err_msg and "tool messages" in err_msg:
