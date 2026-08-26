@@ -5,11 +5,24 @@ Chat service: agent lifecycle, streaming (SSE/WS), checkpoint management.
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger("server")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _llm_credentials_configured() -> bool:
+    """Return whether chat-agent construction has the credential it needs.
+
+    Schedule and personal-data APIs do not require an LLM. Keep the chat
+    service lazy so a local installation can start those APIs before the user
+    configures a model.
+    """
+    from model.config import read_json
+
+    return bool(os.environ.get("LLM_API_KEY") or read_json().get("api_key"))
 
 
 class ChatService:
@@ -19,11 +32,25 @@ class ChatService:
         self._default_agent = None  # AgentContext
         self._user_agents: dict[str, object] = {}  # username -> AgentContext
         self._pending_closes: set[asyncio.Task] = set()
+        self._initialization_error: str | None = None
 
     async def initialize(self):
+        if not _llm_credentials_configured():
+            self._initialization_error = (
+                "未配置 LLM API Key。请在环境变量 LLM_API_KEY 中设置，"
+                "或复制 settings.example.json 为 settings.json 并填入 api_key。"
+            )
+            logger.warning("ChatService is unavailable: %s", self._initialization_error)
+            return
+
         from main import build_agent
         self._default_agent = await build_agent()
+        self._initialization_error = None
         logger.info("ChatService initialized")
+
+    @property
+    def is_ready(self) -> bool:
+        return self._default_agent is not None
 
     async def shutdown(self):
         from main import close_agent
@@ -35,6 +62,9 @@ class ChatService:
         logger.info("ChatService shut down")
 
     async def _get_agent(self, username: str = ""):
+        if self._initialization_error and not _llm_credentials_configured():
+            raise RuntimeError(self._initialization_error)
+
         if username:
             if username in self._user_agents:
                 return self._user_agents[username]
@@ -46,7 +76,12 @@ class ChatService:
             return ctx
         if self._default_agent is None:
             from main import build_agent
-            self._default_agent = await build_agent()
+            try:
+                self._default_agent = await build_agent()
+                self._initialization_error = None
+            except Exception as exc:
+                self._initialization_error = str(exc)
+                raise
         return self._default_agent
 
     def invalidate_user_agent(self, username: str):

@@ -107,6 +107,8 @@ python server.py
 
 服务运行在 `http://localhost:8000`，API 文档在 `http://localhost:8000/api/docs`。
 
+未配置 `LLM_API_KEY` 时，后端仍会启动；聊天功能会显示模型配置错误，但课表导入、课表查询和个人数据功能仍可使用。
+
 > **Windows 注意**：如果使用 conda，确保先 `conda activate 107`。如果遇到 Ollama 嵌入返回 502 错误，说明系统代理干扰了 httpx，`llm_factory.py` 已内置清除代理环境变量的逻辑，重启服务即可。
 
 ### 6. 启动 Sync Server（可选）
@@ -541,11 +543,24 @@ python scripts/sync_ustc_columns.py --reindex
 `max_pages` 控制追溯页数，`max_articles` 控制单次文章上限。旧版通知若跳转到
 统一身份认证，将记为 `skipped`，不会尝试绕过登录。
 
-Agent 提供四个互补的联网工具：`web_search` 按关键词查找公开网页，
+Agent 提供六个互补的联网工具：`web_search` 按关键词查找公开网页，
 `web_fetch` 在已知 URL 时提取网页可见正文；`ustc_web_search` 只搜索配置中的
-中国科大官方网站，`ustc_web_fetch` 只读取白名单校站。校站清单配置在
-`campus_rag/ustc_sites.json`，默认包括学校主页、网络信息中心、本科生院教务处、
-研究生院、就业信息网和图书馆。
+中国科大官方网站，`ustc_web_fetch` 只读取白名单校站；`course_review_search`
+和 `course_review_fetch` 专门搜索、读取 USTC 评课社区的公开课程页。校站清单配置在
+`campus_rag/ustc_sites.json`，已包含综合教务系统
+`https://jw.ustc.edu.cn/home` 和公开课程目录
+`https://catalog.ustc.edu.cn/query`；评课社区配置在
+`campus_rag/course_review_sites.json`，入口为 `https://icourse.club/`。
+
+### 选课信息与评课对比
+
+综合教务系统的个人课表、已选课程和选课结果需要统一身份认证。项目可以打开并检索
+教务公开页面，但不会保存账号、密码、Cookie，也不会代替用户提交选课；个人课表继续
+通过“获取课表”导入用户主动复制或选择的 HTML/JSON。公开课程目录可作为官方课程信息
+来源。用户询问选课建议时，Agent 会先使用教务系统/课程目录获取课程名称、教师、学分、
+时间等官方信息，再使用 `course_review_search` / `course_review_fetch` 查询
+`icourse.club` 的评分、难度、作业量、给分、收获和学生点评，回答中分别标注官方事实与
+学生主观意见。评课内容可能过时或存在样本偏差，只作为参考。
 
 抓取器拒绝本机和私有网络地址，
 限制单页响应大小为 2 MiB、工具输出为 20000 字符；中国科大官方域名允许兼容
@@ -592,9 +607,12 @@ print(get_rag_response('今年暑假有什么活动？', pub_idx, user_idx))
 ### 课表导入与离线查看
 
 “我的课表”是项目自己的 UI，课程数据保存在本机 `schedule.db`，查看不依赖 Chrome
-或教务系统。进入页面后使用“导入课表文件”导入 JSON/CSV，使用“刷新本地课表”重新
-读取本机数据。若要从教务系统更新，请在教务系统中导出课表后再导入；项目不保存账号、
-密码或浏览器 Cookie，也不通过浏览器插件读取课表。
+或教务系统。进入页面后可以使用“导入课表文件”导入 JSON/CSV，也可以点击“获取课表”，
+在教务系统打开“我的课表”，等待课程加载完成后，在开发者工具 Console 执行
+`copy(document.documentElement.outerHTML)`，再将复制内容粘贴到导入窗口。解析器读取 USTC
+教务系统的 `#lessons` 明细表和 `timetable` 节次时间，导入后使用“刷新本地课表”重新读取
+本机数据。个人数据页面的“导入已有课表”会选择本机已保存的学期课表并同步到个人知识库，
+不会重新请求或解析教务 HTML，也不会修改结构化课表。项目不保存账号、密码或浏览器 Cookie。
 
 JSON 格式示例：
 
@@ -631,6 +649,8 @@ CSV 至少包含 `name,weekday,sections,weeks,location,start_time,end_time` 列�
 |---|---|---|
 | GET | `/api/schedule` | 获取当前用户的本地课表 |
 | POST | `/api/schedule/import` | 用结构化课程数据替换指定学期课表 |
+| POST | `/api/schedule/import-ustc` | 解析用户提供的 USTC 课表 HTML/JSON 并更新课表 |
+| POST | `/api/personal-data/import-schedule` | 读取已保存课表并同步到个人数据 |
 
 ### 后端测试
 

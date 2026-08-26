@@ -6,8 +6,10 @@ from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from tools.search import (
+    fetch_course_review_text,
     fetch_text_from_url,
     fetch_ustc_text_from_url,
+    search_course_reviews,
     search_ustc_web,
     search_web,
 )
@@ -33,11 +35,15 @@ TOOL_METADATA = [
     {"name": "web_fetch", "label": "网页正文", "description": "读取指定公开URL并提取正文"},
     {"name": "ustc_web_search", "label": "科大网站搜索", "description": "只搜索配置白名单中的中国科大官方网站"},
     {"name": "ustc_web_fetch", "label": "科大网页正文", "description": "读取白名单内中国科大官方网页正文"},
+    {"name": "course_review_search", "label": "评课社区搜索", "description": "搜索 icourse.club 的公开课程评价和课程详情页"},
+    {"name": "course_review_fetch", "label": "评课社区正文", "description": "读取 icourse.club 公开课程详情与学生点评"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
     {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
     {"name": "add_personal_data", "label": "添加个人数据", "description": "将文本内容添加到个人知识库，用于后续检索"},
+    {"name": "get_my_schedule", "label": "获取我的课表", "description": "读取本地已导入的结构化课表，按学期和上课安排返回"},
+    {"name": "import_ustc_schedule", "label": "导入教务课表", "description": "解析用户提供的中国科大教务课表 HTML/JSON 并更新本地课表数据库"},
 ]
 
 SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
@@ -46,11 +52,15 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 - 校园活动、比赛、课程、讲座、报名 → search_campus_notices
 - 需要查看通知原文或对比多条信息 → search_notices_raw
 - 用户个人课表、成绩、教务信息 → search_my_data
+- 用户询问已导入的具体课表安排 → get_my_schedule
 - 需要查看个人数据原文或对比多条信息 → search_user_data_raw
 - 添加个人数据到知识库 → add_personal_data
+- 用户提供教务系统课表 HTML/JSON 并要求导入 → import_ustc_schedule
+- 用户比较课程、教师、难度、作业量或给分 → course_review_search；拿到课程页后用 course_review_fetch
 - 不知道网页地址、需要查找最新公开信息 → web_search
 - 已知网页地址、需要读取完整正文 → web_fetch
 - 中国科大校内信息优先使用 ustc_web_search；拿到URL后使用 ustc_web_fetch 阅读原文
+- 选课建议要把教务系统/课程目录的官方信息与评课社区的学生意见分开标注；评课社区内容仅供参考，不要把主观评价当作官方事实，也不要替用户自动提交选课
 
 ## 重要规则
 - 用户要求写文章时直接在对话中回复
@@ -134,6 +144,66 @@ def _make_search_user_data_raw(username: str):
     return search_user_data_raw
 
 
+def _make_get_my_schedule(username: str):
+    @tool
+    def get_my_schedule(semester: str = "") -> str:
+        """读取用户已经导入本地数据库的课表；可选填写学期名称。"""
+        try:
+            from server.services.schedule_service import get_schedule_service
+
+            data = get_schedule_service().list(username, semester.strip() or None)
+            courses = data.get("courses") or []
+            if not courses:
+                return "当前没有已导入的课表。请在‘我的课表’中导入教务课表 HTML 或结构化 JSON。"
+            lines = [f"学期：{data.get('semester') or semester or '未指定'}"]
+            weekday_names = ["", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            for row in courses:
+                teachers = "、".join(row.get("teachers") or []) or "教师待定"
+                code = f"{row.get('course_code')} " if row.get("course_code") else ""
+                sections = ""
+                if row.get("start_section"):
+                    end = row.get("end_section") or row["start_section"]
+                    sections = f"第{row['start_section']}-{end}节"
+                weekday = row.get("weekday")
+                weekday_text = weekday_names[weekday] if weekday in range(1, 8) else "星期待定"
+                weeks = row.get("weeks") or []
+                week_text = f"第{min(weeks)}-{max(weeks)}周" if weeks else "周次见课表"
+                time_text = ""
+                if row.get("start_time") and row.get("end_time"):
+                    time_text = f" {row['start_time']}-{row['end_time']}"
+                lines.append(
+                    f"- {code}{row['name']}；{weekday_text} {sections}{time_text}；"
+                    f"{week_text}；{row.get('location') or '地点待定'}；教师：{teachers}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error("get_my_schedule failed: %s", e, exc_info=True)
+            return f"获取课表时出错: {e}"
+
+    return get_my_schedule
+
+
+def _make_import_ustc_schedule(username: str):
+    @tool
+    def import_ustc_schedule(content: str, filename: str = "") -> str:
+        """解析用户提供的 USTC 教务课表 HTML/JSON，并更新本地课表数据库。"""
+        try:
+            from server.services.schedule_service import get_schedule_service
+            from server.services.ustc_schedule import parse_ustc_schedule
+
+            parsed = parse_ustc_schedule(content, filename)
+            count = get_schedule_service().replace(username, parsed["semester"], parsed["courses"])
+            return (
+                f"已解析并更新课表：{parsed['semester']}，"
+                f"{len(parsed['courses'])} 门课程，{count} 个上课安排。"
+            )
+        except Exception as e:
+            logger.error("import_ustc_schedule failed: %s", e, exc_info=True)
+            return f"导入教务课表时出错: {e}"
+
+    return import_ustc_schedule
+
+
 _SINGLETON_CONN = None
 
 
@@ -177,6 +247,8 @@ _shared_tools = {
     "web_fetch": fetch_text_from_url,
     "ustc_web_search": search_ustc_web,
     "ustc_web_fetch": fetch_ustc_text_from_url,
+    "course_review_search": search_course_reviews,
+    "course_review_fetch": fetch_course_review_text,
     "search_campus_notices": search_campus_notices,
     "search_notices_raw": search_notices_raw,
 }
@@ -188,6 +260,8 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
         "search_my_data": _make_search_my_data(username),
         "add_personal_data": _make_add_personal_data(username),
         "search_user_data_raw": _make_search_user_data_raw(username),
+        "get_my_schedule": _make_get_my_schedule(username),
+        "import_ustc_schedule": _make_import_ustc_schedule(username),
     }
     all_tools = {**_shared_tools, **user_tools}
 
@@ -207,19 +281,24 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
     """Create an Agent instance. Tools requiring user context are created via closure
     when *username* is provided."""
     global _SINGLETON_CONN
+    model = config.init_chat()
     _CHECKPOINT_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(str(_CHECKPOINT_DB))
-    await _prune_checkpoints(conn)
-    checkpointer = AsyncSqliteSaver(conn)
+    try:
+        await _prune_checkpoints(conn)
+        checkpointer = AsyncSqliteSaver(conn)
 
-    tools = _build_tool_list(username, enabled_tool_names)
+        tools = _build_tool_list(username, enabled_tool_names)
 
-    agent = create_agent(
-        model=config.init_chat(),
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=checkpointer,
-    )
+        agent = create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=SYSTEM_PROMPT,
+            checkpointer=checkpointer,
+        )
+    except Exception:
+        await conn.close()
+        raise
     ctx = AgentContext(agent=agent, conn=conn, username=username)
 
     if not username and enabled_tool_names is None:

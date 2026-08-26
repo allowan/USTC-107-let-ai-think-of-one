@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from server.deps import get_user
 from server.services.schedule_service import ScheduleService, get_schedule_service
+from server.services.ustc_schedule import UstcScheduleParseError, parse_ustc_schedule
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
@@ -32,6 +33,24 @@ class ScheduleImport(BaseModel):
     courses: list[Course] = Field(max_length=500)
 
 
+class UstcScheduleImport(BaseModel):
+    """Content explicitly exported or pasted by the user from USTC JW."""
+
+    content: str = Field(min_length=1, max_length=5_000_000)
+    filename: str = Field(default="", max_length=255)
+
+
+def ensure_local_origin(request: Request) -> None:
+    origin = request.headers.get("origin", "")
+    allowed_origin = (
+        not origin
+        or origin.startswith("http://localhost")
+        or origin.startswith("http://127.0.0.1")
+    )
+    if not allowed_origin:
+        raise HTTPException(status_code=403, detail="不允许的课表导入来源")
+
+
 @router.get("")
 async def list_schedule(
     semester: str | None = None,
@@ -48,15 +67,31 @@ async def import_schedule(
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
 ):
-    origin = request.headers.get("origin", "")
-    allowed_origin = (
-        not origin
-        or origin.startswith("http://localhost")
-        or origin.startswith("http://127.0.0.1")
-    )
-    if not allowed_origin:
-        raise HTTPException(status_code=403, detail="不允许的课表导入来源")
+    ensure_local_origin(request)
     if not payload.courses:
         raise HTTPException(status_code=400, detail="未读取到课程")
     count = service.replace(user, payload.semester, [course.model_dump() for course in payload.courses])
     return {"message": "课表同步成功", "semester": payload.semester, "meeting_count": count}
+
+
+@router.post("/import-ustc")
+async def import_ustc_schedule(
+    payload: UstcScheduleImport,
+    request: Request,
+    user: str = Depends(get_user),
+    service: ScheduleService = Depends(get_schedule_service),
+):
+    """Parse an exported USTC course-table page and replace that semester."""
+
+    ensure_local_origin(request)
+    try:
+        parsed = parse_ustc_schedule(payload.content, payload.filename)
+    except UstcScheduleParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    count = service.replace(user, parsed["semester"], parsed["courses"])
+    return {
+        "message": "教务课表解析并同步成功",
+        "semester": parsed["semester"],
+        "course_count": len(parsed["courses"]),
+        "meeting_count": count,
+    }

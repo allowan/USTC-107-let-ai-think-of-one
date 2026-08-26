@@ -77,6 +77,15 @@ export const personalDataApi = {
 
   delete: (source: string) =>
     api.delete<{ message: string }>(`/personal-data/${encodeURIComponent(source)}`),
+
+  importExistingSchedule: (semester?: string) =>
+    api.post<{
+      message: string;
+      semester: string;
+      source: string;
+      course_count: number;
+      meeting_count: number;
+    }>('/personal-data/import-schedule', { semester: semester || '' }),
 };
 
 export const scheduleApi = {
@@ -84,6 +93,13 @@ export const scheduleApi = {
     api.get<import('@/types').ScheduleData>('/schedule', { params: semester ? { semester } : {} }),
   import: (payload: import('@/types').ScheduleImportPayload) =>
     api.post<{ message: string; semester: string; meeting_count: number }>('/schedule/import', payload),
+  importUstc: (content: string, filename?: string) =>
+    api.post<{
+      message: string;
+      semester: string;
+      course_count: number;
+      meeting_count: number;
+    }>('/schedule/import-ustc', { content, filename: filename || '' }),
 };
 
 export default api;

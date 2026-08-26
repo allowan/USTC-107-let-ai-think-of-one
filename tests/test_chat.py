@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from server.services.chat_service import ChatService
 
@@ -12,6 +14,15 @@ class _Request:
 
 
 class ChatServiceStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_initialize_without_llm_key_keeps_base_server_usable(self):
+        service = ChatService()
+        with patch.dict(os.environ, {"LLM_API_KEY": ""}, clear=False):
+            with patch("model.config.read_json", return_value={}):
+                await service.initialize()
+
+        self.assertFalse(service.is_ready)
+        self.assertIn("未配置 LLM API Key", service._initialization_error)
+
     async def test_sse_does_not_start_model_after_disconnect(self):
         service = ChatService()
 

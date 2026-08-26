@@ -1,8 +1,9 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, App, Button, Empty, Select, Space, Spin, Tag, Typography } from 'antd';
-import { FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
 import { scheduleApi } from '@/services/api';
 import type { ScheduleData, ScheduleImportPayload } from '@/types';
+import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
 
 const { Text, Title } = Typography;
 const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
@@ -52,6 +53,7 @@ export default function SchedulePage() {
   const [data, setData] = useState<ScheduleData>({ semester: null, semesters: [], courses: [] });
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [ustcImportVisible, setUstcImportVisible] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (semester?: string) => {
@@ -115,6 +117,9 @@ export default function SchedulePage() {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load(data.semester || undefined)}>
             刷新本地课表
           </Button>
+          <Button icon={<CloudDownloadOutlined />} onClick={() => setUstcImportVisible(true)}>
+            获取课表
+          </Button>
           <Button type="primary" icon={<FileAddOutlined />} loading={importing} onClick={() => fileInput.current?.click()}>
             导入课表文件
           </Button>
@@ -128,12 +133,12 @@ export default function SchedulePage() {
           showIcon
           style={{ marginBottom: 16 }}
           message="导入课表后即可离线查看"
-          description="支持项目结构化 JSON 或 CSV。导入完成后不需要保持浏览器或教务系统登录。"
+          description="可从中国科大教务系统复制加载完成后的页面内容导入，也支持项目结构化 JSON/CSV。导入完成后不需要保持浏览器或教务系统登录。"
         />
       )}
 
       {loading ? <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div> : data.courses.length === 0 ? (
-        <Empty description="暂无本地课表，请导入 JSON 或 CSV 文件" />
+        <Empty description="暂无本地课表，请点击“获取课表”手动导入，或导入 JSON/CSV 文件" />
       ) : (
         <>
           <div className="schedule-summary">
@@ -197,6 +202,11 @@ export default function SchedulePage() {
           </div>
         </>
       )}
+      <UstcScheduleImportModal
+        open={ustcImportVisible}
+        onCancel={() => setUstcImportVisible(false)}
+        onImported={(result) => void load(result.semester)}
+      />
     </div>
   );
 }

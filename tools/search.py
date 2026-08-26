@@ -23,8 +23,14 @@ MAX_TOOL_CHARS = 20_000
 # a reachable site may still need a few seconds to return its HTML.
 SEARCH_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 FETCH_TIMEOUT = httpx.Timeout(20.0, connect=5.0)
-TRUSTED_PROXY_HOST_SUFFIXES = ("ustc.edu.cn",)
+# The local proxy may resolve selected public domains to RFC 5737-style
+# reserved fake IPs. These are trusted only for the explicitly configured
+# campus/review sites; arbitrary domains still require globally routable DNS.
+TRUSTED_PROXY_HOST_SUFFIXES = ("ustc.edu.cn", "icourse.club")
 USTC_SITES_PATH = Path(__file__).resolve().parent.parent / "campus_rag" / "ustc_sites.json"
+COURSE_REVIEW_SITES_PATH = (
+    Path(__file__).resolve().parent.parent / "campus_rag" / "course_review_sites.json"
+)
 logger = logging.getLogger("tools.search")
 
 
@@ -169,6 +175,40 @@ class _DuckDuckGoParser(HTMLParser):
         self._title = []
 
 
+class _CourseReviewSearchParser(HTMLParser):
+    """Extract course detail links from the public icourse search page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._href: str | None = None
+        self._title: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag != "a":
+            return
+        attrs_dict = dict(attrs)
+        href = attrs_dict.get("href") or ""
+        if re.match(r"^/course/\d+/?(?:\?.*)?$", href):
+            self._href = href
+            self._title = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._title.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or self._href is None:
+            return
+        title = re.sub(r"\s+", " ", " ".join(self._title)).strip()
+        if title:
+            self.results.append(
+                {"title": title, "url": urljoin("https://icourse.club", self._href)}
+            )
+        self._href = None
+        self._title = []
+
+
 def _search_web_results(query: str, max_results: int = 5) -> list[dict[str, str]]:
     query = query.strip()
     if not query:
@@ -249,6 +289,96 @@ def fetch_ustc_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> str:
     )
 
 
+def load_course_review_sites() -> list[dict[str, object]]:
+    """Load public course-review site configuration."""
+    return json.loads(COURSE_REVIEW_SITES_PATH.read_text(encoding="utf-8"))
+
+
+def _course_review_allowed_hosts() -> set[str]:
+    hosts: set[str] = set()
+    for site in load_course_review_sites():
+        urls = site.get("urls") or ([site["url"]] if site.get("url") else [])
+        for url in urls:
+            hostname = urlparse(str(url)).hostname
+            if hostname:
+                hosts.add(hostname.lower())
+    return hosts
+
+
+def _course_review_paths() -> set[str]:
+    return {
+        str(site.get("course_path") or "/course/")
+        for site in load_course_review_sites()
+    }
+
+
+def _search_course_review_site_results(query: str, max_results: int = 10) -> list[dict[str, str]]:
+    query = query.strip()
+    if not query:
+        raise ValueError("搜索关键词不能为空")
+    response = httpx.get(
+        "https://icourse.club/search/?q=" + quote_plus(query),
+        headers={"User-Agent": USER_AGENT},
+        timeout=SEARCH_TIMEOUT,
+        follow_redirects=True,
+    )
+    response.raise_for_status()
+    if len(response.content) > MAX_RESPONSE_BYTES:
+        raise ValueError("评课社区搜索响应超过 2 MiB 限制")
+    parser = _CourseReviewSearchParser()
+    parser.feed(response.text)
+    return parser.results[: max(1, min(max_results, 10))]
+
+
+def _validate_course_review_url(url: str) -> str:
+    validated = _validate_public_url(url)
+    parsed = urlparse(validated)
+    if parsed.hostname.lower() not in _course_review_allowed_hosts():
+        raise ValueError("该 URL 不在评课社区白名单中")
+    if not any(parsed.path.startswith(prefix) for prefix in _course_review_paths()):
+        raise ValueError("评课工具只允许读取课程详情页面")
+    return validated
+
+
+def search_course_reviews_text(query: str, max_results: int = 5) -> str:
+    """Search public course pages on the configured course-review sites."""
+    site_error: Exception | None = None
+    try:
+        results = _search_course_review_site_results(query, max_results=10)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        site_error = exc
+        logger.info("icourse site search failed for %r; falling back to web search: %s", query, exc)
+        results = []
+
+    if not results:
+        try:
+            results = _search_web_results(f"site:icourse.club {query}", max_results=10)
+        except (httpx.HTTPError, OSError, ValueError):
+            if site_error is not None:
+                raise site_error
+            raise
+
+    allowed_hosts = _course_review_allowed_hosts()
+    paths = _course_review_paths()
+    reviews = [
+        item
+        for item in results
+        if (parsed := urlparse(item["url"])).hostname
+        and parsed.hostname.lower() in allowed_hosts
+        and any(parsed.path.startswith(prefix) for prefix in paths)
+    ][:max_results]
+    return _format_search_results(reviews)
+
+
+def fetch_course_review_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> str:
+    """Fetch visible text from a public course detail page."""
+    return fetch_page_text(
+        _validate_course_review_url(url),
+        max_chars=max_chars,
+        allowed_hosts=_course_review_allowed_hosts(),
+    )
+
+
 @tool("web_search")
 def search_web(query: str) -> str:
     """Search the public web and return result titles and URLs."""
@@ -287,3 +417,23 @@ def fetch_ustc_text_from_url(url: str) -> str:
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("USTC fetch failed for %s: %s", url, exc)
         return f"科大网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+
+
+@tool("course_review_search")
+def search_course_reviews(query: str) -> str:
+    """Search public USTC course reviews and return course-page links."""
+    try:
+        return search_course_reviews_text(query)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("course review search failed for %r: %s", query, exc)
+        return f"评课社区搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+
+
+@tool("course_review_fetch")
+def fetch_course_review_text(url: str) -> str:
+    """Fetch visible text from a public USTC course review page."""
+    try:
+        return f"来源: {_format_markdown_link('评课社区课程页', url)}\n\n{fetch_course_review_page_text(url)}"
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        logger.warning("course review fetch failed for %s: %s", url, exc)
+        return f"评课社区页面读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
