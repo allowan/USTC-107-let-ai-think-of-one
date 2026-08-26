@@ -1,4 +1,5 @@
 # query_engine.py
+import logging
 import os
 
 from typing import List, Optional
@@ -8,6 +9,8 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.core.prompts import PromptTemplate
 
 from . import config
+
+logger = logging.getLogger("campus_rag.query_engine")
 
 
 class _APIReranker:
@@ -75,7 +78,8 @@ def _get_reranker():
             api_key=os.getenv("RERANK_API_KEY", ""),
             base_url=os.getenv("RERANK_BASE_URL", ""),
         )
-    except Exception:
+    except Exception as e:
+        logger.warning("API reranker 构建失败，降级为原始向量分数排序: %s", e)
         _reranker_available = False
         _reranker = None
     return _reranker
@@ -138,7 +142,10 @@ def rerank_nodes(query: str, nodes: List[NodeWithScore], top_n: int = 10) -> Lis
             scores = scores.flatten()
         for i, node in enumerate(nodes):
             node.score = float(scores[i])
-    except Exception:
+    except Exception as e:
+        # 降级为原始分数排序是有意为之，但静默禁用会让重排序失效且无线索；
+        # 留痕后仍按原策略继续，不影响检索功能。
+        logger.warning("reranker 不可用，降级为原始向量分数排序: %s", e)
         _reranker_available = False
         _reranker = None
     sorted_nodes = sorted(nodes, key=lambda n: n.score, reverse=True)
@@ -159,10 +166,19 @@ QA_PROMPT = PromptTemplate(
     "你是一个校园助手。请根据下面的参考资料回答用户问题。\n"
     "如果资料中包含多条相关信息，请用序号列出。\n"
     "如果资料不足以回答问题，请如实说明。\n"
-    "请在回答末尾列出各条信息的来源文件名或出处。\n\n"
+    "请在回答末尾列出各条信息的来源（文件名）；资料带源链接时务必一并给出，方便用户溯源。\n\n"
     "参考资料：\n{context_str}\n\n"
     "用户问题：{query_str}\n\n你的回答："
 )
+
+
+def _node_context_block(node: NodeWithScore) -> str:
+    """拼装单个节点的上下文：来源头（文件名 + 源链接）+ 正文。"""
+    meta = node.node.metadata or {}
+    header = f"[来源: {meta.get('source', '未知来源')}]"
+    if meta.get("url"):
+        header += f" [源链接: {meta['url']}]"
+    return f"{header}\n{node.node.text}"
 
 
 def get_rag_response(
@@ -202,18 +218,16 @@ def get_rag_response(
                     filtered.append(node)
             if len(filtered) >= 3:
                 unique_nodes = filtered
-        except Exception:
-            pass
+        except Exception as e:
+            # BM25 预过滤失败时回退纯向量结果，留痕便于排查检索质量异常
+            logger.debug("BM25 预过滤失败，跳过: %s", e)
 
     if rerank and len(unique_nodes) > 1:
         final_nodes = rerank_nodes(query, unique_nodes, top_n=10)
     else:
         final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
 
-    context = "\n\n".join([
-        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
-        for node in final_nodes
-    ])
+    context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
     # require_llm：未初始化时抛异常，避免静默使用 MockLLM 回声 prompt 假回答
     llm = config.require_llm()
@@ -247,10 +261,7 @@ def get_rag_response_hybrid(
     else:
         final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
 
-    context = "\n\n".join([
-        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
-        for node in final_nodes
-    ])
+    context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
     llm = config.require_llm()
     from llama_index.core.llms import ChatMessage

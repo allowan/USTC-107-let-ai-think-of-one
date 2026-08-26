@@ -5,7 +5,7 @@ from pathlib import Path
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from tools.search import fetch_text_from_url
+from tools.search import fetch_url, search_web
 from campus_rag import search_notices_answer, search_user_data_answer, add_user_data
 from llama_index.core import Document
 import model.config as config
@@ -24,7 +24,8 @@ _MAX_CHECKPOINTS_PER_THREAD = 50
 _MAX_CHECKPOINT_DB_MB = 200
 
 TOOL_METADATA = [
-    {"name": "web_search", "label": "网络搜索", "description": "从URL获取网页文档内容"},
+    {"name": "web_search", "label": "联网搜索", "description": "联网搜索关键词，返回搜索结果列表（标题/摘要/链接），弥补本地知识库时效性缺口"},
+    {"name": "fetch_url", "label": "网页抓取", "description": "获取指定 URL 网页的正文文本，配合联网搜索精读某条结果"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
@@ -40,14 +41,15 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 - 用户个人课表、成绩、教务信息 → search_my_data
 - 需要查看个人数据原文或对比多条信息 → search_user_data_raw
 - 添加个人数据到知识库 → add_personal_data
-- 网页文档内容获取 → web_search
+- 本地知识库查不到的时效性、校外信息 → web_search（联网搜索）；本地检索无结果或与问题无关时**必须**改用 web_search，不要只建议用户自行上网查询
+- 需要精读某条联网搜索结果的完整内容 → fetch_url
 
 ## 重要规则
 - 用户要求写文章时直接在对话中回复
 
 ## 回答规范
 1. 先在心里梳理检索到的信息要点，再用自己的话组织成自然的回答
-2. 在回答末尾列出信息来源（文件名或出处）
+2. 在回答末尾列出信息来源：校园通知引文件名与源链接，联网搜索结果引网页链接，方便用户溯源
 3. 如果检索结果为空或完全无关，直接说"未找到相关信息"
 
 ## 多跳推理指南
@@ -161,17 +163,20 @@ async def _prune_checkpoints(conn):
 
 
 _shared_tools = {
-    "web_search": fetch_text_from_url,
+    "web_search": search_web,
+    "fetch_url": fetch_url,
     "search_campus_notices": search_campus_notices,
     "search_notices_raw": search_notices_raw,
 }
 
 
-def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None):
-    """Build the list of tools for a given user, filtering by enabled_tool_names.
+def _build_tool_list(username: str, tool_prefs: dict[str, bool] | None = None):
+    """Build the list of tools for a given user, filtering by tool preferences.
 
-    None 表示用户未设置偏好（默认全部启用）；空列表是用户显式禁用全部工具，
+    None 表示用户未设置偏好（默认全部启用）；空字典是用户显式禁用全部工具，
     必须尊重而非回退全启用，否则前端设置被静默忽略。
+    偏好字典只反映用户保存时的工具集：不在字典中的工具视为"用户未表态"，
+    默认启用，否则之后新增的工具会被旧偏好静默禁用。
     """
     user_tools = {
         "search_my_data": _make_search_my_data(username),
@@ -180,10 +185,13 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
     }
     all_tools = {**_shared_tools, **user_tools}
 
-    if enabled_tool_names is None:
+    if tool_prefs is None:
         names = list(all_tools.keys())
+    elif not tool_prefs:
+        # 空字典 = 用户显式禁用了全部工具，与"未表态默认启用"区分开
+        names = []
     else:
-        names = [n for n in enabled_tool_names if n in all_tools]
+        names = [n for n in all_tools if tool_prefs.get(n, True)]
 
     if not names:
         logger.warning("用户 %s 未启用任何工具，agent 将以纯对话模式运行",
@@ -192,7 +200,7 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
     return [all_tools[n] for n in names]
 
 
-async def build_agent(username: str = "", enabled_tool_names: list[str] | None = None) -> AgentContext:
+async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = None) -> AgentContext:
     """Create an Agent instance. Tools requiring user context are created via closure
     when *username* is provided."""
     global _SINGLETON_CONN
@@ -201,7 +209,7 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
     await _prune_checkpoints(conn)
     checkpointer = AsyncSqliteSaver(conn)
 
-    tools = _build_tool_list(username, enabled_tool_names)
+    tools = _build_tool_list(username, tool_prefs)
 
     agent = create_agent(
         model=config.init_chat(),
@@ -211,7 +219,7 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
     )
     ctx = AgentContext(agent=agent, conn=conn, username=username)
 
-    if not username and enabled_tool_names is None:
+    if not username and tool_prefs is None:
         _SINGLETON_CONN = conn
     return ctx
 
@@ -229,12 +237,21 @@ async def close_agent(ctx: AgentContext | None = None):
 
 async def run_agent(content: str, thread_id: str = "default") -> str:
     """Convenience: run a single-turn agent invocation and return the final reply."""
+    global _SINGLETON_CONN
     ctx = await build_agent()
-    result = await ctx.agent.ainvoke(
-        {"messages": [{"role": "user", "content": content}]},
-        config={"configurable": {"thread_id": thread_id}},
-    )
-    return result["messages"][-1].content
+    try:
+        result = await ctx.agent.ainvoke(
+            {"messages": [{"role": "user", "content": content}]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        return result["messages"][-1].content
+    finally:
+        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄。
+        # 注意：无参 build_agent 会同时记录为单例连接，此处一并清理引用，
+        # 避免 close_agent() 再次关闭已关连接。
+        if _SINGLETON_CONN is ctx.conn:
+            _SINGLETON_CONN = None
+        await close_agent(ctx)
 
 
 def _checkpoint_messages_to_history(raw_messages: list) -> list:

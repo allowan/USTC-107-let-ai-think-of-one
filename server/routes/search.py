@@ -1,5 +1,7 @@
 """Search routes: /api/search/*"""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query
 
 from server.deps import get_user
@@ -14,7 +16,9 @@ async def search_notices_api(
     user: str = Depends(get_user),
     rag: RAGService = Depends(get_rag_service),
 ):
-    return {"query": q, "results": rag.search_notices(q)}
+    # 检索含嵌入 API 调用，同步阻塞会卡住事件循环，丢进线程池
+    results = await asyncio.to_thread(rag.search_notices, q)
+    return {"query": q, "results": results}
 
 
 @router.get("/my-data")
@@ -23,4 +27,5 @@ async def search_my_data_api(
     user: str = Depends(get_user),
     rag: RAGService = Depends(get_rag_service),
 ):
-    return {"query": q, "results": rag.search_user_data(q, user)}
+    results = await asyncio.to_thread(rag.search_user_data, q, user)
+    return {"query": q, "results": results}

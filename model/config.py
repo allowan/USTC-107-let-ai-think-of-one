@@ -67,9 +67,11 @@ def change_model(group: str, model: str):
     env["api_type"] = target_group.get("api_type", "chat-completions")
     env["model"] = target_model.get("request_id", "")
 
-    # 写回 settings.json
-    with open(settings_path, "w", encoding="utf-8") as f:
+    # 写回 settings.json（原子写：先临时文件再 rename，避免写一半损坏配置）
+    tmp = settings_path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+    os.replace(tmp, settings_path)
 
     # 应用初始化
     return init_chat()

@@ -691,23 +691,32 @@ class TestDataSafetyGuard(unittest.TestCase):
 
 
 class TestToolPreferenceBehavior(unittest.TestCase):
-    """显式禁用全部工具必须被尊重，不得静默回退全启用。"""
+    """显式禁用全部工具必须被尊重，不得静默回退全启用；
+    偏好中未出现的新工具视为用户未表态，默认启用。"""
 
     def test_all_disabled_yields_empty_tool_list(self):
         from main import _build_tool_list
-        tools = _build_tool_list("probe_user", enabled_tool_names=[])
+        tools = _build_tool_list("probe_user", tool_prefs={})
         self.assertEqual(tools, [], "用户显式禁用全部工具时应返回空列表")
 
     def test_none_means_default_all_enabled(self):
         from main import _build_tool_list
-        tools = _build_tool_list("probe_user", enabled_tool_names=None)
+        tools = _build_tool_list("probe_user", tool_prefs=None)
         self.assertGreater(len(tools), 0, "未设置偏好时应默认启用全部工具")
 
-    def test_unknown_names_filtered(self):
+    def test_prefs_only_apply_to_recorded_tools(self):
+        # 旧偏好只覆盖保存时存在的工具；之后新增的工具（如 fetch_url）
+        # 不在偏好字典中，必须默认启用而非被旧偏好静默禁用。
         from main import _build_tool_list
-        tools = _build_tool_list("probe_user", enabled_tool_names=["not_a_tool", "web_search"])
-        self.assertEqual(len(tools), 1, "未知工具名应被过滤")
-        self.assertEqual(tools[0].name, "web_search")
+        tools = _build_tool_list("probe_user", tool_prefs={"web_search": True})
+        names = {t.name for t in tools}
+        self.assertIn("web_search", names)
+        self.assertIn("fetch_url", names, "新增工具不在旧偏好中时应默认启用")
+        # 显式禁用的工具必须被排除，无论新旧
+        tools = _build_tool_list("probe_user", tool_prefs={"web_search": False})
+        names = {t.name for t in tools}
+        self.assertNotIn("web_search", names)
+        self.assertIn("fetch_url", names)
 
 
 # ── 同步服务配置 ────────────────────────────────────────────────────
@@ -770,6 +779,173 @@ class TestPublicAPI(unittest.TestCase):
         self.assertTrue(callable(get_rag_response))
         self.assertTrue(callable(rerank_nodes))
         self.assertIsNotNone(RAGSystem)
+
+
+# ── 可溯源：源网址提取与检索结果来源头 ──────────────────────────
+
+
+class TestSourceUrlExtraction(unittest.TestCase):
+    """源网址提取：仅按文件名通知 ID 匹配，宁缺毋错。"""
+
+    def test_id_match(self):
+        from campus_rag.data_loader import extract_source_url
+        url = extract_source_url(
+            "20455_实习管理通知.txt",
+            "正文...详情见 https://www.teach.ustc.edu.cn/notice/notice-teaching/20455.html 。",
+        )
+        self.assertEqual(url, "https://www.teach.ustc.edu.cn/notice/notice-teaching/20455.html")
+
+    def test_no_id_match_returns_none(self):
+        # 正文链接不含通知 ID（如报名系统地址）时不得误报为源网址
+        from campus_rag.data_loader import extract_source_url
+        url = extract_source_url("20406_助教岗位通知.txt", "请到 https://tam.cmet.ustc.edu.cn 报名")
+        self.assertIsNone(url)
+
+    def test_non_numeric_filename(self):
+        from campus_rag.data_loader import extract_source_url
+        self.assertIsNone(extract_source_url("课表.txt", "https://x.ustc.edu.cn/123.html"))
+
+    def test_trailing_punctuation_stripped(self):
+        from campus_rag.data_loader import extract_source_url
+        url = extract_source_url("3384_助教申报通知.txt", "（https://gradschool.ustc.edu.cn/article/3384）。")
+        self.assertEqual(url, "https://gradschool.ustc.edu.cn/article/3384")
+
+    def test_real_data_files_carry_url_metadata(self):
+        from campus_rag.data_loader import load_documents_from_files
+        docs = load_documents_from_files(str(Path(__file__).resolve().parent.parent / "campus_rag" / "data"))
+        self.assertGreater(len(docs), 0)
+        with_url = [d for d in docs if d.metadata.get("url")]
+        self.assertGreater(len(with_url), 0, "至少部分本地通知应提取到源网址")
+        for d in with_url:
+            notice_id = d.metadata["source"].split("_", 1)[0]
+            self.assertIn(notice_id, d.metadata["url"])
+
+
+class _FakeNode:
+    """模拟检索节点（_format_nodes 只需 metadata + get_content）。"""
+
+    def __init__(self, metadata: dict, text: str):
+        self.metadata = metadata
+        self._text = text
+
+    def get_content(self):
+        return self._text
+
+
+class _FakeNodeWithScore:
+    """模拟 NodeWithScore（_node_context_block 只需 node.metadata + node.text）。"""
+
+    def __init__(self, metadata: dict, text: str):
+        from types import SimpleNamespace
+        self.node = SimpleNamespace(metadata=metadata, text=text)
+
+
+class TestRetrievalSourceHeaders(unittest.TestCase):
+    """检索结果必须携带来源（文件名）与源链接，否则溯源无从谈起。"""
+
+    def test_format_nodes_includes_source_and_url(self):
+        from campus_rag.query import _format_nodes
+        nodes = [_FakeNode({"source": "a.txt", "url": "https://x/1.html"}, "正文")]
+        out = _format_nodes(nodes, "空")
+        self.assertIn("[来源: a.txt]", out)
+        self.assertIn("[源链接: https://x/1.html]", out)
+        self.assertIn("正文", out)
+
+    def test_format_nodes_without_url_keeps_source(self):
+        from campus_rag.query import _format_nodes
+        out = _format_nodes([_FakeNode({"source": "b.txt"}, "正文")], "空")
+        self.assertIn("[来源: b.txt]", out)
+        self.assertNotIn("源链接", out)
+
+    def test_node_context_block_includes_url(self):
+        from campus_rag.query_engine import _node_context_block
+        block = _node_context_block(_FakeNodeWithScore({"source": "a.txt", "url": "https://x/1.html"}, "正文"))
+        self.assertIn("[来源: a.txt] [源链接: https://x/1.html]", block)
+
+
+class _FakeCollection:
+    """模拟 chroma 集合（仅 get/count 接口，迁移守卫单测用）。"""
+
+    def __init__(self, metadatas: list):
+        self._metadatas = metadatas
+
+    def count(self):
+        return len(self._metadatas)
+
+    def get(self, include=None, limit=None):
+        metas = self._metadatas[:limit] if limit else self._metadatas
+        return {"metadatas": metas}
+
+
+# ── 路径锚定：默认向量库目录不得依赖启动 CWD ─────────────────
+
+
+class TestDefaultPathAnchoring(unittest.TestCase):
+    """默认数据/向量库路径必须是锚定项目根的绝对路径：
+    相对路径依赖 CWD，从其他目录启动会在错误位置新建空库。"""
+
+    def test_default_persist_dir_is_project_root_absolute(self):
+        from campus_rag import index_manager
+        expected = str(Path(__file__).resolve().parent.parent / "chroma_db")
+        self.assertTrue(os.path.isabs(index_manager._DEFAULT_PERSIST_DIR))
+        self.assertEqual(index_manager._DEFAULT_PERSIST_DIR, expected)
+
+    def test_default_data_dir_is_package_absolute(self):
+        from campus_rag import index_manager
+        expected = str(Path(__file__).resolve().parent.parent / "campus_rag" / "data")
+        self.assertTrue(os.path.isabs(index_manager._DEFAULT_DATA_DIR))
+        self.assertEqual(index_manager._DEFAULT_DATA_DIR, expected)
+
+
+class TestUrlMigrationGuards(unittest.TestCase):
+    """旧索引缺失 url 元数据的一次性迁移守卫：仅在可从本地源目录全量恢复时重建。"""
+
+    def test_lacks_url_metadata_detection(self):
+        from campus_rag.index_manager import _lacks_url_metadata
+        self.assertTrue(_lacks_url_metadata(_FakeCollection([{"source": "a.txt"}])))
+        self.assertFalse(_lacks_url_metadata(_FakeCollection([{"source": "a.txt", "url": "https://x"}])))
+
+    def test_sources_match_dir(self):
+        import tempfile
+        from campus_rag.index_manager import _public_sources_match_dir
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "a.txt").write_text("x", encoding="utf-8")
+            self.assertTrue(_public_sources_match_dir(_FakeCollection([{"source": "a.txt"}]), tmp))
+            # 同步服务端独有的文档不在本地目录 → 不可重建，否则丢数据
+            self.assertFalse(_public_sources_match_dir(
+                _FakeCollection([{"source": "a.txt"}, {"source": "sync_only.txt"}]), tmp))
+
+
+# ── 分块序号：多分块文档按来源还原原文的顺序保证 ──────────────────────
+
+
+class TestChunkIndexAnnotation(unittest.TestCase):
+    """split_documents 必须为每个分块打原文内序号，且不改变嵌入输入。"""
+
+    def test_chunk_index_sequential_per_document(self):
+        from llama_index.core import Document
+        from campus_rag.data_loader import split_documents
+        long_text = "这是第一句。" * 200  # 足以切成多个分块
+        docs = [
+            Document(text=long_text, metadata={"source": "a.txt"}),
+            Document(text="短文档", metadata={"source": "b.txt"}),
+        ]
+        nodes = split_documents(docs)
+        by_source: dict[str, list] = {}
+        for n in nodes:
+            by_source.setdefault(n.metadata["source"], []).append(n.metadata["chunk_index"])
+        self.assertGreater(len(by_source["a.txt"]), 1, "长文档应产生多个分块")
+        self.assertEqual(by_source["a.txt"], sorted(by_source["a.txt"]), "序号应从 0 递增")
+        # 第二篇文档的序号必须独立从 0 开始，不得接着第一篇累加
+        self.assertEqual(by_source["b.txt"], [0])
+
+    def test_chunk_index_excluded_from_embedding(self):
+        from llama_index.core import Document
+        from campus_rag.data_loader import split_documents
+        nodes = split_documents([Document(text="内容" * 300, metadata={"source": "a.txt"})])
+        for n in nodes:
+            self.assertIn("chunk_index", n.excluded_embed_metadata_keys,
+                          "chunk_index 不得进入嵌入输入，否则改变向量内容")
 
 
 # ── main ─────────────────────────────────────────────────────────────

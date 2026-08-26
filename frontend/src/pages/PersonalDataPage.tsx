@@ -7,6 +7,16 @@ import type { PersonalDataItem } from '@/types';
 const { TextArea } = Input;
 const { Text, Paragraph } = Typography;
 
+// 后端 detail（如嵌入服务不可用的 503 守卫说明）是可操作信息，
+// 一律优先展示而非吞成通用文案；非 axios 错误回退默认文案。
+const errDetail = (e: unknown, fallback: string): string => {
+  if (e && typeof e === 'object' && 'response' in e) {
+    const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+    if (detail) return String(detail);
+  }
+  return fallback;
+};
+
 export default function PersonalDataPage() {
   const { message } = App.useApp();
   const [items, setItems] = useState<PersonalDataItem[]>([]);
@@ -42,8 +52,8 @@ export default function PersonalDataPage() {
       setNewContent('');
       setNewSource('');
       fetchData();
-    } catch {
-      message.error('添加失败');
+    } catch (e) {
+      message.error(errDetail(e, '添加失败'));
     } finally {
       setSaving(false);
     }
@@ -60,8 +70,8 @@ export default function PersonalDataPage() {
       message.success('数据已更新');
       setEditVisible(false);
       fetchData();
-    } catch {
-      message.error('更新失败');
+    } catch (e) {
+      message.error(errDetail(e, '更新失败'));
     } finally {
       setSaving(false);
     }

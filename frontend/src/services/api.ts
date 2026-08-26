@@ -28,11 +28,6 @@ export const topicApi = {
     api.get<{ messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(`/topics/${topicId}/history`),
 };
 
-export const searchApi = {
-  notices: (query: string) =>
-    api.get<{ query: string; results: string }>('/search/notices', { params: { q: query } }),
-};
-
 export const settingsApi = {
   getGlobal: () =>
     api.get<import('@/types').GlobalSettings>('/settings'),

@@ -51,7 +51,11 @@ def _format_nodes(nodes, empty_message: str) -> str:
         return empty_message
     contexts = []
     for node in nodes:
-        contexts.append(node.get_content())
+        meta = node.metadata or {}
+        header = f"[来源: {meta.get('source', '未知来源')}]"
+        if meta.get("url"):
+            header += f" [源链接: {meta['url']}]"
+        contexts.append(f"{header}\n{node.get_content()}")
     return "\n\n".join(contexts)
 
 
@@ -86,8 +90,19 @@ def search_user_data_answer(query: str, user_id: str) -> str:
     return get_rag_response(query, user_index=user_idx)
 
 
+def _enrich_url_metadata(documents: list) -> None:
+    """为缺失源链接的公共文档补全 url 元数据（同步与本地文件共用入口）。"""
+    from .data_loader import extract_source_url
+    for doc in documents:
+        if not doc.metadata.get("url"):
+            url = extract_source_url(doc.metadata.get("source", ""), doc.text)
+            if url:
+                doc.metadata["url"] = url
+
+
 def add_public_documents(documents: list) -> None:
     """增量添加带 source 元数据的公共文档（同步服务用），自动去重。"""
+    _enrich_url_metadata(documents)
     _ensure_init()
     _rag.add_documents_to_public(documents)
     global _public_retriever
@@ -119,6 +134,7 @@ def replace_public_documents(documents: list) -> None:
     except Exception:
         logger.warning("删除旧 public 集合失败（可能不存在），继续重建", exc_info=True)
     if documents:
+        _enrich_url_metadata(documents)
         _rag.create_public_index_via_docs(documents)
     reset_caches()
 

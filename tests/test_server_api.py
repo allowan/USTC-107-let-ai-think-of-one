@@ -236,6 +236,84 @@ class TestPersonalDataEncoding(unittest.TestCase):
             self.assertEqual(e.code, 400)
 
 
+class _OutOfOrderRAGStub:
+    """返回同一来源的多个分块且顺序打乱（模拟 ChromaDB 无序返回）。"""
+
+    def list_user_data(self, user):
+        return {
+            "ids": ["c2", "c0", "c1"],
+            "metadatas": [
+                {"source": "长文档.txt", "chunk_index": 2},
+                {"source": "长文档.txt", "chunk_index": 0},
+                {"source": "长文档.txt", "chunk_index": 1},
+            ],
+            "documents": ["第三段", "第一段", "第二段"],
+            "previews": ["第三段", "第一段", "第二段"],
+        }
+
+
+class TestPersonalDataAggregation(unittest.TestCase):
+    """多分块文档按来源聚合必须按 chunk_index 还原，不得依赖存储返回序。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import server
+        from fastapi.testclient import TestClient
+        from server.services.rag_service import get_rag_service
+        server.app.dependency_overrides[get_rag_service] = lambda: _OutOfOrderRAGStub()
+        cls.client = TestClient(server.app)
+
+    @classmethod
+    def tearDownClass(cls):
+        import server
+        server.app.dependency_overrides.clear()
+
+    def test_chunks_reordered_by_chunk_index(self):
+        r = self.client.get("/api/personal-data")
+        self.assertEqual(r.status_code, 200)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["full_content"], "第一段\n第二段\n第三段")
+        self.assertEqual(items[0]["chunks"], 3)
+
+
+class _EmbedUnavailableRAGStub:
+    """模拟 campus_rag fail-fast 守卫：嵌入不可用时抛 RuntimeError。"""
+
+    def add_user_data(self, user, content, source):
+        raise RuntimeError("嵌入服务不可用，已拒绝入库")
+
+    def update_user_data(self, user, source, content):
+        raise RuntimeError("嵌入服务不可用，已拒绝更新个人数据")
+
+
+class TestPersonalDataEmbedUnavailable(unittest.TestCase):
+    """嵌入不可用是服务不可用（503 + 可操作详情），不得与真实内部错误 500 混淆。"""
+
+    @classmethod
+    def setUpClass(cls):
+        import server
+        from fastapi.testclient import TestClient
+        from server.services.rag_service import get_rag_service
+        server.app.dependency_overrides[get_rag_service] = lambda: _EmbedUnavailableRAGStub()
+        cls.client = TestClient(server.app)
+
+    @classmethod
+    def tearDownClass(cls):
+        import server
+        server.app.dependency_overrides.clear()
+
+    def test_add_returns_503_with_detail(self):
+        r = self.client.post("/api/personal-data", json={"content": "内容"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("嵌入服务不可用", r.json()["detail"])
+
+    def test_update_returns_503_with_detail(self):
+        r = self.client.put("/api/personal-data/课表", json={"content": "新内容"})
+        self.assertEqual(r.status_code, 503)
+        self.assertIn("嵌入服务不可用", r.json()["detail"])
+
+
 # ── 同步服务状态机 ───────────────────────────────────────────────────
 
 
@@ -247,9 +325,9 @@ class TestSyncServiceState(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "sync_state.json"
             with patch.object(sync_service, "SYNC_STATE_PATH", state_path):
-                self.assertEqual(sync_service.SyncService._get_local_version(), 0)
+                self.assertEqual(sync_service.SyncService.get_local_version(), 0)
                 sync_service.SyncService._set_local_version(7)
-                self.assertEqual(sync_service.SyncService._get_local_version(), 7)
+                self.assertEqual(sync_service.SyncService.get_local_version(), 7)
 
     def test_sync_offline_returns_error(self):
         from server.services.sync_service import SyncService
@@ -272,7 +350,7 @@ class TestSyncServiceState(unittest.TestCase):
 
         svc = SyncService()
         with patch.object(SyncService, "_fetch", staticmethod(_fetch)), \
-             patch.object(SyncService, "_get_local_version", return_value=3):
+             patch.object(SyncService, "get_local_version", return_value=3):
             result = asyncio.run(svc.sync())
         self.assertEqual(result["status"], "ok")
         self.assertIn("已是最新", result["message"])
@@ -320,6 +398,40 @@ class TestSettingsRoutes(unittest.TestCase):
     def test_update_tools_validates_type(self):
         r = self.client.put("/api/settings/tools", json={"tools": "not-a-dict"})
         self.assertEqual(r.status_code, 400)
+
+    def test_get_settings_missing_file_actionable_error(self):
+        # settings.json 缺失时不得裸 500，必须给出可操作的修复指引
+        from server.routes import settings as settings_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "settings.json"
+            with patch.object(settings_routes, "_SETTINGS_PATH", missing):
+                r = self.client.get("/api/settings")
+            self.assertEqual(r.status_code, 500)
+            self.assertIn("settings.example.json", r.json()["detail"])
+
+    def test_update_settings_ignores_empty_values(self):
+        # 前端清空字段保存时不得把 base_url 写成空串（会直接打断 LLM 初始化）
+        import server
+        from server.routes import settings as settings_routes
+        from server.services.chat_service import get_chat_service
+
+        class _ChatStub:
+            def clear_agent_cache(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps({"env": {"api_key": "k", "base_url": "https://x", "api_type": "chat-completions"}}), encoding="utf-8")
+            server.app.dependency_overrides[get_chat_service] = lambda: _ChatStub()
+            try:
+                with patch.object(settings_routes, "_SETTINGS_PATH", path):
+                    r = self.client.put("/api/settings", json={"api_key": "", "base_url": "  "})
+                self.assertEqual(r.status_code, 200)
+                data = json.loads(path.read_text(encoding="utf-8"))
+            finally:
+                server.app.dependency_overrides[get_chat_service] = lambda: object()
+            self.assertEqual(data["env"]["base_url"], "https://x", "空值不得覆盖已有配置")
+            self.assertEqual(data["env"]["api_key"], "k")
 
 
 if __name__ == "__main__":

@@ -38,10 +38,10 @@ class ChatService:
         if username:
             if username in self._user_agents:
                 return self._user_agents[username]
-            from campus_rag.auth import get_enabled_tool_names
+            from campus_rag import get_user_tool_prefs
             from main import build_agent
-            enabled = get_enabled_tool_names(username)
-            ctx = await build_agent(username=username, enabled_tool_names=enabled)
+            prefs = get_user_tool_prefs(username)
+            ctx = await build_agent(username=username, tool_prefs=prefs)
             self._user_agents[username] = ctx
             return ctx
         if self._default_agent is None:
@@ -59,12 +59,16 @@ class ChatService:
     def clear_agent_cache(self):
         for username in list(self._user_agents.keys()):
             self.invalidate_user_agent(username)
+        # 默认 agent 也持有旧的 LLM 配置，设置/模型变更后必须一并失效，
+        # 否则下次无用户名调用时仍用旧配置（连接由 main.close_agent 统一收尾）。
+        self._default_agent = None
 
     async def _close_conn(self, conn):
         try:
             await conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # 关闭失败不阻断失效流程，但静默吞掉会掩盖 checkpoint 连接泄漏
+            logger.warning("关闭 agent checkpoint 连接失败: %s", e)
 
     @staticmethod
     def _thread_id(username: str, topic_id: str) -> str:

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Button, Typography, App, Spin, Popconfirm, Input } from 'antd';
 import {
@@ -27,6 +27,8 @@ export default function AppLayout() {
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
   const [editTopicName, setEditTopicName] = useState('');
+  // Enter 与 blur 可能先后触发提交，同步置位的 ref 标志去重，避免同一话题双 PUT
+  const renameBusyRef = useRef(false);
   const { message } = App.useApp();
 
   useEffect(() => {
@@ -61,15 +63,19 @@ export default function AppLayout() {
   };
 
   const handleFinishRename = async () => {
+    if (renameBusyRef.current) return;
     const topicId = editingTopicId;
     const name = editTopicName.trim();
     setEditingTopicId(null);
     setEditTopicName('');
     if (!topicId || !name) return;
+    renameBusyRef.current = true;
     try {
       await renameTopic(topicId, name);
     } catch {
       message.error('重命名失败');
+    } finally {
+      renameBusyRef.current = false;
     }
   };
 

@@ -23,7 +23,7 @@ class SyncService:
     """Manages sync of public documents from remote sync_server to local ChromaDB."""
 
     @staticmethod
-    def _get_local_version() -> int:
+    def get_local_version() -> int:
         try:
             with open(SYNC_STATE_PATH, encoding="utf-8") as f:
                 return json.load(f).get("version", 0)
@@ -57,7 +57,7 @@ class SyncService:
         if remote_version < 0:
             return {"status": "error", "message": "无法连接到同步服务器"}
 
-        local_version = self._get_local_version()
+        local_version = self.get_local_version()
 
         if remote_version == 0:
             return {"status": "ok", "message": "同步服务器无数据", "version": 0}

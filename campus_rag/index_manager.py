@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import threading
+from pathlib import Path
 import chromadb
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.chroma import ChromaVectorStore
@@ -12,9 +13,18 @@ from . import config
 logger = logging.getLogger("campus_rag.index_manager")
 
 _chroma_client = None
+_chroma_client_path: str | None = None
 _lock = threading.Lock()
 
 _embed_dim_cache: int | None = None
+
+# 默认数据目录锚定包内绝对路径：相对路径依赖启动 CWD，从其他目录启动会
+# 指向错误目录（如项目根 data/ 是 checkpoint 库）导致静默建出空索引。
+_DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent / "data")
+
+# 向量库目录同理锚定项目根绝对路径："./chroma_db" 依赖 CWD，从其他目录
+# 启动会在错误位置新建空库并触发公共索引全量重建（或查不到已有数据）。
+_DEFAULT_PERSIST_DIR = str(Path(__file__).resolve().parent.parent / "chroma_db")
 
 
 def _get_live_embed_dim() -> int:
@@ -59,12 +69,23 @@ def assert_collection_dim(collection) -> None:
         )
 
 
-def _get_chroma_client(persist_dir: str = "./chroma_db") -> chromadb.PersistentClient:
-    global _chroma_client
+def _get_chroma_client(persist_dir: str = _DEFAULT_PERSIST_DIR) -> chromadb.PersistentClient:
+    global _chroma_client, _chroma_client_path
+    resolved = str(Path(persist_dir).resolve())
     if _chroma_client is None:
         with _lock:
             if _chroma_client is None:
-                _chroma_client = chromadb.PersistentClient(path=persist_dir)
+                # 先记路径再赋客户端：并发下另一线程看到客户端非空时，
+                # 路径必须已就绪，否则会误报"绑定路径不一致"警告
+                _chroma_client_path = resolved
+                _chroma_client = chromadb.PersistentClient(path=resolved)
+    elif _chroma_client_path != resolved:
+        # 单例已绑定其他目录：chroma 客户端进程内复用是有意为之，但请求的
+        # persist_dir 被忽略必须留痕，否则调用方拿到错误的库却毫无察觉。
+        logger.warning(
+            "ChromaDB 客户端已绑定 %s，忽略本次请求的 persist_dir=%s",
+            _chroma_client_path, resolved,
+        )
     return _chroma_client
 
 
@@ -72,8 +93,27 @@ def _user_collection_name(user_id: str) -> str:
     return f"user_{user_id}"
 
 
+def _lacks_url_metadata(collection) -> bool:
+    """抽样检测集合分块是否缺失源链接元数据（旧版索引迁移用）。"""
+    sample = collection.get(include=["metadatas"], limit=1)
+    metas = sample.get("metadatas") or []
+    return bool(metas) and "url" not in (metas[0] or {})
+
+
+def _public_sources_match_dir(collection, data_dir: str) -> bool:
+    """集合中所有文档的 source 是否都在本地数据目录内。
+
+    只有成立时才可安全从源目录重建（同步服务端独有的文档不能丢）。"""
+    if not os.path.isdir(data_dir):
+        return False
+    local_files = set(os.listdir(data_dir))
+    result = collection.get(include=["metadatas"])
+    sources = {m.get("source") for m in result.get("metadatas") or []}
+    return bool(sources) and sources <= local_files
+
+
 class RAGSystem:
-    def __init__(self, persist_dir="./chroma_db"):
+    def __init__(self, persist_dir: str = _DEFAULT_PERSIST_DIR):
         from .config import init_embed
         # 嵌入不可用时 llama_index 会静默回退 MockEmbedding（维度 1），
         # 一旦 Mock 向量写入集合，ChromaDB 维度将被永久锁定，后续真实
@@ -87,7 +127,7 @@ class RAGSystem:
         self.chroma_client = _get_chroma_client(persist_dir)
 
     # ── 公共数据（官方通知）──────────────────────────────────────
-    def create_public_index(self, data_dir="./data"):
+    def create_public_index(self, data_dir=_DEFAULT_DATA_DIR):
         collection = self.chroma_client.get_or_create_collection("public")
         assert_collection_dim(collection)
         vector_store = ChromaVectorStore(chroma_collection=collection)
@@ -105,7 +145,7 @@ class RAGSystem:
         nodes = split_documents(documents)
         return VectorStoreIndex(nodes, vector_store=vector_store)
 
-    def get_or_create_public_index(self, data_dir="./data"):
+    def get_or_create_public_index(self, data_dir=_DEFAULT_DATA_DIR):
         try:
             collection = self.chroma_client.get_collection("public")
         except Exception:
@@ -113,6 +153,12 @@ class RAGSystem:
         if collection is not None and collection.count() > 0:
             stored = _stored_dim(collection)
             if stored == _get_live_embed_dim():
+                # 旧版索引缺失源链接元数据，且集合内容可从本地源目录全量恢复时，
+                # 一次性重建以补全（溯源功能迁移，重建后不再触发）。
+                if _lacks_url_metadata(collection) and _public_sources_match_dir(collection, data_dir):
+                    logger.info("public 集合缺失源链接元数据，从 %s 重建（一次性迁移）", data_dir)
+                    self.chroma_client.delete_collection("public")
+                    return self.create_public_index(data_dir)
                 vector_store = ChromaVectorStore(chroma_collection=collection)
                 return VectorStoreIndex.from_vector_store(vector_store)
             # 维度不匹配：集合由旧嵌入模型（或 MockEmbedding 降级）写入且已
@@ -205,15 +251,19 @@ class RAGSystem:
         coll_name = _user_collection_name(user_id)
         try:
             self.chroma_client.delete_collection(coll_name)
-        except Exception:
-            pass
+        except Exception as e:
+            # 集合不存在是正常路径（debug），其他异常必须留痕而非静默吞掉
+            logger.debug("clear_user_index(%s) 跳过: %s", user_id, e)
 
     def list_user_documents(self, user_id: str) -> dict:
         """列出用户私有集合中的所有文档，返回 {ids, metadatas, documents, previews}。"""
         try:
             collection = self.chroma_client.get_collection(_user_collection_name(user_id))
             result = collection.get(include=["metadatas", "documents"])
-        except Exception:
+        except Exception as e:
+            # 集合不存在返回空列表是正常语义，但真实异常必须留痕，
+            # 否则用户数据"凭空消失"无任何线索可查。
+            logger.debug("list_user_documents(%s) 读取失败: %s", user_id, e)
             return {"ids": [], "metadatas": [], "documents": [], "previews": []}
         docs = result.get("documents") or []
         result["previews"] = [d[:200] + "..." if len(d) > 200 else d for d in docs]
@@ -228,7 +278,10 @@ class RAGSystem:
             if ids:
                 collection.delete(ids=ids)
             return len(ids)
-        except Exception:
+        except Exception as e:
+            # 返回 0 会让路由误报 404 "数据不存在"，真实失败原因必须留痕
+            logger.warning("delete_user_documents_by_source(%s, %s) 失败: %s",
+                           user_id, source, e)
             return 0
 
     def list_public_documents(self) -> dict:
@@ -259,7 +312,9 @@ class RAGSystem:
             if ids:
                 collection.delete(ids=ids)
             return len(ids)
-        except Exception:
+        except Exception as e:
+            # 返回 0 会掩盖同步增量删除的真实失败，必须留痕
+            logger.warning("delete_public_documents_by_source(%s) 失败: %s", source, e)
             return 0
 
     def get_public_documents_by_source(self, source: str) -> dict:
@@ -302,7 +357,9 @@ class RAGSystem:
             result = collection.get(include=["documents"])
             docs = result.get("documents") or []
             return {hashlib.md5(d.encode()).hexdigest() for d in docs}
-        except Exception:
+        except Exception as e:
+            # 返回空集合会退化为"不去重"而非报错，静默时难以察觉重复入库
+            logger.debug("_get_existing_hashes(%s) 失败: %s", collection_name, e)
             return set()
 
     def get_combined_query_engine(self, user_id: str):
