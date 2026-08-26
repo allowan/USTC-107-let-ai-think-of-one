@@ -23,7 +23,7 @@
 | 前端 | React 18 + Vite 6 + TypeScript + Ant Design + Zustand | SPA，详见 [`frontend/README.md`](frontend/README.md) |
 | 后端 | FastAPI + uvicorn（端口 8000） | 路由/服务分层，详见 [`server/README.md`](server/README.md) |
 | Agent | LangChain + LangGraph | 工具调用 + checkpoint 持久化（`main.py`） |
-| RAG | LlamaIndex + ChromaDB + BM25 + qwen3-reranker | 独立可测核心库，详见 [`campus_rag/README.md`](campus_rag/README.md) |
+| RAG | LlamaIndex + ChromaDB + BM25 + qwen3-embedding / qwen3-reranker | 独立可测核心库，详见 [`campus_rag/README.md`](campus_rag/README.md) |
 | LLM | DeepSeek V4（远程 API，OpenAI 兼容） | 配置见 `settings.json`，支持热切换（`model/config.py`） |
 | 同步 | 独立 Sync Server（端口 8001） | 公共通知分发，详见 [`sync_server/README.md`](sync_server/README.md) |
 | 存储 | SQLite（话题/工具偏好/检查点） + ChromaDB（向量） | 全部本地文件 |
@@ -47,7 +47,13 @@
 | Python | 3.11+（推荐 3.12） |
 | Node.js | 18+（推荐 22） |
 
+### 2. 安装依赖
+
 ```bash
+# （推荐）创建并激活 Python 虚拟环境
+python -m venv .venv
+.venv\Scripts\Activate.ps1        # Windows PowerShell；Linux/macOS 用 source .venv/bin/activate
+
 # Python 依赖
 pip install -r requirements.txt
 
@@ -55,10 +61,20 @@ pip install -r requirements.txt
 cd frontend && npm install && cd ..
 ```
 
-### 2. 配置
+### 3. 配置 Key
+
+项目最多需要三组 Key，分别填在不同文件（切勿混写）：
+
+| Key | 填写位置 | 用途 | 获取方式 |
+|---|---|---|---|
+| DeepSeek API Key | 根目录 `settings.json` | 对话 Agent 与 RAG 回答生成 | DeepSeek 开放平台申请 |
+| 嵌入/重排序 API Key | `campus_rag/.env` | 向量嵌入与检索重排序（默认 USTC LLM 网关） | 科大 LLM 网关平台申请（需校园网/VPN 访问） |
+| Tavily API Key（可选） | `campus_rag/.env` | 联网搜索（不配置则自动回退免 Key 的 DuckDuckGo） | https://tavily.com 注册，免费版 1000 次/月 |
+
+**① LLM 配置**
 
 ```bash
-cp settings.example.json settings.json
+copy settings.example.json settings.json   # Linux/macOS 用 cp
 ```
 
 编辑 `settings.json`，填入 DeepSeek API Key：
@@ -73,31 +89,63 @@ cp settings.example.json settings.json
 }
 ```
 
-**方式二：环境变量**
+也可改用环境变量 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，优先级高于 `settings.json`。
+
+**② 嵌入与重排序配置**
 
 ```bash
-export LLM_API_KEY="sk-your-deepseek-key"
-export LLM_BASE_URL="https://api.deepseek.com"
-export LLM_MODEL="deepseek-v4-flash"
+copy campus_rag\.env.example campus_rag\.env   # Linux/macOS 用 cp
 ```
 
-环境变量优先级高于 `settings.json`。对话 Agent 和 RAG 总结共用这组
-`LLM_*` 配置；如果同时设置了 `OPENAI_*`，RAG 会优先使用 `OPENAI_*`。
+`.env.example` 已预置 USTC 网关的配置模板，只需把两处 `sk-xxx` 替换为你自己的网关 Key（嵌入与重排序可共用同一个 Key）：
 
-### 3. 启动
+```dotenv
+# 嵌入模型（qwen3-embedding）
+EMBED_PROVIDER=openai
+EMBED_API_KEY=sk-your-ustc-gateway-key
+EMBED_BASE_URL=https://api.llm.ustc.edu.cn/v1
+EMBED_MODEL=qwen3-embedding
+
+# 重排序模型（qwen3-reranker）
+RERANK_PROVIDER=api
+RERANK_API_KEY=sk-your-ustc-gateway-key
+RERANK_BASE_URL=https://api.llm.ustc.edu.cn/v1
+RERANK_MODEL=qwen3-reranker
+```
+
+网关不可用时：嵌入可改为本地 Ollama（`EMBED_PROVIDER=ollama`，模板内有回退配置）；重排序不配置会自动降级为按向量分数排序，不阻断使用。
+
+**③ 联网搜索配置（可选）**
+
+在 `campus_rag/.env` 末尾追加：
+
+```dotenv
+WEBSEARCH_PROVIDER=tavily
+TAVILY_API_KEY=tvly-your-tavily-key
+```
+
+不配置时 `web_search` 自动回退到免 Key 的 DuckDuckGo 实现，其余功能不受影响。
+
+### 4. 启动
+
+开三个终端依次启动：
 
 ```bash
-# 后端（端口 8000，API 文档 /api/docs）
+# ① 后端（端口 8000，API 文档 http://localhost:8000/api/docs）
 python server.py
 
-# Sync Server（可选，端口 8001；不启动则同步页显示离线，不影响其他功能）
+# ② Sync Server（可选，端口 8001；不启动则同步页显示离线，不影响其他功能）
 cd sync_server && python main.py
 
-# 前端（端口 3000）
+# ③ 前端（端口 3000）
 cd frontend && npm run dev
 ```
 
-浏览器访问 `http://localhost:3000`。
+### 5. 验证
+
+- 浏览器访问 `http://localhost:3000`，新建话题，发送“有什么暑期学校的活动？”
+- 后端健康检查：`curl http://localhost:8000/api/health`
+- 首次回答较慢（约 5–10 秒）：Agent 与向量索引懒加载初始化，属正常现象
 
 ## 配置参考
 
@@ -114,18 +162,28 @@ cd frontend && npm run dev
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `EMBED_PROVIDER` | 嵌入来源：`ollama` 或 `openai` | `ollama` |
-| `OLLAMA_EMBED_MODEL` | Ollama 嵌入模型名 | `nomic-embed-text` |
-| `OLLAMA_HOST` | Ollama 服务地址 | `http://127.0.0.1:11434` |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key | — |
-| `OPENAI_EMBED_MODEL` | 云端嵌入模型名 | `text-embedding-3-small` |
+| `EMBED_PROVIDER` | 嵌入来源：`openai`（任意 OpenAI 兼容 API）或 `ollama`（本地） | `ollama` |
+| `EMBED_API_KEY` | 嵌入服务 API Key（用独立 `EMBED_*`，勿复用 `OPENAI_*`） | — |
+| `EMBED_BASE_URL` | 嵌入服务地址 | — |
+| `EMBED_MODEL` | 云端嵌入模型名 | `text-embedding-3-small` |
+| `OLLAMA_EMBED_MODEL` | Ollama 嵌入模型名（仅 ollama 时生效） | `nomic-embed-text` |
+| `OLLAMA_HOST` | Ollama 服务地址（仅 ollama 时生效） | `http://127.0.0.1:11434` |
 
-### 其他配置
+### 重排序模型配置（`campus_rag/.env`）
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `WORKSPACE_ROOT` | 文件工作区路径 | 项目根目录 `workspace/` |
+| `RERANK_PROVIDER` | 设为 `api` 启用 API 重排序；未配置时降级为按原始向量分数排序 | — |
+| `RERANK_API_KEY` | 重排序服务 API Key | — |
+| `RERANK_BASE_URL` | 重排序服务地址（代码自动拼接 `/rerank` 端点） | — |
+| `RERANK_MODEL` | 重排序模型名 | `qwen3-reranker` |
+
+### 联网搜索配置（`campus_rag/.env`）
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `WEBSEARCH_PROVIDER` | 搜索源：`tavily`（需 Key）或 `ddg`（DuckDuckGo，免 Key） | `tavily` |
+| `TAVILY_API_KEY` | Tavily API Key（免费版 1000 次/月）；未配置时自动回退 DuckDuckGo | — |
 
 ## 项目结构
 
@@ -142,6 +200,7 @@ USTC-107-let-ai-think-of-one/
 │   │   ├── topics.py          #     话题 CRUD、历史、自动标题
 │   │   ├── search.py          #     公共通知 / 个人数据检索
 │   │   ├── personal_data.py   #     个人知识库 CRUD
+│   │   ├── schedule.py        #     课表查询 / 导入
 │   │   ├── settings.py        #     LLM 配置、模型切换、工具开关
 │   │   ├── sync.py            #     公共通知同步管理
 │   │   └── health.py          #     健康检查
@@ -149,6 +208,7 @@ USTC-107-let-ai-think-of-one/
 │       ├── auth_service.py    #     话题管理服务
 │       ├── chat_service.py    #     Agent 管理、对话执行
 │       ├── rag_service.py     #     RAG 检索、数据入库
+│       ├── schedule_service.py #    本地课表存储
 │       └── sync_service.py    #     客户端同步逻辑
 ├── sync_server/               # 公共通知同步服务端（独立进程，端口 8001）
 │   ├── main.py                #   FastAPI 应用入口
@@ -165,7 +225,7 @@ USTC-107-let-ai-think-of-one/
 ├── main.py                    # LangChain Agent 定义、工具注册、系统提示
 ├── model/
 │   └── config.py              # LLM 初始化（支持 settings.json 热切换）
-├── campus_rag/                # RAG 检索系统（详见下方模块说明）
+├── campus_rag/                # RAG 检索系统（详见 campus_rag/README.md）
 │   ├── __init__.py            #   包入口，导出公开接口
 │   ├── config.py              #   LlamaIndex 全局设置
 │   ├── llm_factory.py         #   LLM / Embedding 工厂（ollama ↔ openai）
@@ -293,7 +353,7 @@ USTC-107-let-ai-think-of-one/
 
 - **首次对话较慢**：Agent 和 RAG 索引采用懒加载，首次调用时需要初始化（约 5-10 秒）
 - **联网搜索超时**：`web_search`/`ustc_web_search` 的连接超时为 5 秒、读取超时为 15 秒；网页正文抓取读取超时为 20 秒，失败会返回明确错误，不会无限等待
-- **嵌入模型**：本地 Ollama 的 `nomic-embed-text` 首次加载需几十秒；切换为云端嵌入可避免此问题
+- **嵌入/重排序服务**：默认走 USTC LLM 网关的云端模型，需校园网或 VPN 才能访问；嵌入改用本地 Ollama 时（`EMBED_PROVIDER=ollama`）首次加载模型需几十秒
 - **数据文件格式**：`campus_rag/data/` 下的通知文件必须以 `.txt` 结尾，否则会被跳过
 - **文档分块**：每篇通知会被 `SentenceSplitter` 切分为多个 1024 字符的块，管理面板按文件名聚合显示
 - **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致 Ollama 连接 502，`llm_factory.py` 已内置清除逻辑
@@ -325,7 +385,7 @@ USTC-107-let-ai-think-of-one/
 
 ### 工具扩展
 
-- [x] **联网搜索工具** — 使用 DuckDuckGo 查找公开网页，并通过独立 `web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
+- [x] **联网搜索工具** — Tavily 主 + DuckDuckGo 兜底查找公开网页，`web_fetch`/`ustc_web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
 - [ ] **知识图谱工具** — 基于 Neo4j 或 NetworkX 构建课程依赖、教师关系等结构化知识
 - [ ] **邮件/通知推送工具** — Agent 代用户订阅关键词，匹配新通知时推送提醒
 - [ ] **日程解析工具** — 从通知中提取时间、地点、事件，自动生成日历事件

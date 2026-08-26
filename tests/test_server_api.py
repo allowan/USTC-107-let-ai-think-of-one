@@ -434,5 +434,49 @@ class TestSettingsRoutes(unittest.TestCase):
             self.assertEqual(data["env"]["api_key"], "k")
 
 
+# ── 同步变更日志合并规则 ──────────────────────────────────────────
+
+
+class TestSyncChangeLog(unittest.TestCase):
+    """增量同步批次内同一 source 多次变更的合并规则。
+
+    关键场景：先 upsert 后 delete 时，delete 指令必须仍然下发，
+    否则已持有旧副本的客户端会永久残留已删除的通知。
+    """
+
+    def setUp(self):
+        import sync_server.database as db
+        self._db = db
+        self._old_path = db.DB_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        db.DB_PATH = Path(self._tmp.name) / "sync.db"
+        db.init_db()
+
+    def tearDown(self):
+        self._db.DB_PATH = self._old_path
+        self._tmp.cleanup()
+
+    def test_delete_after_upsert_in_batch_still_emitted(self):
+        self._db.upsert_document("a.txt", "旧内容")
+        base = self._db.current_version()
+        self._db.upsert_document("a.txt", "新内容")
+        self._db.delete_document("a.txt")
+        changes = self._db.get_changes(base)
+        self.assertEqual(changes["upsert"], [], "批内最后动作是删除，不得再下发内容")
+        self.assertIn("a.txt", changes["deleted_sources"],
+                      "客户端可能已持有旧副本，删除指令不得被吞")
+        self.assertIsNone(self._db.get_document_content("a.txt"))
+
+    def test_delete_then_upsert_emits_both(self):
+        self._db.upsert_document("b.txt", "更早的内容")
+        base = self._db.current_version()
+        self._db.delete_document("b.txt")
+        self._db.upsert_document("b.txt", "新内容")
+        changes = self._db.get_changes(base)
+        # 客户端先应用 deleted 再应用 upsert，净结果为新内容，两者都需下发
+        self.assertEqual([u["source"] for u in changes["upsert"]], ["b.txt"])
+        self.assertIn("b.txt", changes["deleted_sources"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
