@@ -720,18 +720,18 @@ class TestToolPreferenceBehavior(unittest.TestCase):
         self.assertGreater(len(tools), 0, "未设置偏好时应默认启用全部工具")
 
     def test_prefs_only_apply_to_recorded_tools(self):
-        # 旧偏好只覆盖保存时存在的工具；之后新增的工具（如 fetch_url）
+        # 旧偏好只覆盖保存时存在的工具；之后新增的工具（如 ustc_web_search）
         # 不在偏好字典中，必须默认启用而非被旧偏好静默禁用。
         from main import _build_tool_list
         tools = _build_tool_list("probe_user", tool_prefs={"web_search": True})
         names = {t.name for t in tools}
         self.assertIn("web_search", names)
-        self.assertIn("fetch_url", names, "新增工具不在旧偏好中时应默认启用")
+        self.assertIn("ustc_web_search", names, "新增工具不在旧偏好中时应默认启用")
         # 显式禁用的工具必须被排除，无论新旧
         tools = _build_tool_list("probe_user", tool_prefs={"web_search": False})
         names = {t.name for t in tools}
         self.assertNotIn("web_search", names)
-        self.assertIn("fetch_url", names)
+        self.assertIn("ustc_web_search", names)
 
 
 # ── 同步服务配置 ────────────────────────────────────────────────────

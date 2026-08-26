@@ -27,8 +27,12 @@ class SearchResponsivenessTest(unittest.TestCase):
     def test_search_error_tells_agent_not_to_retry(self):
         from tools.search import search_web
 
-        with patch("tools.search.httpx.get", side_effect=OSError("proxy unavailable")):
-            result = search_web.invoke({"query": "USTC"})
+        # 显式锁定 DDG 路径：.env 中 WEBSEARCH_PROVIDER=tavily 时真实
+        # Tavily 请求会先于被 mock 的 DDG 成功，测不到错误文案。
+        env = {"WEBSEARCH_PROVIDER": "ddg"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("tools.search.httpx.get", side_effect=OSError("proxy unavailable")):
+                result = search_web.invoke({"query": "USTC"})
 
         self.assertIn("搜索失败", result)
         self.assertIn("请不要重复调用此工具", result)

@@ -12,17 +12,81 @@ from . import config
 
 logger = logging.getLogger("campus_rag.index_manager")
 
-_chroma_clients = {}
+_chroma_client = None
+_chroma_client_path: str | None = None
 _lock = threading.Lock()
 
+_embed_dim_cache: int | None = None
 
-def _get_chroma_client(persist_dir: str = "./chroma_db") -> chromadb.PersistentClient:
-    path = os.path.abspath(persist_dir)
-    if path not in _chroma_clients:
+# 默认数据目录锚定包内绝对路径：相对路径依赖启动 CWD，从其他目录启动会
+# 指向错误目录（如项目根 data/ 的 checkpoint 库）导致静默建出空索引。
+_DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent / "data")
+
+# 向量库目录同理锚定项目根绝对路径："./chroma_db" 依赖 CWD，从其他目录
+# 启动会在错误位置新建空库并触发公共索引全量重建（或查不到已有数据）。
+_DEFAULT_PERSIST_DIR = str(Path(__file__).resolve().parent.parent / "chroma_db")
+
+
+def _get_live_embed_dim() -> int:
+    """探测当前嵌入模型的输出维度（一次真实 API 调用，进程内缓存）。"""
+    global _embed_dim_cache
+    if _embed_dim_cache is None:
+        # 用 require 而非 Settings.embed_model getter：getter 未初始化时会
+        # 自动 resolve 出 MockEmbedding（维度 1），is None 判断永远不成立。
+        embed_model = config.require_embed_model()
+        _embed_dim_cache = len(embed_model.get_text_embedding("dimension probe"))
+    return _embed_dim_cache
+
+
+def _stored_dim(collection) -> int | None:
+    """读取集合中已存向量的维度；空集合返回 None。"""
+    if collection.count() == 0:
+        return None
+    # peek 返回 numpy 数组，真值判断有歧义，必须用 is None / len 判空
+    embs = collection.peek().get("embeddings")
+    if embs is None or len(embs) == 0:
+        return None
+    return len(embs[0])
+
+
+def assert_collection_dim(collection) -> None:
+    """校验既有集合维度与当前嵌入模型一致，不一致时抛出可操作的错误。
+
+    ChromaDB 集合维度在首次写入后锁定；混用嵌入模型（或嵌入服务不可用时
+    llama_index 静默降级出 MockEmbedding，维度 1）会让集合永久不可用：
+    查询时只抛晦涩的底层维度异常，故在索引构建前显式拦截。
+    """
+    stored = _stored_dim(collection)
+    if stored is None:
+        return
+    live = _get_live_embed_dim()
+    if stored != live:
+        raise RuntimeError(
+            f"向量集合 '{collection.name}' 维度({stored})与当前嵌入模型输出"
+            f"维度({live})不一致，该集合已不可用（ChromaDB 维度在首次写入后"
+            "锁定）。请删除该集合并重建：公共数据可从 campus_rag/data 自动"
+            "重建，个人数据需重新导入。"
+        )
+
+
+def _get_chroma_client(persist_dir: str = _DEFAULT_PERSIST_DIR) -> chromadb.PersistentClient:
+    global _chroma_client, _chroma_client_path
+    resolved = str(Path(persist_dir).resolve())
+    if _chroma_client is None:
         with _lock:
-            if path not in _chroma_clients:
-                _chroma_clients[path] = chromadb.PersistentClient(path=path)
-    return _chroma_clients[path]
+            if _chroma_client is None:
+                # 先记路径再赋客户端：并发下另一线程看到客户端非空时，
+                # 路径必须已就绪，否则会误报绑定路径不一致警告
+                _chroma_client_path = resolved
+                _chroma_client = chromadb.PersistentClient(path=resolved)
+    elif _chroma_client_path != resolved:
+        # 单例已绑定其他目录：chroma 客户端进程内复用是有意为之，但请求的
+        # persist_dir 被忽略必须留痕，否则调用方拿到错误的库却毫无察觉。
+        logger.warning(
+            "ChromaDB 客户端已绑定 %s，忽略本次请求的 persist_dir=%s",
+            _chroma_client_path, resolved,
+        )
+    return _chroma_client
 
 
 def _user_collection_name(user_id: str) -> str:
