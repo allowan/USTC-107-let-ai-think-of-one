@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,7 +32,9 @@ class ScheduleService:
         return sqlite3.connect(self.db_path)
 
     def _init_db(self) -> None:
-        with self._connect() as db:
+        # closing 必不可少：sqlite3 的 with 只管理事务不关闭连接，
+        # 未关闭的句柄在 Windows 上会持续锁住 db 文件。
+        with closing(self._connect()) as db, db:
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schedule_courses (
@@ -86,7 +89,7 @@ class ScheduleService:
                         now,
                     )
                 )
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.execute(
                 "DELETE FROM schedule_courses WHERE username = ? AND semester = ?",
                 (username, semester),
@@ -110,7 +113,7 @@ class ScheduleService:
             query += " AND semester = ?"
             params.append(semester)
         query += " ORDER BY semester DESC, weekday, start_section, name"
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.row_factory = sqlite3.Row
             rows = [dict(row) for row in db.execute(query, params).fetchall()]
         for row in rows:

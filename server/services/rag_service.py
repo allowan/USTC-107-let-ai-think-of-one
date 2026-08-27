@@ -35,10 +35,10 @@ class RAGService:
 
     @staticmethod
     def update_user_data(username: str, source: str, content: str):
-        from campus_rag import delete_user_data, add_user_data
-        delete_user_data(username, source)
-        doc = Document(text=content, metadata={"source": source})
-        add_user_data(username, [doc])
+        # 委托给 campus_rag.query.update_user_data：先探测嵌入可用性再删除写入，
+        # 避免先删后写时嵌入不可用导致用户数据丢失（不可在 service 层拼装）。
+        from campus_rag import update_user_data
+        update_user_data(username, source, content)
 
     @staticmethod
     def delete_user_data(username: str, source: str) -> int:

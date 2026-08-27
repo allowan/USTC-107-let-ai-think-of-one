@@ -118,8 +118,14 @@ export default function ChatPage() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const isComposingRef = useRef(false);
   const summarizedRef = useRef<Set<string>>(new Set());
+  // 流式请求的中止控制器提升到 ref：组件卸载（切去其他页面）时必须中止，
+  // 否则流在后台继续跑完并对已卸载组件 setState。
+  const abortRef = useRef<AbortController | null>(null);
+  const autoCreatedRef = useRef(false);
   const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
   const { message } = App.useApp();
+
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   const scrollBottom = useCallback(() => {
     setTimeout(() => {
@@ -131,10 +137,13 @@ export default function ChatPage() {
 
   // Auto-create first topic after loaded
   useEffect(() => {
-    if (loaded && topics.length === 0) {
-      createTopic();
+    // ref 守卫：StrictMode 下 effect 双执行会创建两个重复的"默认话题"
+    if (loaded && topics.length === 0 && !autoCreatedRef.current) {
+      autoCreatedRef.current = true;
+      // 后端瞬时不可用时避免未处理的 rejection
+      createTopic().catch(() => {});
     }
-  }, [loaded, topics.length]);
+  }, [loaded, topics.length, createTopic]);
 
   // Load history when switching topics
   useEffect(() => {
@@ -200,6 +209,9 @@ export default function ChatPage() {
   };
 
   const send = async () => {
+    // loading 时拦截：Enter 键不经过按钮的 loading 态，不拦截会并行发两条流，
+    // token 交错追加进同一条消息导致输出错乱。
+    if (loading) return;
     const content = input.trim();
     if (!content) return;
     if (loading) return;
@@ -224,6 +236,17 @@ export default function ChatPage() {
         body: JSON.stringify({ content, topic_id: topicId }),
         signal: abortController.signal,
       });
+
+      // 非 2xx（参数校验/后端异常）时响应体不是 SSE 流，
+      // 若不拦截会静默走完解析循环，用户看不到任何错误反馈。
+      if (!response.ok) {
+        let detail = `请求失败（HTTP ${response.status}）`;
+        try {
+          const err = await response.json();
+          if (err?.detail) detail = String(err.detail);
+        } catch { /* 非 JSON 错误体时保留默认提示 */ }
+        throw new Error(detail);
+      }
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error('No reader');

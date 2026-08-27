@@ -4,6 +4,7 @@ from llama_index.core import Document
 
 _base = Path(__file__).resolve().parent
 
+from . import config
 from .index_manager import RAGSystem
 
 logger = logging.getLogger("campus_rag.query")
@@ -13,7 +14,7 @@ _public_retriever = None
 _user_retrievers: dict[str, object] = {}
 
 
-def _reset():
+def reset_caches() -> None:
     """重置所有缓存状态，下次调用时自动重建。"""
     global _rag, _public_retriever, _user_retrievers
     _rag = None
@@ -50,7 +51,11 @@ def _format_nodes(nodes, empty_message: str) -> str:
         return empty_message
     contexts = []
     for node in nodes:
-        contexts.append(node.get_content())
+        meta = node.metadata or {}
+        header = f"[来源: {meta.get('source', '未知来源')}]"
+        if meta.get("url"):
+            header += f" [源链接: {meta['url']}]"
+        contexts.append(f"{header}\n{node.get_content()}")
     return "\n\n".join(contexts)
 
 
@@ -85,37 +90,68 @@ def search_user_data_answer(query: str, user_id: str) -> str:
     return get_rag_response(query, user_index=user_idx)
 
 
-def search_all(query: str, user_id: str) -> str:
-    """同时检索官方通知和个人数据，返回带标签的合并结果。"""
-    _ensure_init()
-    public_result = _format_nodes(
-        _public_retriever.retrieve(query),
-        "未在通知中找到相关信息。",
-    )
-    user_retriever = _get_user_retriever(user_id)
-    user_result = _format_nodes(
-        user_retriever.retrieve(query),
-        "未在个人数据中找到相关信息。",
-    )
-    return f"=== 官方通知 ===\n{public_result}\n\n=== 个人数据 ===\n{user_result}"
+def _enrich_url_metadata(documents: list) -> None:
+    """为缺失源链接的公共文档补全 url 元数据（同步与本地文件共用入口）。"""
+    from .data_loader import extract_source_url
+    for doc in documents:
+        if not doc.metadata.get("url"):
+            url = extract_source_url(doc.metadata.get("source", ""), doc.text)
+            if url:
+                doc.metadata["url"] = url
 
 
-def add_public_activity(text: str, admin_check: bool = True) -> None:
-    """管理员添加公共通知。admin_check=False 时抛出 PermissionError。"""
-    if not admin_check:
-        raise PermissionError("无权添加公共通知")
+def add_public_documents(documents: list) -> None:
+    """增量添加带 source 元数据的公共文档（同步服务用），自动去重。"""
+    _enrich_url_metadata(documents)
     _ensure_init()
-    doc = Document(text=text, metadata={"source": "manual"})
-    _rag.add_documents_to_public([doc])
+    _rag.add_documents_to_public(documents)
     global _public_retriever
     _public_retriever = None
-    pub_idx = _rag.get_public_index()
-    _public_retriever = pub_idx.as_retriever(similarity_top_k=10)
 
 
-def add_user_activity(user_id: str, content: str) -> None:
-    """向用户个人知识库添加纯文本活动记录。"""
-    doc = Document(text=content, metadata={"source": "manual"})
+def delete_public_data(source: str) -> int:
+    """按来源删除公共集合中的文档块，返回删除数量（同步服务增量更新用）。"""
+    _ensure_init()
+    count = _rag.delete_public_documents_by_source(source)
+    global _public_retriever
+    _public_retriever = None
+    return count
+
+
+def replace_public_documents(documents: list) -> None:
+    """全量替换公共集合（同步服务全量同步用）。
+
+    先探测嵌入可用性再清空重建：避免嵌入不可用时先删后建失败，
+    导致公共集合被清空（虽可从 campus_rag/data 自愈，但不应发生）。
+    """
+    if not config.init_embed():
+        raise RuntimeError(
+            "嵌入服务不可用，已拒绝全量替换公共集合（避免清空后重建失败）。"
+        )
+    _ensure_init()
+    try:
+        _rag.chroma_client.delete_collection("public")
+    except Exception:
+        logger.warning("删除旧 public 集合失败（可能不存在），继续重建", exc_info=True)
+    if documents:
+        _enrich_url_metadata(documents)
+        _rag.create_public_index_via_docs(documents)
+    reset_caches()
+
+
+def update_user_data(user_id: str, source: str, content: str) -> None:
+    """更新个人数据：先探测嵌入可用性，再删除旧数据并写入新数据。
+
+    若先删后写且写入时嵌入不可用（fail-fast 拒绝入库），用户数据将永久丢失；
+    故必须在删除前确认嵌入服务可用。
+    """
+    if not config.init_embed():
+        raise RuntimeError(
+            "嵌入服务不可用，已拒绝更新个人数据（避免删除旧数据后写入失败）。"
+            "请检查校园网/VPN 连接后重试，原数据未受影响。"
+        )
+    delete_user_data(user_id, source)
+    doc = Document(text=content, metadata={"source": source})
     add_user_data(user_id, [doc])
 
 

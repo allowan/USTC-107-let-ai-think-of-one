@@ -13,7 +13,7 @@ async def sync_status(
     user: str = Depends(get_user),
     sync: SyncService = Depends(get_sync_service),
 ):
-    local_version = sync._get_local_version()
+    local_version = sync.get_local_version()
     remote_version = await sync.check_remote_version()
     return {
         "local_version": local_version,

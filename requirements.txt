@@ -5,6 +5,7 @@ langgraph>=1.2.7
 python-dotenv
 llama-index
 llama-index-vector-stores-chroma
+llama-index-embeddings-openai
 llama-index-embeddings-ollama
 llama-index-llms-ollama
 llama-index-llms-openai
@@ -18,6 +19,8 @@ jieba
 
 # Web server
 httpx>=0.27.0
+beautifulsoup4
+duckduckgo-search
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-jose[cryptography]>=3.3.0

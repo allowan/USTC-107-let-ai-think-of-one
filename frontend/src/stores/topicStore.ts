@@ -7,6 +7,7 @@ interface TopicState {
   activeTopicId: string;
   loading: boolean;
   loaded: boolean;
+  loadError: boolean;
   fetchTopics: () => Promise<void>;
   createTopic: () => Promise<string>;
   deleteTopic: (topicId: string) => Promise<void>;
@@ -19,6 +20,7 @@ export const useTopicStore = create<TopicState>((set, get) => ({
   activeTopicId: '',
   loading: false,
   loaded: false,
+  loadError: false,
 
   fetchTopics: async () => {
     set({ loading: true });
@@ -31,9 +33,13 @@ export const useTopicStore = create<TopicState>((set, get) => ({
         activeTopicId: topics.length > 0 && !activeTopicId ? topics[0].id : activeTopicId,
         loading: false,
         loaded: true,
+        loadError: false,
       });
     } catch {
-      set({ loading: false, loaded: true });
+      // 后端离线时不能置 loaded：否则 ChatPage 会触发自动建话题产生
+      // 未处理的 rejection，且用户看不到任何失败信号。保留 loaded: false
+      // 表示"尚未成功加载"，并用 loadError 驱动 UI 提示后端不可达。
+      set({ loading: false, loadError: true });
     }
   },
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Button, Typography, App, Spin, Popconfirm, Input } from 'antd';
 import {
@@ -21,13 +21,15 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const {
-    topics, activeTopicId, loading: topicsLoading,
+    topics, activeTopicId, loading: topicsLoading, loadError,
     fetchTopics, createTopic, deleteTopic, renameTopic, setActiveTopicId,
   } = useTopicStore();
 
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [editingTopicId, setEditingTopicId] = useState<string | null>(null);
   const [editTopicName, setEditTopicName] = useState('');
+  // Enter 与 blur 可能先后触发提交，同步置位的 ref 标志去重，避免同一话题双 PUT
+  const renameBusyRef = useRef(false);
   const { message } = App.useApp();
 
   useEffect(() => {
@@ -63,15 +65,19 @@ export default function AppLayout() {
   };
 
   const handleFinishRename = async () => {
+    if (renameBusyRef.current) return;
     const topicId = editingTopicId;
     const name = editTopicName.trim();
     setEditingTopicId(null);
     setEditTopicName('');
     if (!topicId || !name) return;
+    renameBusyRef.current = true;
     try {
       await renameTopic(topicId, name);
     } catch {
       message.error('重命名失败');
+    } finally {
+      renameBusyRef.current = false;
     }
   };
 
@@ -127,7 +133,16 @@ export default function AppLayout() {
         </div>
 
         <div style={{ flex: 1, overflow: 'auto', padding: '0 4px' }}>
-          {topicsLoading ? (
+          {loadError ? (
+            <div
+              onClick={() => fetchTopics()}
+              style={{ textAlign: 'center', padding: 16, color: '#ff4d4f', fontSize: 12, lineHeight: 1.6, cursor: 'pointer' }}
+            >
+              后端连接失败，请确认已运行 python server.py
+              <br />
+              <span style={{ color: '#1677ff' }}>点击重试</span>
+            </div>
+          ) : topicsLoading ? (
             <div style={{ textAlign: 'center', padding: 16 }}><Spin size="small" /></div>
           ) : topics.length === 0 ? (
             <div style={{ textAlign: 'center', padding: 16, color: '#999', fontSize: 12 }}>

@@ -2,8 +2,10 @@
 Sync service: pulls public notices from sync_server, updates local ChromaDB.
 """
 
+import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 import httpx
@@ -13,15 +15,15 @@ logger = logging.getLogger("server")
 ROOT = Path(__file__).resolve().parent.parent.parent
 SYNC_STATE_PATH = ROOT / "data" / "sync_state.json"
 
-# Default sync_server URL — override via environment variable
-SYNC_SERVER_URL = "http://127.0.0.1:8001"
+# sync_server 地址：环境变量优先（部署位置可变，禁止硬编码生效）
+SYNC_SERVER_URL = os.getenv("SYNC_SERVER_URL", "http://127.0.0.1:8001")
 
 
 class SyncService:
     """Manages sync of public documents from remote sync_server to local ChromaDB."""
 
     @staticmethod
-    def _get_local_version() -> int:
+    def get_local_version() -> int:
         try:
             with open(SYNC_STATE_PATH, encoding="utf-8") as f:
                 return json.load(f).get("version", 0)
@@ -55,7 +57,7 @@ class SyncService:
         if remote_version < 0:
             return {"status": "error", "message": "无法连接到同步服务器"}
 
-        local_version = self._get_local_version()
+        local_version = self.get_local_version()
 
         if remote_version == 0:
             return {"status": "ok", "message": "同步服务器无数据", "version": 0}
@@ -69,7 +71,13 @@ class SyncService:
                 f"{SYNC_SERVER_URL}/api/sync/changes?since={local_version}"
             )
             if changes and changes.get("version", 0) > local_version:
-                self._apply_changes(changes)
+                try:
+                    # 嵌入/入库是同步阻塞调用，必须在事件循环外执行，
+                    # 否则同步期间整个后端无法响应任何请求
+                    await asyncio.to_thread(self._apply_changes, changes)
+                except Exception as e:
+                    logger.error("应用增量变更失败: %s", e, exc_info=True)
+                    return {"status": "error", "message": f"应用增量变更失败: {e}"}
                 self._set_local_version(changes["version"])
                 return {
                     "status": "ok",
@@ -84,7 +92,11 @@ class SyncService:
         if not full:
             return {"status": "error", "message": "全量同步失败"}
 
-        self._apply_full_sync(full)
+        try:
+            await asyncio.to_thread(self._apply_full_sync, full)
+        except Exception as e:
+            logger.error("应用全量同步失败: %s", e, exc_info=True)
+            return {"status": "error", "message": f"应用全量同步失败: {e}"}
         self._set_local_version(full["version"])
         return {
             "status": "ok",
@@ -94,44 +106,28 @@ class SyncService:
         }
 
     def _apply_changes(self, changes: dict):
-        """Apply incremental changes to local ChromaDB."""
+        """Apply incremental changes to local ChromaDB（经 campus_rag 公共门面）。"""
         from llama_index.core import Document
-        from campus_rag.index_manager import RAGSystem
-        from campus_rag.query import _reset
+        from campus_rag import add_public_documents, delete_public_data
 
-        rag = RAGSystem()
         upsert = changes.get("upsert") or []
         deleted = changes.get("deleted_sources") or []
 
         for source in deleted:
-            rag.delete_public_documents_by_source(source)
+            delete_public_data(source)
 
         if upsert:
             docs = [Document(text=item["content"], metadata={"source": item["source"]}) for item in upsert]
-            rag.add_documents_to_public(docs)
-
-        _reset()
+            add_public_documents(docs)
 
     def _apply_full_sync(self, full: dict):
-        """Full sync: wipe local public index and rebuild."""
+        """Full sync: wipe local public index and rebuild（经 campus_rag 公共门面）。"""
         from llama_index.core import Document
-        from campus_rag.index_manager import RAGSystem
-        from campus_rag.query import _reset
-
-        rag = RAGSystem()
-
-        # Clear existing public collection
-        try:
-            rag.chroma_client.delete_collection("public")
-        except Exception:
-            pass
+        from campus_rag import replace_public_documents
 
         documents = full.get("documents") or []
-        if documents:
-            docs = [Document(text=d["content"], metadata={"source": d["source"]}) for d in documents]
-            rag.create_public_index_via_docs(docs)
-
-        _reset()
+        docs = [Document(text=d["content"], metadata={"source": d["source"]}) for d in documents]
+        replace_public_documents(docs)
 
 
 _sync_service: SyncService | None = None

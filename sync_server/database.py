@@ -66,17 +66,17 @@ def get_changes(since: int) -> dict:
 
     upsert = []
     deleted = []
-    seen = set()
     for r in rows:
         if r["action"] == "upsert":
             upsert.append({"source": r["source"], "content": r["content"]})
-            seen.add(r["source"])
         elif r["action"] == "delete":
             # Remove any prior upsert of same source in this batch
             upsert = [u for u in upsert if u["source"] != r["source"]]
-            if r["source"] not in seen:
+            # delete 必须始终下发：客户端可能已持有本批之前同步的旧副本，
+            # 若因本批内出现过 upsert 就吞掉 delete，旧数据会永久残留。
+            # 删除幂等，客户端无此 source 时 delete_public_data 返回 0 无副作用。
+            if r["source"] not in deleted:
                 deleted.append(r["source"])
-            seen.add(r["source"])
 
     return {
         "version": current_version(),

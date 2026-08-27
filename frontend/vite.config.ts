@@ -24,16 +24,8 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https?:\/\/.*\/api\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              expiration: { maxEntries: 50, maxAgeSeconds: 300 },
-            },
-          },
-        ],
+        // 注意：不要为 /api/* 配置 runtimeCaching——NetworkFirst 会在后端
+        // 短暂不可用时回源陈旧缓存，话题/设置等数据展示错误且难以察觉。
       },
     }),
   ],
@@ -48,10 +40,6 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
-      },
-      '/ws': {
-        target: 'ws://127.0.0.1:8000',
-        ws: true,
       },
     },
   },

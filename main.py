@@ -254,8 +254,14 @@ _shared_tools = {
 }
 
 
-def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None):
-    """Build the list of tools for a given user, filtering by enabled_tool_names."""
+def _build_tool_list(username: str, tool_prefs: dict[str, bool] | None = None):
+    """Build the list of tools for a given user, filtering by tool preferences.
+
+    None 表示用户未设置偏好（默认全部启用）；空字典是用户显式禁用全部工具，
+    必须尊重而非回退全启用，否则前端设置被静默忽略。
+    偏好字典只反映用户保存时的工具集：不在字典中的工具视为"用户未表态"，
+    默认启用，否则之后新增的工具会被旧偏好静默禁用。
+    """
     user_tools = {
         "search_my_data": _make_search_my_data(username),
         "add_personal_data": _make_add_personal_data(username),
@@ -265,19 +271,22 @@ def _build_tool_list(username: str, enabled_tool_names: list[str] | None = None)
     }
     all_tools = {**_shared_tools, **user_tools}
 
-    if enabled_tool_names is None:
+    if tool_prefs is None:
         names = list(all_tools.keys())
+    elif not tool_prefs:
+        # 空字典 = 用户显式禁用了全部工具，与"未表态默认启用"区分开
+        names = []
     else:
-        names = [n for n in enabled_tool_names if n in all_tools]
+        names = [n for n in all_tools if tool_prefs.get(n, True)]
 
     if not names:
-        logger.warning("No tools enabled, using all tools")
-        names = list(all_tools.keys())
+        logger.warning("用户 %s 未启用任何工具，agent 将以纯对话模式运行",
+                       username or "<default>")
 
     return [all_tools[n] for n in names]
 
 
-async def build_agent(username: str = "", enabled_tool_names: list[str] | None = None) -> AgentContext:
+async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = None) -> AgentContext:
     """Create an Agent instance. Tools requiring user context are created via closure
     when *username* is provided."""
     global _SINGLETON_CONN
@@ -288,7 +297,7 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
         await _prune_checkpoints(conn)
         checkpointer = AsyncSqliteSaver(conn)
 
-        tools = _build_tool_list(username, enabled_tool_names)
+        tools = _build_tool_list(username, tool_prefs)
 
         agent = create_agent(
             model=model,
@@ -301,7 +310,7 @@ async def build_agent(username: str = "", enabled_tool_names: list[str] | None =
         raise
     ctx = AgentContext(agent=agent, conn=conn, username=username)
 
-    if not username and enabled_tool_names is None:
+    if not username and tool_prefs is None:
         _SINGLETON_CONN = conn
     return ctx
 
@@ -319,12 +328,43 @@ async def close_agent(ctx: AgentContext | None = None):
 
 async def run_agent(content: str, thread_id: str = "default") -> str:
     """Convenience: run a single-turn agent invocation and return the final reply."""
+    global _SINGLETON_CONN
     ctx = await build_agent()
-    result = await ctx.agent.ainvoke(
-        {"messages": [{"role": "user", "content": content}]},
-        config={"configurable": {"thread_id": thread_id}},
-    )
-    return result["messages"][-1].content
+    try:
+        result = await ctx.agent.ainvoke(
+            {"messages": [{"role": "user", "content": content}]},
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        return result["messages"][-1].content
+    finally:
+        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄。
+        # 注意：无参 build_agent 会同时记录为单例连接，此处一并清理引用，
+        # 避免 close_agent() 再次关闭已关连接。
+        if _SINGLETON_CONN is ctx.conn:
+            _SINGLETON_CONN = None
+        await close_agent(ctx)
+
+
+def _checkpoint_messages_to_history(raw_messages: list) -> list:
+    """把 checkpoint 中的 LangChain 消息列表转为前端可渲染的历史。
+
+    规则：跳过非 human/ai 消息（如 tool）；仅带 tool_calls 的 AI 消息
+    content 为空，直接发给前端会渲染出空气泡；多跳推理产生的多条连续
+    AI 消息合并为一条，与流式渲染时的单气泡视觉一致。
+    """
+    result = []
+    for m in raw_messages:
+        if hasattr(m, 'type') and hasattr(m, 'content'):
+            if m.type in ('human', 'ai'):
+                content = m.content if isinstance(m.content, str) else str(m.content)
+                if m.type == 'ai' and not content.strip():
+                    continue
+                role = "user" if m.type == "human" else "assistant"
+                if result and result[-1]["role"] == role == "assistant":
+                    result[-1]["content"] += "\n\n" + content
+                else:
+                    result.append({"role": role, "content": content})
+    return result
 
 
 async def get_history(thread_id: str, conn=None) -> list:
@@ -338,16 +378,7 @@ async def get_history(thread_id: str, conn=None) -> list:
         state = await checkpointer.aget_tuple(config)
         if state and state.checkpoint:
             channel_values = state.checkpoint.get("channel_values", {})
-            raw_messages = channel_values.get("messages", [])
-            result = []
-            for m in raw_messages:
-                if hasattr(m, 'type') and hasattr(m, 'content'):
-                    if m.type in ('human', 'ai'):
-                        result.append({
-                            "role": "user" if m.type == "human" else "assistant",
-                            "content": m.content if isinstance(m.content, str) else str(m.content),
-                        })
-            return result
+            return _checkpoint_messages_to_history(channel_values.get("messages", []))
     finally:
         if own_conn:
             await conn.close()

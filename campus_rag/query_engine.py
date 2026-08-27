@@ -1,9 +1,6 @@
 # query_engine.py
+import logging
 import os
-
-# Force offline mode for HuggingFace (model already cached locally).
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from typing import List, Optional
 from llama_index.core import VectorStoreIndex
@@ -13,44 +10,50 @@ from llama_index.core.prompts import PromptTemplate
 
 from . import config
 
+logger = logging.getLogger("campus_rag.query_engine")
 
-class _CrossEncoderReranker:
-    """bge-reranker-base 的本地轻量封装。
 
-    不直接用 FlagEmbedding.FlagReranker 的原因：FlagEmbedding 1.4.0 内部调用
-    tokenizer.prepare_for_model()，该方法在 transformers 5.x 中已被移除，会抛
-    AttributeError。这里改用 AutoTokenizer + AutoModelForSequenceClassification
-    走标准的 __call__ tokenize 路径（该路径在 transformers 5.x 下正常），并保留
-    compute_score(pairs, normalize) 接口，使调用处无需改动。若日后 FlagEmbedding
-    修复了该兼容问题，可直接切回 FlagReranker。
+class _APIReranker:
+    """qwen3-reranker 的 API 封装（Cohere/Jina 风格 /rerank 端点）。
 
-    运行前提：bge-reranker-base 模型需提前下载到本地 HF 缓存（约 1GB），并将
-    HF_HOME 环境变量指向缓存目录（本项目示例为 E:\\HFCache）。模型缺失时
-    _get_reranker 会捕获异常并优雅降级为按原始分数排序，不影响检索功能。
+    保留 compute_score(pairs, normalize) 接口与本地 cross-encoder 一致，
+    使 rerank_nodes 调用处无需改动；normalize 参数仅为兼容接口保留，
+    API 返回的 relevance_score 本身已是归一化相关性分数。
+
+    配置来自 campus_rag/.env 的 RERANK_* 变量。端点不可用时由
+    _get_reranker / rerank_nodes 的既有异常处理降级为按原始
+    向量分数排序，不影响检索功能。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-reranker-base") -> None:
-        import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
-        self._torch = torch
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self._model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self._model.eval()
+    def __init__(self, model: str, api_key: str, base_url: str) -> None:
+        import httpx
+        self._model = model
+        self._url = base_url.rstrip("/") + "/rerank"
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        self._client = httpx.Client(timeout=30.0)
 
     def compute_score(self, pairs: List[List[str]], normalize: bool = True):
-        queries = [p[0] for p in pairs]
-        passages = [p[1] for p in pairs]
-        with self._torch.no_grad():
-            enc = self._tokenizer(
-                queries,
-                passages,
-                padding=True,
-                truncation=True,
-                max_length=512,
-                return_tensors="pt",
-            )
-            logits = self._model(**enc).logits.view(-1).float()
-            return self._torch.sigmoid(logits) if normalize else logits
+        query = pairs[0][0]
+        documents = [p[1] for p in pairs]
+        resp = self._client.post(
+            self._url,
+            headers=self._headers,
+            json={
+                "model": self._model,
+                "query": query,
+                "documents": documents,
+                "top_n": len(documents),
+            },
+        )
+        resp.raise_for_status()
+        # 兼容 relevance_score / score 两种字段命名
+        scores = [0.0] * len(documents)
+        for r in resp.json()["results"]:
+            scores[int(r["index"])] = float(r.get("relevance_score", r.get("score", 0.0)))
+        return scores
 
 
 _reranker = None
@@ -61,14 +64,22 @@ _bm25_cache: dict[str, object] = {}
 
 
 def _get_reranker():
+    """按 .env 的 RERANK_* 配置构建 API reranker；未配置或失败时返回 None。"""
     global _reranker, _reranker_available
     if _reranker is not None and _reranker_available:
         return _reranker
     if not _reranker_available:
         return None
+    if os.getenv("RERANK_PROVIDER") != "api":
+        return None  # 未配置 API reranker，走原始分数排序
     try:
-        _reranker = _CrossEncoderReranker("BAAI/bge-reranker-base")
-    except Exception:
+        _reranker = _APIReranker(
+            model=os.getenv("RERANK_MODEL", "qwen3-reranker"),
+            api_key=os.getenv("RERANK_API_KEY", ""),
+            base_url=os.getenv("RERANK_BASE_URL", ""),
+        )
+    except Exception as e:
+        logger.warning("API reranker 构建失败，降级为原始向量分数排序: %s", e)
         _reranker_available = False
         _reranker = None
     return _reranker
@@ -131,7 +142,10 @@ def rerank_nodes(query: str, nodes: List[NodeWithScore], top_n: int = 10) -> Lis
             scores = scores.flatten()
         for i, node in enumerate(nodes):
             node.score = float(scores[i])
-    except Exception:
+    except Exception as e:
+        # 降级为原始分数排序是有意为之，但静默禁用会让重排序失效且无线索；
+        # 留痕后仍按原策略继续，不影响检索功能。
+        logger.warning("reranker 不可用，降级为原始向量分数排序: %s", e)
         _reranker_available = False
         _reranker = None
     sorted_nodes = sorted(nodes, key=lambda n: n.score, reverse=True)
@@ -152,10 +166,19 @@ QA_PROMPT = PromptTemplate(
     "你是一个校园助手。请根据下面的参考资料回答用户问题。\n"
     "如果资料中包含多条相关信息，请用序号列出。\n"
     "如果资料不足以回答问题，请如实说明。\n"
-    "请在回答末尾列出各条信息的来源文件名或出处。\n\n"
+    "请在回答末尾列出各条信息的来源（文件名）；资料带源链接时务必一并给出，方便用户溯源。\n\n"
     "参考资料：\n{context_str}\n\n"
     "用户问题：{query_str}\n\n你的回答："
 )
+
+
+def _node_context_block(node: NodeWithScore) -> str:
+    """拼装单个节点的上下文：来源头（文件名 + 源链接）+ 正文。"""
+    meta = node.node.metadata or {}
+    header = f"[来源: {meta.get('source', '未知来源')}]"
+    if meta.get("url"):
+        header += f" [源链接: {meta['url']}]"
+    return f"{header}\n{node.node.text}"
 
 
 def get_rag_response(
@@ -195,18 +218,16 @@ def get_rag_response(
                     filtered.append(node)
             if len(filtered) >= 3:
                 unique_nodes = filtered
-        except Exception:
-            pass
+        except Exception as e:
+            # BM25 预过滤失败时回退纯向量结果，留痕便于排查检索质量异常
+            logger.debug("BM25 预过滤失败，跳过: %s", e)
 
     if rerank and len(unique_nodes) > 1:
         final_nodes = rerank_nodes(query, unique_nodes, top_n=10)
     else:
         final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
 
-    context = "\n\n".join([
-        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
-        for node in final_nodes
-    ])
+    context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
     if not config.init_llm():
         raise RuntimeError("LLM 未配置或初始化失败")
@@ -241,10 +262,7 @@ def get_rag_response_hybrid(
     else:
         final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
 
-    context = "\n\n".join([
-        f"[来源: {node.node.metadata.get('source', '未知来源')}]\n{node.node.text}"
-        for node in final_nodes
-    ])
+    context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
     if not config.init_llm():
         raise RuntimeError("LLM 未配置或初始化失败")

@@ -1,9 +1,3 @@
-export interface UserInfo {
-  user_id: string;
-  username: string;
-  is_admin?: boolean;
-}
-
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';

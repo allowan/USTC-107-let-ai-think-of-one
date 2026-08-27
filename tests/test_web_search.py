@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -144,6 +145,92 @@ class WebSearchTest(unittest.TestCase):
         with patch("tools.search.socket.getaddrinfo", return_value=public_ip):
             with self.assertRaisesRegex(ValueError, "不在中国科大"):
                 _validate_ustc_url("https://example.com/")
+
+
+class WebSearchProviderTest(unittest.TestCase):
+    """web_search 的 provider 选择：Tavily 主 + DuckDuckGo 兜底。"""
+
+    def setUp(self):
+        self._saved = {
+            key: os.environ.get(key)
+            for key in ("TAVILY_API_KEY", "WEBSEARCH_PROVIDER")
+        }
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_tavily_results_formatted_as_markdown_links(self):
+        from tools import search
+        payload = {
+            "results": [
+                {"title": "结果一", "url": "https://a.example.com", "content": "摘要一"},
+                {"title": "结果二", "url": "https://b.example.com", "content": "摘要二"},
+            ]
+        }
+        captured = {}
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return payload
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+        os.environ["WEBSEARCH_PROVIDER"] = "tavily"
+        os.environ["TAVILY_API_KEY"] = "tvly-test-key"
+        with patch.object(search.httpx, "post", side_effect=fake_post):
+            result = search.search_web.invoke({"query": "中科大新闻"})
+        self.assertIn("1. [结果一](https://a.example.com)", result)
+        self.assertIn("2. [结果二](https://b.example.com)", result)
+        # Bearer 认证头必须携带，请求必须打到 Tavily 端点
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer tvly-test-key")
+        self.assertEqual(captured["url"], search.TAVILY_ENDPOINT)
+        self.assertEqual(captured["json"]["query"], "中科大新闻")
+
+    def test_missing_tavily_key_falls_back_to_ddg(self):
+        from tools import search
+        os.environ["WEBSEARCH_PROVIDER"] = "tavily"
+        os.environ.pop("TAVILY_API_KEY", None)
+        with patch.object(search, "search_web_text", return_value="兜底结果") as ddg:
+            result = search.search_web.invoke({"query": "任意查询"})
+        self.assertEqual(result, "兜底结果")
+        ddg.assert_called_once_with("任意查询")
+
+    def test_ddg_provider_skips_tavily(self):
+        from tools import search
+        os.environ["WEBSEARCH_PROVIDER"] = "ddg"
+        os.environ["TAVILY_API_KEY"] = "tvly-test-key"
+        with patch.object(search, "_search_tavily_results") as tavily:
+            with patch.object(search, "search_web_text", return_value="ddg 结果"):
+                result = search.search_web.invoke({"query": "任意查询"})
+        self.assertEqual(result, "ddg 结果")
+        tavily.assert_not_called()
+
+
+class ToolRegistrationTest(unittest.TestCase):
+    """main.py 中工具注册与元数据契约。"""
+
+    def test_tool_metadata_matches_registered_tools(self):
+        from main import TOOL_METADATA, _shared_tools
+        meta_names = {m["name"] for m in TOOL_METADATA}
+        for name in _shared_tools:
+            self.assertIn(name, meta_names, f"共享工具 {name} 缺少 TOOL_METADATA 条目")
+
+    def test_shared_tool_names(self):
+        from main import _shared_tools
+        # LangChain 工具的实际注册名必须与偏好存储的名称一致
+        for name, tool in _shared_tools.items():
+            self.assertEqual(tool.name, name)
 
 
 if __name__ == "__main__":

@@ -2,45 +2,82 @@
 
 基于 RAG + Agent 的校园信息智能问答助手（中国科学技术大学"一〇七杯"智能体赛道参赛项目）。
 
+本地单用户客户端：无登录、无用户系统，所有数据（对话历史、个人知识库、向量索引）保存在本机。
+
 ## 功能特性
 
-- **多轮对话** — SSE/WebSocket 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染和“停止生成”打断
+- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染和“停止生成”打断
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
-- **多跳推理** — Agent 内嵌多跳推理指南，面对复杂问题自动进行多轮检索：先做初次检索，从结果中提取关键线索（活动名称、部门名等）发起二次检索，反复直到信息完整，综合所有结果回答
+- **多跳推理** — Agent 面对复杂问题自动进行多轮检索：先初次检索，从结果中提取关键线索发起二次检索，反复直到信息完整，综合所有结果回答
+- **联网搜索** — Agent 内置联网搜索（Tavily / DuckDuckGo）与网页抓取工具，弥补本地知识库时效性缺口，回答自动附来源链接
+- **评课参考** — 接入评课社区（icourse.club）公开课程评价搜索与正文读取，选课建议时区分官方信息与学生主观评价
+- **可溯源** — 检索结果与回答均携带「来源文件名 + 源链接」，联网搜索结果附网页链接
 - **设置中心** — LLM API Key/Base URL 热更新、模型切换、Agent 工具开关
 
-**特殊说明**：之前做过用户功能但是删掉了，因为设置的客户端数据全在本地用户有点多余，而且数据保存在本地更加安全。
+## 框架介绍
+
+| 层 | 技术 | 说明 |
+|---|---|---|
+| 前端 | React 18 + Vite 6 + TypeScript + Ant Design + Zustand | SPA，详见 [`frontend/README.md`](frontend/README.md) |
+| 后端 | FastAPI + uvicorn（端口 8000） | 路由/服务分层，详见 [`server/README.md`](server/README.md) |
+| Agent | LangChain + LangGraph | 工具调用 + checkpoint 持久化（`main.py`） |
+| RAG | LlamaIndex + ChromaDB + BM25 + qwen3-embedding / qwen3-reranker | 独立可测核心库，详见 [`campus_rag/README.md`](campus_rag/README.md) |
+| LLM | DeepSeek V4（远程 API，OpenAI 兼容） | 配置见 `settings.json`，支持热切换（`model/config.py`） |
+| 同步 | 独立 Sync Server（端口 8001） | 公共通知分发，详见 [`sync_server/README.md`](sync_server/README.md) |
+| 存储 | SQLite（话题/工具偏好/检查点） + ChromaDB（向量） | 全部本地文件 |
+
+```
+用户提问
+  → Agent（main.py）决定调用哪些工具
+     ├── search_campus_notices / search_notices_raw   → campus_rag 公共通知检索
+     ├── search_my_data / search_user_data_raw        → campus_rag 个人数据检索
+     ├── web_search / web_fetch / ustc_web_search / ustc_web_fetch → 联网搜索与网页抓取（tools/）
+     ├── course_review_search / course_review_fetch → 评课社区课程评价（tools/）
+     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取与教务课表导入
+     └── add_personal_data                            → 个人知识库入库
+  → SSE 流式回传前端（thinking / tool_use / token / done 事件）
+```
 
 ## 快速开始
 
 ### 1. 环境要求
 
-| 依赖 | 版本 | 说明 |
-|---|---|---|
-| Python | 3.11+ | 推荐 3.12 |
-| Node.js | 18+ | 推荐 22 |
-| Ollama | latest | 用于本地嵌入模型 |
-| conda | 可选 | 项目提供 `107` 环境 |
+| 依赖 | 版本 |
+|---|---|
+| Python | 3.11+（推荐 3.12） |
+| Node.js | 18+（推荐 22） |
 
-**首次克隆后：**
+### 2. 安装依赖
 
 ```bash
+# （推荐）创建并激活 Python 虚拟环境
+python -m venv .venv
+.venv\Scripts\Activate.ps1        # Windows PowerShell；Linux/macOS 用 source .venv/bin/activate
+
 # Python 依赖
 pip install -r requirements.txt
 
 # 前端依赖
-cd frontend && npm install
+cd frontend && npm install && cd ..
 ```
 
-### 2. 配置 LLM API Key
+### 3. 配置 Key
 
-**方式一：settings.json**
+项目最多需要三组 Key，分别填在不同文件（切勿混写）：
+
+| Key | 填写位置 | 用途 | 获取方式 |
+|---|---|---|---|
+| DeepSeek API Key | 根目录 `settings.json` | 对话 Agent 与 RAG 回答生成 | DeepSeek 开放平台申请 |
+| 嵌入/重排序 API Key | `campus_rag/.env` | 向量嵌入与检索重排序（默认 USTC LLM 网关） | 科大 LLM 网关平台申请（需校园网/VPN 访问） |
+| Tavily API Key（可选） | `campus_rag/.env` | 联网搜索（不配置则自动回退免 Key 的 DuckDuckGo） | https://tavily.com 注册，免费版 1000 次/月 |
+
+**① LLM 配置**
 
 ```bash
-cp settings.example.json settings.json
+copy settings.example.json settings.json   # Linux/macOS 用 cp
 ```
 
 编辑 `settings.json`，填入 DeepSeek API Key：
@@ -55,56 +92,53 @@ cp settings.example.json settings.json
 }
 ```
 
-**方式二：环境变量**
+也可改用环境变量 `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`，优先级高于 `settings.json`。
+
+**② 嵌入与重排序配置**
 
 ```bash
-export LLM_API_KEY="sk-your-deepseek-key"
-export LLM_BASE_URL="https://api.deepseek.com"
-export LLM_MODEL="deepseek-v4-flash"
+copy campus_rag\.env.example campus_rag\.env   # Linux/macOS 用 cp
 ```
 
-环境变量优先级高于 `settings.json`。对话 Agent 和 RAG 总结共用这组
-`LLM_*` 配置；如果同时设置了 `OPENAI_*`，RAG 会优先使用 `OPENAI_*`。
+`.env.example` 已预置 USTC 网关的配置模板，只需把两处 `sk-xxx` 替换为你自己的网关 Key（嵌入与重排序可共用同一个 Key）：
 
-### 3. 配置嵌入模型
-
-```bash
-cp campus_rag/.env.example campus_rag/.env
-```
-
-`campus_rag/.env` 默认使用本地 Ollama：
-
-```env
-EMBED_PROVIDER=ollama
-OLLAMA_EMBED_MODEL=nomic-embed-text
-OLLAMA_HOST=http://127.0.0.1:11434
-```
-
-也可切换为 OpenAI 兼容的云端嵌入：
-
-```env
+```dotenv
+# 嵌入模型（qwen3-embedding）
 EMBED_PROVIDER=openai
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-your-key
-OPENAI_EMBED_MODEL=deepseek-embedding-v1
+EMBED_API_KEY=sk-your-ustc-gateway-key
+EMBED_BASE_URL=https://api.llm.ustc.edu.cn/v1
+EMBED_MODEL=qwen3-embedding
+
+# 重排序模型（qwen3-reranker）
+RERANK_PROVIDER=api
+RERANK_API_KEY=sk-your-ustc-gateway-key
+RERANK_BASE_URL=https://api.llm.ustc.edu.cn/v1
+RERANK_MODEL=qwen3-reranker
 ```
 
-### 4. 启动 Ollama
+网关不可用时：嵌入可改为本地 Ollama（`EMBED_PROVIDER=ollama`，模板内有回退配置）；重排序不配置会自动降级为按向量分数排序，不阻断使用。
 
-```bash
-# 首次拉取嵌入模型（约 274 MB）
-ollama pull nomic-embed-text
+**③ 联网搜索配置（可选）**
 
-# 启动 Ollama 服务（默认监听 127.0.0.1:11434）
-ollama serve
+在 `campus_rag/.env` 末尾追加：
+
+```dotenv
+WEBSEARCH_PROVIDER=tavily
+TAVILY_API_KEY=tvly-your-tavily-key
 ```
 
-### 5. 启动后端
+不配置时 `web_search` 自动回退到免 Key 的 DuckDuckGo 实现，其余功能不受影响。
+
+### 4. 启动
+
+开三个终端依次启动：
 
 ```bash
+# ① 后端（端口 8000，API 文档 http://localhost:8000/api/docs）
 python server.py
-```
 
+# ② Sync Server（可选，端口 8001；不启动则同步页显示离线，不影响其他功能）
+=======
 服务运行在 `http://localhost:8000`，API 文档在 `http://localhost:8000/api/docs`。
 
 未配置 `LLM_API_KEY` 时，后端仍会启动；聊天功能会显示模型配置错误，但课表导入、课表查询和个人数据功能仍可使用。
@@ -116,19 +150,18 @@ python server.py
 Sync Server 是公共通知同步服务端，独立运行在端口 8001：
 
 ```bash
+
 cd sync_server && python main.py
+
+# ③ 前端（端口 3000）
+cd frontend && npm run dev
 ```
 
-如果不启动 Sync Server，主服务的同步功能会显示服务离线，不影响其他功能。
+### 5. 验证
 
-### 7. 启动前端
-
-```bash
-cd frontend
-npm run dev
-```
-
-访问 `http://localhost:3000`。
+- 浏览器访问 `http://localhost:3000`，新建话题，发送“有什么暑期学校的活动？”
+- 后端健康检查：`curl http://localhost:8000/api/health`
+- 首次回答较慢（约 5–10 秒）：Agent 与向量索引懒加载初始化，属正常现象
 
 ## 配置参考
 
@@ -145,18 +178,28 @@ npm run dev
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `EMBED_PROVIDER` | 嵌入来源：`ollama` 或 `openai` | `ollama` |
-| `OLLAMA_EMBED_MODEL` | Ollama 嵌入模型名 | `nomic-embed-text` |
-| `OLLAMA_HOST` | Ollama 服务地址 | `http://127.0.0.1:11434` |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
-| `OPENAI_API_KEY` | OpenAI 兼容 API Key | — |
-| `OPENAI_EMBED_MODEL` | 云端嵌入模型名 | `text-embedding-3-small` |
+| `EMBED_PROVIDER` | 嵌入来源：`openai`（任意 OpenAI 兼容 API）或 `ollama`（本地） | `ollama` |
+| `EMBED_API_KEY` | 嵌入服务 API Key（用独立 `EMBED_*`，勿复用 `OPENAI_*`） | — |
+| `EMBED_BASE_URL` | 嵌入服务地址 | — |
+| `EMBED_MODEL` | 云端嵌入模型名 | `text-embedding-3-small` |
+| `OLLAMA_EMBED_MODEL` | Ollama 嵌入模型名（仅 ollama 时生效） | `nomic-embed-text` |
+| `OLLAMA_HOST` | Ollama 服务地址（仅 ollama 时生效） | `http://127.0.0.1:11434` |
 
-### 其他配置
+### 重排序模型配置（`campus_rag/.env`）
 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
-| `WORKSPACE_ROOT` | 文件工作区路径 | 项目根目录 `workspace/` |
+| `RERANK_PROVIDER` | 设为 `api` 启用 API 重排序；未配置时降级为按原始向量分数排序 | — |
+| `RERANK_API_KEY` | 重排序服务 API Key | — |
+| `RERANK_BASE_URL` | 重排序服务地址（代码自动拼接 `/rerank` 端点） | — |
+| `RERANK_MODEL` | 重排序模型名 | `qwen3-reranker` |
+
+### 联网搜索配置（`campus_rag/.env`）
+
+| 变量 | 说明 | 默认值 |
+|---|---|---|
+| `WEBSEARCH_PROVIDER` | 搜索源：`tavily`（需 Key）或 `ddg`（DuckDuckGo，免 Key） | `tavily` |
+| `TAVILY_API_KEY` | Tavily API Key（免费版 1000 次/月）；未配置时自动回退 DuckDuckGo | — |
 
 ## 项目结构
 
@@ -169,17 +212,20 @@ USTC-107-let-ai-think-of-one/
 │   ├── lifespan.py            #   启动/关闭生命周期（ChatService 初始化）
 │   ├── deps.py                #   依赖注入（本地用户标识）
 │   ├── routes/                #   路由模块
-│   │   ├── chat.py            #     SSE / WebSocket 流式对话
+│   │   ├── chat.py            #     SSE 流式对话
 │   │   ├── topics.py          #     话题 CRUD、历史、自动标题
 │   │   ├── search.py          #     公共通知 / 个人数据检索
 │   │   ├── personal_data.py   #     个人知识库 CRUD
+│   │   ├── schedule.py        #     课表查询 / 导入
 │   │   ├── settings.py        #     LLM 配置、模型切换、工具开关
 │   │   ├── sync.py            #     公共通知同步管理
 │   │   └── health.py          #     健康检查
 │   └── services/              #   业务逻辑层
 │       ├── auth_service.py    #     话题管理服务
-│       ├── chat_service.py    #     Agent 管理、对话执行
+│       ├── chat_service.py    #     Agent 管理、对话执行（未配 LLM Key 时降级不阻断启动）
 │       ├── rag_service.py     #     RAG 检索、数据入库
+│       ├── schedule_service.py #    本地课表存储（schedule.db）
+│       ├── ustc_schedule.py   #     教务课表 HTML/JSON 解析（不接触账号密码）
 │       └── sync_service.py    #     客户端同步逻辑
 ├── sync_server/               # 公共通知同步服务端（独立进程，端口 8001）
 │   ├── main.py                #   FastAPI 应用入口
@@ -196,7 +242,7 @@ USTC-107-let-ai-think-of-one/
 ├── main.py                    # LangChain Agent 定义、工具注册、系统提示
 ├── model/
 │   └── config.py              # LLM 初始化（支持 settings.json 热切换）
-├── campus_rag/                # RAG 检索系统（详见下方模块说明）
+├── campus_rag/                # RAG 检索系统（详见 campus_rag/README.md）
 │   ├── __init__.py            #   包入口，导出公开接口
 │   ├── config.py              #   LlamaIndex 全局设置
 │   ├── llm_factory.py         #   LLM / Embedding 工厂（ollama ↔ openai）
@@ -206,16 +252,23 @@ USTC-107-let-ai-think-of-one/
 │   ├── query.py               #   检索接口（向量检索 / LLM 总结 / 入库）
 │   ├── query_engine.py        #   RAG 管线（向量检索 + 重排序 + LLM 生成）
 │   ├── data/                  #   校园通知 .txt 源数据
+│   ├── ustc_sites.json        #   科大官网白名单（联网工具用）
+│   ├── course_review_sites.json #  评课社区白名单（联网工具用）
 │   └── .env.example           #   嵌入配置模板
 ├── tools/                     # Agent 工具
-│   └── search.py              #   网页抓取工具
+│   ├── search.py              #   联网搜索与网页抓取（Tavily 主 + DuckDuckGo 兜底）
+│   └── ustc_crawler.py        #   通知栏目采集辅助（供 scripts/ 使用）
 ├── frontend/                  # React 18 前端
 │   └── src/
 │       ├── pages/
 │       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染
 │       │   ├── PersonalDataPage.tsx #   个人知识库管理
+│       │   ├── SchedulePage.tsx    #   结构化课表导入与离线查看
 │       │   └── SyncPage.tsx        #   公共通知同步
 │       ├── components/
+│       │   ├── Schedule/
+│       │   │   ├── UstcScheduleImportModal.tsx   # 教务课表导入弹窗（HTML/JSON/CSV）
+│       │   │   └── ImportExistingScheduleModal.tsx # 已导入课表同步到个人数据弹窗
 │       │   └── Layout/
 │       │       ├── AppLayout.tsx    #   侧边栏（菜单 + 话题列表）+ 顶栏
 │       │       └── SettingsModal.tsx #   LLM/工具 设置弹窗
@@ -226,199 +279,12 @@ USTC-107-let-ai-think-of-one/
 │       │   └── topicStore.ts        #   话题状态
 │       └── types/
 │           └── index.ts            #   TypeScript 类型定义
-├── tests/                     # 单元测试
+├── tests/                     # 单元测试（`pytest tests/ -v`）
+├── scripts/                   # 网页源同步与通知栏目采集（详见 campus_rag/README.md）
 ├── data/                      # 运行时数据（checkpoint DB，gitignore）
 ├── workspace/                 # 用户文件存储（gitignore）
 ├── chroma_db/                 # ChromaDB 向量数据库（gitignore）
 └── settings.example.json      # LLM 配置模板
-```
-
-## campus_rag 模块详解
-
- **重排序模型部署说明**：项目使用 `BAAI/bge-reranker-base`（约 1GB）做交叉编码重排序。该模型**不会自动下载**——代码默认开启 HuggingFace 离线模式（`HF_HUB_OFFLINE=1`），需提前将模型下载到本地 HF 缓存，并将 `HF_HOME` 环境变量指向缓存目录：
-
-```bash
-# 下载模型到本地缓存（任选其一）
-export HF_HOME=/path/to/hf_cache        # 例如 E:\HFCache
-huggingface-cli download BAAI/bge-reranker-base
-
-# 或用 Python 下载
-python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; \
-AutoTokenizer.from_pretrained('BAAI/bge-reranker-base'); \
-AutoModelForSequenceClassification.from_pretrained('BAAI/bge-reranker-base')"
-```
-
-模型缺失时 `rerank_nodes` 会自动降级为按原始向量分数排序，不阻断检索。
-
-### `config.py` — 全局配置
-
-导入即生效，设置 LlamaIndex 的全局 LLM、Embedding 模型及分块参数。
-
-```python
-from llama_index.core import Settings
-from .llm_factory import get_llm, get_embed_model
-
-Settings.llm = get_llm()
-Settings.embed_model = get_embed_model()
-Settings.chunk_size = 1024
-Settings.chunk_overlap = 50
-```
-
-### `llm_factory.py` — 模型工厂
-
-- `get_llm()` — 返回对话模型，默认从 `settings.json` 读取配置，支持 DeepSeek 模型
-- `get_embed_model()` — 返回嵌入模型，支持 ollama / openai 两种后端
-
-### `data_loader.py` — 数据加载
-
-- `load_documents_from_files(directory)` — 读取目录下所有 `.txt` 文件，每个文件为一个 `Document`，附带 `source` 元数据
-- `split_documents(documents)` — 使用 `SentenceSplitter` 分块，每块不超过 1024 token
-
-### `index_manager.py` — 索引管理
-
-核心类 `RAGSystem`，基于 ChromaDB 持久化向量存储，自动 MD5 去重。
-
-**公共数据方法：**
-
-| 方法 | 说明 |
-|---|---|
-| `create_public_index(data_dir)` | 从目录新建公共索引 |
-| `create_public_index_via_docs(documents)` | 从 Document 列表创建公共索引（用于全量同步） |
-| `get_or_create_public_index(data_dir)` | 获取已有索引，不存在则创建 |
-| `get_public_index()` | 直接获取公共索引 |
-| `add_documents_to_public(documents)` | 增量添加文档到公共集合 |
-| `list_public_documents()` | 列出公共集合中所有文档 |
-| `delete_public_document(doc_id)` | 按 ChromaDB ID 删除单条文档 |
-| `delete_public_documents_by_source(source)` | 按来源文件名删除所有文档块 |
-| `get_public_documents_by_source(source)` | 按 source 获取文档详情 |
-
-**个人数据方法：**
-
-| 方法 | 说明 |
-|---|---|
-| `get_or_create_user_index(user_id)` | 获取或创建个人索引 |
-| `get_user_index(user_id)` | 获取个人索引 |
-| `add_user_documents(user_id, documents)` | 向个人索引追加文档 |
-| `list_user_documents(user_id)` | 列出个人所有文档 |
-| `delete_user_documents_by_source(user_id, source)` | 按来源删除个人数据 |
-| `clear_user_index(user_id)` | 清空个人全部数据 |
-| `get_combined_query_engine(user_id)` | 返回 `(public_index, user_index)` 元组 |
-
-**统计方法：**
-
-| 方法 | 说明 |
-|---|---|
-| `get_collection_stats()` | 返回各集合的文档计数 |
-| `get_user_collection_size(username)` | 返回个人集合文档数量 |
-
-**数据隔离模型：**
-
-```
-ChromaDB
-├── public            ← 官方通知（共享）
-├── user_local_user   ← 本地个人数据
-└── ...
-```
-
-### `query.py` — 检索接口
-
-模块级函数，内部自动管理 RAGSystem 单例和 ChromaDB 连接恢复。
-
-**纯向量检索（不经过 LLM）：**
-
-```python
-from campus_rag import search_notices, search_user_data
-
-search_notices("暑假有什么活动？")
-search_user_data("我的课表", user_id="local_user")
-```
-
-**LLM 总结检索（向量检索 + 重排序 + LLM 生成）：**
-
-```python
-from campus_rag import search_notices_answer, search_user_data_answer
-
-search_notices_answer("暑假有什么活动？")
-search_user_data_answer("我的课表", user_id="local_user")
-```
-
-**数据入库：**
-
-```python
-from campus_rag import add_user_data, add_user_files, list_user_data, delete_user_data
-from llama_index.core import Document
-
-docs = [Document(text="操作系统 周三3-4节 3A201", metadata={"source": "课表"})]
-add_user_data("local_user", docs)
-add_user_files("local_user", "./my_data/课表.txt")
-add_user_files("local_user", "./my_data/")           # 导入整个目录
-list_user_data("local_user")
-delete_user_data("local_user", "课表.txt")
-```
-
-### `query_engine.py` — RAG 管线
-
-完整的 RAG 管线：向量检索 → 重排序 → LLM 生成回答。
-
-```python
-from campus_rag import RAGSystem, get_rag_response, rerank_nodes
-
-rag = RAGSystem()
-pub_idx, user_idx = rag.get_combined_query_engine("local_user")
-
-# 同时检索公共和个人数据
-answer = get_rag_response("暑假有什么活动？", pub_idx, user_idx)
-
-# 仅检索公共数据
-answer = get_rag_response("讲座", public_index=pub_idx)
-
-# 仅检索个人数据
-answer = get_rag_response("我的课表", user_index=user_idx)
-
-# 单独使用重排序
-nodes = rerank_nodes("查询文本", nodes, top_n=10)
-```
-
-**管线流程：**
-
-```
-用户问题
-  ├── 向量检索 (ChromaDB: public + user_{id})
-  ├── 合并去重
-  ├── 重排序 (bge-reranker-base，AutoTokenizer + AutoModelForSequenceClassification)
-  └── LLM 生成回答
-```
-
-`rerank_nodes` 内置降级策略：重排序模型不可用时自动退化为按原始分数排序。BM25Retriever 和 VectorIndexRetriever 均有缓存，数据未变化时不会重复构建。
-
-### `keyword_retriever.py` — BM25 检索器
-
-基于 `rank_bm25` + `jieba` 分词的稀疏检索，对关键词匹配敏感，与向量检索互补。
-
-```python
-from campus_rag.keyword_retriever import BM25Retriever
-
-bm25 = BM25Retriever("./data")
-nodes = bm25.retrieve("编程比赛", top_k=10)
-```
-
-`_tokenize` 内置降级策略：`jieba` 不可用时自动回退到正则分词。
-
-### `__init__.py` — 包入口
-
-```python
-from campus_rag import (
-    # 检索
-    search_notices, search_user_data,
-    search_notices_answer, search_user_data_answer,
-    # 入库
-    add_user_data, add_user_files,
-    list_user_data, delete_user_data,
-    # 高级查询
-    get_rag_response, rerank_nodes,
-    # 核心类
-    RAGSystem,
-)
 ```
 
 ## API 总览
@@ -447,7 +313,9 @@ from campus_rag import (
 | Method | Path | 说明 |
 |---|---|---|
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`）；客户端断开即可停止当前生成 |
-| WS | `/ws/chat` | WebSocket 流式对话 |
+| GET | `/api/schedule` | 获取本地课表 |
+| POST | `/api/schedule/import` | 导入结构化课表（仅允许本地来源） |
+| POST | `/api/schedule/import-ustc` | 解析教务课表 HTML/JSON 并导入（仅允许本地来源） |
 
 #### 个人知识库
 
@@ -455,6 +323,7 @@ from campus_rag import (
 |---|---|---|
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合） |
 | POST | `/api/personal-data` | 添加个人数据 |
+| POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库 |
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 
@@ -690,42 +559,42 @@ npm run build       # 生产构建
 
 - **首次对话较慢**：Agent 和 RAG 索引采用懒加载，首次调用时需要初始化（约 5-10 秒）
 - **联网搜索超时**：`web_search`/`ustc_web_search` 的连接超时为 5 秒、读取超时为 15 秒；网页正文抓取读取超时为 20 秒，失败会返回明确错误，不会无限等待
-- **嵌入模型**：本地 Ollama 的 `nomic-embed-text` 首次加载需几十秒；切换为云端嵌入可避免此问题
+- **嵌入/重排序服务**：默认走 USTC LLM 网关的云端模型，需校园网或 VPN 才能访问；嵌入改用本地 Ollama 时（`EMBED_PROVIDER=ollama`）首次加载模型需几十秒
 - **数据文件格式**：`campus_rag/data/` 下的通知文件必须以 `.txt` 结尾，否则会被跳过
 - **文档分块**：每篇通知会被 `SentenceSplitter` 切分为多个 1024 字符的块，管理面板按文件名聚合显示
 - **Windows 代理**：如果系统配置了 HTTP 代理，httpx 可能误用导致 Ollama 连接 502，`llm_factory.py` 已内置清除逻辑
 - **ChromaDB 持久化**：向量数据存储在项目根目录的 `chroma_db/`，删除后重启服务会自动从 `data/` 重新索引
 - **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
 - **工具偏好**：每个话题可独立启/禁用 Agent 工具，偏好通过设置面板管理
-- **重排序模型离线**：`campus_rag/query_engine.py` 默认开启 HF 离线模式，`bge-reranker-base` 需提前下载到 `HF_HOME` 指向的本地缓存（见上文「重排序模型部署说明」）。模型不可用时重排序自动降级为按原始分数排序
+- **重排序降级**：重排序走 `campus_rag/.env` 配置的 `RERANK_*` API（默认 USTC 网关 qwen3-reranker），未配置或端点不可用时自动降级为按原始向量分数排序，不阻断检索
+- **未配 LLM Key 也能启动**：后端在未配置 DeepSeek Key 时正常启动，课表、个人数据、同步等 API 可用，仅对话功能报配置错误提示；配好 Key 后无需重启即可生效（设置面板保存会失效 Agent 缓存）
+- **教务课表导入**：项目不保存教务账号、密码或浏览器 Cookie；请在教务系统课表页加载完成后复制运行时 HTML（或导出 JSON/CSV）粘贴导入
 - **DeepSeek `/beta` 端点**：DeepSeek V4 系列模型（`deepseek-v4-flash` / `deepseek-v4-pro`）需通过 `/beta` 路径访问。`llm_factory.py` 会在检测到 `api.deepseek.com` 且 `base_url` 未含 `/beta` 时自动补齐后缀，`settings.json` 中写 `https://api.deepseek.com` 即可，无需手动加 `/beta`
 
 ## 未来规划
 
 ### 增加数据覆盖的广度和深度
 
-* **时效性**：我的想法是使用爬虫爬取相关网站和系统（教务处公告、研究生院通知、课程表、考试成绩、就业信息、社团活动、校车时刻、校历、政策文件等）来保证时效性，爬来的信息格式是怎样的，如何处理，又涉及下面几点
-* **数据结构化**：课表、成绩等是结构化信息，现在的txt格式不能很好的存储
-* **数据多模态**：图片的支持比较难，pdf、word等格式应该有办法转化为md或txt
+* **时效性**：使用爬虫爬取相关网站和系统（教务处公告、研究生院通知、课程表、考试成绩、就业信息、社团活动、校车时刻、校历、政策文件等）保证时效性
+* **数据结构化**：课表、成绩等是结构化信息，现有 txt 格式不能很好存储
+* **数据多模态**：图片支持较难，pdf、word 等格式应转化为 md 或 txt
 
 ### 推理能力强化
 
-肯定强化不了A端模型的能力，下面是一些我们能做的
-
-* **多跳推理** — ✅ 已实现。Agent system prompt 内嵌多跳推理指南，面对复杂问题自动进行两轮以上检索：先用 `search_campus_notices` 初次检索，从结果中提取关键线索（活动名称、部门名）发起二次检索，也可用 `search_notices_raw` 查看原文判断信息完整性，综合所有结果后回答。相比之下直接使用 RAG 或 LLM 单次问答遗漏信息更少。
-* **个性化**：建立个人档案，在检索时根据个人特征重点检索，比如网安专业对于网安有关的通知应该更加重视
-* **可溯源**：我现在在每条通知的最后都放了原网址，但是ai的回答并不会给出，希望ai回答的时候给出源地址提高可信性和溯源
+* **多跳推理** — ✅ 已实现。Agent system prompt 内嵌多跳推理指南，自动多轮检索并综合回答
+* **个性化**：建立个人档案，检索时根据个人特征加权，如网安专业对网安相关通知更重视
+* **可溯源** — ✅ 已实现。入库时按文件名通知 ID 提取源网址存入元数据，检索结果与回答均携带来源链接
 
 ### 工程化
 
-* 现在想要跑起来很繁琐，怎么让这个项目变成一键安装运行（可以最后搞）
-* 需要一些系统指标（召回率、命中率），最后答辩肯定有用
-* 安全性：毕竟是网安的
+* 一键安装运行（降低启动步骤复杂度）
+* 系统指标（召回率、命中率）评测体系
+* 安全性强化
 
 ### 工具扩展
 
-- [x] **联网搜索工具** — 使用 DuckDuckGo 查找公开网页，并通过独立 `web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
+- [x] **联网搜索工具** — Tavily 主 + DuckDuckGo 兜底查找公开网页，`web_fetch`/`ustc_web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
 - [ ] **知识图谱工具** — 基于 Neo4j 或 NetworkX 构建课程依赖、教师关系等结构化知识
-- [ ] **邮件/通知推送工具** — Agent 可代用户订阅关键词，匹配到新通知时推送提醒
+- [ ] **邮件/通知推送工具** — Agent 代用户订阅关键词，匹配新通知时推送提醒
 - [ ] **日程解析工具** — 从通知中提取时间、地点、事件，自动生成日历事件
 - [ ] **图片/多模态支持** — 结合多模态 LLM 解析通知中的海报图片

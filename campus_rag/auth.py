@@ -1,11 +1,14 @@
 # auth.py
 import uuid
 from datetime import datetime
+from pathlib import Path
 import bcrypt
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = "sqlite:///./users.db"
+# 锚定项目根目录的绝对路径：相对路径 "./users.db" 依赖启动 CWD，
+# 从其他目录启动会静默新建空库导致话题"凭空消失"。
+DATABASE_URL = f"sqlite:///{Path(__file__).resolve().parent.parent / 'users.db'}"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -151,11 +154,14 @@ def rename_topic(username: str, topic_id: str, new_name: str) -> bool:
 
 # ── Tool Preferences CRUD ───────────────────────────────────────
 
-def get_user_tool_prefs(username: str) -> dict[str, bool]:
-    """返回用户工具偏好 {tool_name: enabled}。空 dict 表示未设置（默认全部启用）。"""
+def get_user_tool_prefs(username: str) -> dict[str, bool] | None:
+    """返回用户工具偏好 {tool_name: enabled}。None 表示未设置（默认全部启用）；
+    空 dict 表示用户显式禁用了全部工具。"""
     db = SessionLocal()
     rows = db.query(UserToolPref).filter_by(username=username).all()
     db.close()
+    if not rows:
+        return None
     return {r.tool_name: r.enabled for r in rows}
 
 
@@ -167,15 +173,3 @@ def set_user_tool_prefs(username: str, prefs: dict[str, bool]) -> None:
         db.add(UserToolPref(username=username, tool_name=tool_name, enabled=bool(enabled)))
     db.commit()
     db.close()
-
-
-def get_enabled_tool_names(username: str) -> list[str] | None:
-    """返回用户启用的工具名称列表。None 表示无自定义偏好（默认全部启用）。"""
-    db = SessionLocal()
-    rows = db.query(UserToolPref).filter_by(username=username, enabled=True).all()
-    if not rows:
-        count = db.query(UserToolPref).filter_by(username=username).count()
-        db.close()
-        return None if count == 0 else []
-    db.close()
-    return [r.tool_name for r in rows]

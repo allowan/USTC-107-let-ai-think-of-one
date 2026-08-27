@@ -6,6 +6,7 @@ import html
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 from html.parser import HTMLParser
@@ -13,7 +14,13 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from pathlib import Path
 
 import httpx
+from dotenv import load_dotenv
 from langchain.tools import tool
+
+# 联网搜索配置与嵌入/重排序同处 campus_rag/.env；环境变量已存在时不覆盖，
+# 保持"环境变量优先于配置文件"约定。main.py 先于 campus_rag 导入本模块，
+# 不能依赖 campus_rag 包初始化时才加载。
+load_dotenv(Path(__file__).resolve().parent.parent / "campus_rag" / ".env")
 
 USER_AGENT = "Mozilla/5.0 (compatible; USTC-Campus-Agent/1.0)"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -28,6 +35,7 @@ FETCH_TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 # campus/review sites; arbitrary domains still require globally routable DNS.
 TRUSTED_PROXY_HOST_SUFFIXES = ("ustc.edu.cn", "icourse.club")
 USTC_SITES_PATH = Path(__file__).resolve().parent.parent / "campus_rag" / "ustc_sites.json"
+TAVILY_ENDPOINT = "https://api.tavily.com/search"
 COURSE_REVIEW_SITES_PATH = (
     Path(__file__).resolve().parent.parent / "campus_rag" / "course_review_sites.json"
 )
@@ -225,6 +233,25 @@ def _search_web_results(query: str, max_results: int = 5) -> list[dict[str, str]
     return parser.results[: max(1, min(max_results, 10))]
 
 
+def _search_tavily_results(query: str, api_key: str, max_results: int = 5) -> list[dict[str, str]]:
+    """Tavily 搜索结果（需 TAVILY_API_KEY），返回 {title, url} 列表。"""
+    query = query.strip()
+    if not query:
+        raise ValueError("搜索关键词不能为空")
+    response = httpx.post(
+        TAVILY_ENDPOINT,
+        json={"query": query, "search_depth": "basic", "max_results": max_results},
+        headers={"User-Agent": USER_AGENT, "Authorization": f"Bearer {api_key}"},
+        timeout=SEARCH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return [
+        {"title": item.get("title") or item.get("url", ""), "url": item.get("url", "")}
+        for item in response.json().get("results", [])
+        if item.get("url")
+    ][: max(1, min(max_results, 10))]
+
+
 def _format_search_results(results: list[dict[str, str]]) -> str:
     if not results:
         return "未找到网页搜索结果。"
@@ -383,6 +410,18 @@ def fetch_course_review_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> 
 def search_web(query: str) -> str:
     """Search the public web and return result titles and URLs."""
     try:
+        # WEBSEARCH_PROVIDER 默认 tavily（需 TAVILY_API_KEY），未配置 Key 或
+        # 显式设 ddg 时走免 Key 的 DuckDuckGo 兜底。
+        provider = os.getenv("WEBSEARCH_PROVIDER", "tavily").strip().lower()
+        if provider == "tavily":
+            api_key = os.getenv("TAVILY_API_KEY", "").strip()
+            if api_key:
+                try:
+                    return _format_search_results(_search_tavily_results(query, api_key))
+                except (httpx.HTTPError, OSError) as exc:
+                    logger.warning("Tavily search failed, falling back to DuckDuckGo: %s", exc)
+            else:
+                logger.warning("WEBSEARCH_PROVIDER=tavily but TAVILY_API_KEY is not set; falling back to DuckDuckGo")
         return search_web_text(query)
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("public web search failed for %r: %s", query, exc)
