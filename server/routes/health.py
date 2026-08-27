@@ -20,8 +20,14 @@ _chroma_client = None
 
 @router.get("/api/health")
 async def health(chat: ChatService = Depends(get_chat_service)):
-    ctx = await chat.get_agent()
-    checks = {"agent": ctx.agent is not None}
+    checks = {"agent": False}
+    try:
+        ctx = await chat.get_agent()
+        checks["agent"] = ctx.agent is not None
+    except Exception:
+        # A missing LLM credential degrades chat only; the HTTP server and
+        # schedule/personal-data APIs remain usable.
+        pass
 
     # 同步阻塞调用必须丢进线程池，否则一次慢探测会卡住整个后端
     try:

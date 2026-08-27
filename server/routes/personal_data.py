@@ -2,10 +2,17 @@
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from server.deps import get_user
 from server.services.rag_service import RAGService, get_rag_service
+from server.services.schedule_service import ScheduleService, get_schedule_service
+from server.services.ustc_schedule import (
+    format_schedule_for_personal_data,
+    schedule_data_to_payload,
+)
+from server.routes.schedule import ensure_local_origin
 
 router = APIRouter(prefix="/api/personal-data", tags=["personal-data"])
 
@@ -18,6 +25,12 @@ def _embed_unavailable_to_503(exc: RuntimeError):
 
 # 注意：路径参数已由框架解码一次，禁止再次 unquote——双重解码会把字面含 %
 # 的 source（如 "100%进度"、"a%20b"）损坏，导致更新/删除找错目标。
+
+
+class ExistingScheduleImport(BaseModel):
+    """Select a semester from the local structured schedule database."""
+
+    semester: str | None = Field(default="", max_length=100)
 
 
 @router.get("")
@@ -73,6 +86,37 @@ async def add_personal_data(
     except RuntimeError as e:
         _embed_unavailable_to_503(e)
     return {"message": "数据已添加"}
+
+
+@router.post("/import-schedule")
+async def import_schedule_to_personal_data(
+    request: Request,
+    payload: ExistingScheduleImport | None = Body(default=None),
+    user: str = Depends(get_user),
+    rag: RAGService = Depends(get_rag_service),
+    schedule: ScheduleService = Depends(get_schedule_service),
+):
+    """Copy an existing local schedule into the personal searchable data."""
+
+    ensure_local_origin(request)
+    selected_semester = (payload.semester if payload and payload.semester else "").strip() or None
+    stored = schedule.list(user, selected_semester)
+    if not stored["courses"] or not stored.get("semester"):
+        raise HTTPException(
+            status_code=400,
+            detail="当前没有已导入的课表，请先在‘我的课表’中导入课表",
+        )
+
+    parsed = schedule_data_to_payload(stored)
+    source = f"课表-{parsed['semester']}"
+    rag.update_user_data(user, source, format_schedule_for_personal_data(parsed))
+    return {
+        "message": "已有课表已同步到个人数据",
+        "semester": parsed["semester"],
+        "source": source,
+        "course_count": len(parsed["courses"]),
+        "meeting_count": len(stored["courses"]),
+    }
 
 
 @router.put("/{source}")

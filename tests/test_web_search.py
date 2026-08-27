@@ -6,13 +6,17 @@ from unittest.mock import patch
 
 from scripts.sync_web_sources import _safe_output_path
 from tools.search import (
+    _CourseReviewSearchParser,
     _DuckDuckGoParser,
     _format_markdown_link,
     _format_search_results,
+    _validate_course_review_url,
     _validate_public_url,
     _validate_ustc_url,
     extract_page_text,
+    load_course_review_sites,
     load_ustc_sites,
+    search_course_reviews_text,
 )
 
 
@@ -81,6 +85,14 @@ class WebSearchTest(unittest.TestCase):
                 "https://ustcnet.ustc.edu.cn/40939/list.htm",
             )
 
+    def test_allows_icourse_fake_ip_used_by_local_proxy(self):
+        fake_ip = [(2, 1, 6, "", ("198.18.0.191", 443))]
+        with patch("tools.search.socket.getaddrinfo", return_value=fake_ip):
+            self.assertEqual(
+                _validate_course_review_url("https://icourse.club/course/123/"),
+                "https://icourse.club/course/123/",
+            )
+
     def test_rejects_output_path_escape(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "非法输出文件名"):
@@ -90,9 +102,43 @@ class WebSearchTest(unittest.TestCase):
         sites = load_ustc_sites()
         names = {site["name"] for site in sites}
         self.assertIn("本科生院教务处", names)
+        self.assertIn("综合教务系统", names)
+        self.assertIn("本科课程目录与公共查询", names)
         self.assertIn("研究生院", names)
         self.assertIn("就业信息网", names)
         self.assertIn("图书馆", names)
+
+    def test_course_review_directory_contains_icourse(self):
+        sites = load_course_review_sites()
+        self.assertTrue(any(site["name"] == "USTC评课社区" for site in sites))
+
+    def test_parses_icourse_site_search_results(self):
+        parser = _CourseReviewSearchParser()
+        parser.feed('<a class="px16" href="/course/123/">数据结构（教师）</a>')
+        self.assertEqual(
+            parser.results,
+            [{"title": "数据结构（教师）", "url": "https://icourse.club/course/123/"}],
+        )
+
+    def test_course_review_search_filters_to_course_pages(self):
+        with patch(
+            "tools.search._search_course_review_site_results",
+            return_value=[
+                {"title": "课程评价", "url": "https://icourse.club/course/123/"},
+                {"title": "课程附件", "url": "https://icourse.club/uploads/course.pdf"},
+                {"title": "其他站点", "url": "https://example.com/course/123/"},
+            ],
+        ):
+            result = search_course_reviews_text("数据结构")
+        self.assertIn("[课程评价](https://icourse.club/course/123/)", result)
+        self.assertNotIn("课程附件", result)
+        self.assertNotIn("其他站点", result)
+
+    def test_course_review_fetch_rejects_non_course_page(self):
+        public_ip = [(2, 1, 6, "", ("93.184.216.34", 443))]
+        with patch("tools.search.socket.getaddrinfo", return_value=public_ip):
+            with self.assertRaisesRegex(ValueError, "只允许读取课程详情页面"):
+                _validate_course_review_url("https://icourse.club/")
 
     def test_ustc_fetch_rejects_non_whitelisted_host(self):
         public_ip = [(2, 1, 6, "", ("93.184.216.34", 443))]

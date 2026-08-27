@@ -3,13 +3,14 @@ import {
   useRef,
   useEffect,
   useCallback,
+  memo,
   type AnchorHTMLAttributes,
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
 import { Input, Button, Empty, App } from 'antd';
 import { GlobalOutlined, MailOutlined, SendOutlined, LoadingOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTopicStore } from '@/stores/topicStore';
 import { topicApi } from '@/services/api';
@@ -59,7 +60,31 @@ const ChatMarkdownLink = ({ href, children, ...props }: ChatMarkdownLinkProps) =
   );
 };
 
-const ChatBubble = ({ msg }: { msg: ChatMessage }) => {
+const MarkdownLinkRenderer: Components['a'] = ({ node, href, children, ...props }) => {
+  const link = normalizeAutoLink(href, children);
+  return (
+    <>
+      <ChatMarkdownLink {...props} href={link.href}>
+        {link.label}
+      </ChatMarkdownLink>
+      {link.trailing}
+    </>
+  );
+};
+
+const MarkdownTableRenderer: Components['table'] = ({ node, ...props }) => (
+  <div className="chat-markdown-table">
+    <table {...props} />
+  </div>
+);
+
+const MARKDOWN_COMPONENTS: Components = {
+  a: MarkdownLinkRenderer,
+  table: MarkdownTableRenderer,
+};
+const MARKDOWN_PLUGINS = [remarkGfm];
+
+const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
   const isUser = msg.role === 'user';
   return (
     <div style={{ display: 'flex', gap: 12, padding: '12px 0', flexDirection: isUser ? 'row-reverse' : 'row' }}>
@@ -72,25 +97,8 @@ const ChatBubble = ({ msg }: { msg: ChatMessage }) => {
         ) : (
           <div className="chat-markdown" style={{ fontSize: 16, lineHeight: 1.6 }}>
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ node, href, children, ...props }) => {
-                  const link = normalizeAutoLink(href, children);
-                  return (
-                    <>
-                      <ChatMarkdownLink {...props} href={link.href}>
-                        {link.label}
-                      </ChatMarkdownLink>
-                      {link.trailing}
-                    </>
-                  );
-                },
-                table: ({ node, ...props }) => (
-                  <div className="chat-markdown-table">
-                    <table {...props} />
-                  </div>
-                ),
-              }}
+              remarkPlugins={MARKDOWN_PLUGINS}
+              components={MARKDOWN_COMPONENTS}
             >
               {msg.content}
             </ReactMarkdown>
@@ -99,7 +107,7 @@ const ChatBubble = ({ msg }: { msg: ChatMessage }) => {
       </div>
     </div>
   );
-};
+});
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);

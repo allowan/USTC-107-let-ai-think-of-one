@@ -14,7 +14,13 @@ logger = logging.getLogger("server")
 async def lifespan(app):
     logger.info("Server starting up...")
     chat = await get_chat_service()
-    logger.info("ChatService initialized")
+    if chat.is_ready:
+        logger.info("ChatService initialized")
+    else:
+        logger.warning(
+            "ChatService is unavailable; chat endpoints will report the configuration error, "
+            "but schedule and personal-data APIs remain available"
+        )
     yield
     logger.info("Server shutting down...")
     await chat.shutdown()

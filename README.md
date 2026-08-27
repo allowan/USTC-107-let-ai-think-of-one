@@ -13,6 +13,7 @@
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
 - **多跳推理** — Agent 面对复杂问题自动进行多轮检索：先初次检索，从结果中提取关键线索发起二次检索，反复直到信息完整，综合所有结果回答
 - **联网搜索** — Agent 内置联网搜索（Tavily / DuckDuckGo）与网页抓取工具，弥补本地知识库时效性缺口，回答自动附来源链接
+- **评课参考** — 接入评课社区（icourse.club）公开课程评价搜索与正文读取，选课建议时区分官方信息与学生主观评价
 - **可溯源** — 检索结果与回答均携带「来源文件名 + 源链接」，联网搜索结果附网页链接
 - **设置中心** — LLM API Key/Base URL 热更新、模型切换、Agent 工具开关
 
@@ -34,6 +35,8 @@
      ├── search_campus_notices / search_notices_raw   → campus_rag 公共通知检索
      ├── search_my_data / search_user_data_raw        → campus_rag 个人数据检索
      ├── web_search / web_fetch / ustc_web_search / ustc_web_fetch → 联网搜索与网页抓取（tools/）
+     ├── course_review_search / course_review_fetch → 评课社区课程评价（tools/）
+     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取与教务课表导入
      └── add_personal_data                            → 个人知识库入库
   → SSE 流式回传前端（thinking / tool_use / token / done 事件）
 ```
@@ -206,9 +209,10 @@ USTC-107-let-ai-think-of-one/
 │   │   └── health.py          #     健康检查
 │   └── services/              #   业务逻辑层
 │       ├── auth_service.py    #     话题管理服务
-│       ├── chat_service.py    #     Agent 管理、对话执行
+│       ├── chat_service.py    #     Agent 管理、对话执行（未配 LLM Key 时降级不阻断启动）
 │       ├── rag_service.py     #     RAG 检索、数据入库
-│       ├── schedule_service.py #    本地课表存储
+│       ├── schedule_service.py #    本地课表存储（schedule.db）
+│       ├── ustc_schedule.py   #     教务课表 HTML/JSON 解析（不接触账号密码）
 │       └── sync_service.py    #     客户端同步逻辑
 ├── sync_server/               # 公共通知同步服务端（独立进程，端口 8001）
 │   ├── main.py                #   FastAPI 应用入口
@@ -235,6 +239,8 @@ USTC-107-let-ai-think-of-one/
 │   ├── query.py               #   检索接口（向量检索 / LLM 总结 / 入库）
 │   ├── query_engine.py        #   RAG 管线（向量检索 + 重排序 + LLM 生成）
 │   ├── data/                  #   校园通知 .txt 源数据
+│   ├── ustc_sites.json        #   科大官网白名单（联网工具用）
+│   ├── course_review_sites.json #  评课社区白名单（联网工具用）
 │   └── .env.example           #   嵌入配置模板
 ├── tools/                     # Agent 工具
 │   ├── search.py              #   联网搜索与网页抓取（Tavily 主 + DuckDuckGo 兜底）
@@ -247,6 +253,9 @@ USTC-107-let-ai-think-of-one/
 │       │   ├── SchedulePage.tsx    #   结构化课表导入与离线查看
 │       │   └── SyncPage.tsx        #   公共通知同步
 │       ├── components/
+│       │   ├── Schedule/
+│       │   │   ├── UstcScheduleImportModal.tsx   # 教务课表导入弹窗（HTML/JSON/CSV）
+│       │   │   └── ImportExistingScheduleModal.tsx # 已导入课表同步到个人数据弹窗
 │       │   └── Layout/
 │       │       ├── AppLayout.tsx    #   侧边栏（菜单 + 话题列表）+ 顶栏
 │       │       └── SettingsModal.tsx #   LLM/工具 设置弹窗
@@ -293,6 +302,7 @@ USTC-107-let-ai-think-of-one/
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content":"...","topic_id":"..."}`）；客户端断开即可停止当前生成 |
 | GET | `/api/schedule` | 获取本地课表 |
 | POST | `/api/schedule/import` | 导入结构化课表（仅允许本地来源） |
+| POST | `/api/schedule/import-ustc` | 解析教务课表 HTML/JSON 并导入（仅允许本地来源） |
 
 #### 个人知识库
 
@@ -300,6 +310,7 @@ USTC-107-let-ai-think-of-one/
 |---|---|---|
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合） |
 | POST | `/api/personal-data` | 添加个人数据 |
+| POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库 |
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 
@@ -361,6 +372,8 @@ USTC-107-let-ai-think-of-one/
 - **Sync Server**：公共通知同步需要额外启动 Sync Server（端口 8001），未启动时同步功能显示离线，不影响其他功能
 - **工具偏好**：每个话题可独立启/禁用 Agent 工具，偏好通过设置面板管理
 - **重排序降级**：重排序走 `campus_rag/.env` 配置的 `RERANK_*` API（默认 USTC 网关 qwen3-reranker），未配置或端点不可用时自动降级为按原始向量分数排序，不阻断检索
+- **未配 LLM Key 也能启动**：后端在未配置 DeepSeek Key 时正常启动，课表、个人数据、同步等 API 可用，仅对话功能报配置错误提示；配好 Key 后无需重启即可生效（设置面板保存会失效 Agent 缓存）
+- **教务课表导入**：项目不保存教务账号、密码或浏览器 Cookie；请在教务系统课表页加载完成后复制运行时 HTML（或导出 JSON/CSV）粘贴导入
 - **DeepSeek `/beta` 端点**：DeepSeek V4 系列模型（`deepseek-v4-flash` / `deepseek-v4-pro`）需通过 `/beta` 路径访问。`llm_factory.py` 会在检测到 `api.deepseek.com` 且 `base_url` 未含 `/beta` 时自动补齐后缀，`settings.json` 中写 `https://api.deepseek.com` 即可，无需手动加 `/beta`
 
 ## 未来规划

@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Button, Input, Modal, Popconfirm, App, Empty, Card, Space, Typography } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined, DatabaseOutlined } from '@ant-design/icons';
+import { CalendarOutlined, PlusOutlined, EditOutlined, DeleteOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { personalDataApi } from '@/services/api';
 import type { PersonalDataItem } from '@/types';
+import ImportExistingScheduleModal from '@/components/Schedule/ImportExistingScheduleModal';
 
 const { TextArea } = Input;
 const { Text, Paragraph } = Typography;
@@ -28,6 +29,7 @@ export default function PersonalDataPage() {
   const [editSource, setEditSource] = useState('');
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const [scheduleImportVisible, setScheduleImportVisible] = useState(false);
 
   const fetchData = () => {
     setLoading(true);
@@ -97,9 +99,14 @@ export default function PersonalDataPage() {
     <div style={{ maxWidth: 800, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <Text strong style={{ fontSize: 18 }}>个人数据</Text>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddVisible(true)}>
-          添加数据
-        </Button>
+        <Space>
+          <Button icon={<CalendarOutlined />} onClick={() => setScheduleImportVisible(true)}>
+            导入已有课表
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setAddVisible(true)}>
+            添加数据
+          </Button>
+        </Space>
       </div>
 
       {items.length === 0 && !loading ? (
@@ -187,6 +194,12 @@ export default function PersonalDataPage() {
           rows={12}
         />
       </Modal>
+
+      <ImportExistingScheduleModal
+        open={scheduleImportVisible}
+        onCancel={() => setScheduleImportVisible(false)}
+        onImported={() => fetchData()}
+      />
     </div>
   );
 }

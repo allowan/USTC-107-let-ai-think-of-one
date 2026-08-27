@@ -7,8 +7,11 @@ React 18 + Vite 6 + TypeScript 5 + Ant Design + Zustand 的单页应用，通过
 | 位置 | 职责 |
 |---|---|
 | `pages/ChatPage.tsx` | SSE 流式对话（fetch + ReadableStream 解析）、Markdown 渲染、首轮对话自动摘要生成话题标题 |
-| `pages/PersonalDataPage.tsx` | 个人知识库管理（按来源聚合、增删改） |
+| `pages/PersonalDataPage.tsx` | 个人知识库管理（按来源聚合、增删改、将已导入课表同步进个人数据） |
+| `pages/SchedulePage.tsx` | 本地课表周视图（时间/节次双显示，缺具体时间时用默认节次时间段） |
 | `pages/SyncPage.tsx` | 公共通知同步状态与手动触发 |
+| `components/Schedule/UstcScheduleImportModal.tsx` | 粘贴/上传教务课表 HTML、JSON、CSV 并导入 |
+| `components/Schedule/ImportExistingScheduleModal.tsx` | 从已导入的学期中选择并同步到个人知识库 |
 | `components/Layout/AppLayout.tsx` | 侧边栏（菜单 + 话题列表：重命名/删除）+ 顶栏；后端离线时错误提示可点击重试 |
 | `components/Layout/SettingsModal.tsx` | 全局设置（API Key/Base URL/模型切换）与工具开关 |
 | `services/api.ts` | axios 封装（baseURL `/api`，全量同步关闭超时） |

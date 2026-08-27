@@ -15,6 +15,16 @@
     "topics": "本科教学、选课、考试、培养方案、教务通知"
   },
   {
+    "name": "综合教务系统",
+    "url": "https://jw.ustc.edu.cn/home",
+    "topics": "登录后查看个人课表、选课、成绩；公开入口与统一身份认证"
+  },
+  {
+    "name": "本科课程目录与公共查询",
+    "url": "https://catalog.ustc.edu.cn/query",
+    "topics": "课程目录、培养方案、执行计划、公共查询"
+  },
+  {
     "name": "研究生院",
     "url": "https://gradschool.ustc.edu.cn/",
     "topics": "研究生招生、培养、学位、奖助、通知公告"
