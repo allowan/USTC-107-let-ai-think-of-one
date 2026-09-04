@@ -5,6 +5,7 @@ from llama_index.core import Document
 _base = Path(__file__).resolve().parent
 
 from . import config
+from . import events
 from .index_manager import RAGSystem
 
 logger = logging.getLogger("campus_rag.query")
@@ -27,8 +28,12 @@ def _ensure_init():
     global _rag, _public_retriever
     if _rag is None:
         _rag = RAGSystem()
-        index = _rag.get_or_create_public_index(str(_base / "data"))
+        data_dir = str(_base / "data")
+        index = _rag.get_or_create_public_index(data_dir)
         _public_retriever = index.as_retriever(similarity_top_k=10)
+        # 种子语料的事件时间索引：确定性正则抽取，毫秒级且幂等（按内容哈希
+        # 跳过已抽取项）。失败不影响检索，故 sync 内部已吞异常并留痕。
+        events.sync_notice_events()
     return True
 
 
@@ -100,6 +105,8 @@ def add_public_documents(documents: list) -> None:
     _rag.add_documents_to_public(documents)
     global _public_retriever
     _public_retriever = None
+    # 同步新通知的事件时间索引（best-effort，内部吞异常）。
+    events.sync_events_from_documents(documents)
 
 
 def delete_public_data(source: str) -> int:
@@ -108,6 +115,8 @@ def delete_public_data(source: str) -> int:
     count = _rag.delete_public_documents_by_source(source)
     global _public_retriever
     _public_retriever = None
+    # 通知被删除时同步移除其事件，避免时间索引残留已下线通知。
+    events.delete_events_by_source(source)
     return count
 
 
@@ -129,6 +138,9 @@ def replace_public_documents(documents: list) -> None:
     if documents:
         _enrich_url_metadata(documents)
         _rag.create_public_index_via_docs(documents)
+    # 全量替换：事件时间索引同步重建，以 documents 为权威集合（清空后重抽）。
+    events.clear_events()
+    events.sync_events_from_documents(documents)
     reset_caches()
 
 

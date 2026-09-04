@@ -52,6 +52,23 @@ answer = get_rag_response("暑假有什么活动？", pub_idx, user_idx)
 nodes = rerank_nodes("查询文本", nodes, top_n=10)
 ```
 
+### 事件时间索引（截止日查询）
+
+把通知里的截止时间抽取成结构化记录，使“未来 N 天内截止的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
+
+```python
+from campus_rag import get_upcoming_events, sync_notice_events
+
+# 未来 30 天内截止的全部事件，按截止日升序
+get_upcoming_events(days=30)
+# 只看某类（选课/报名/考试/评奖/竞赛/讲座/实习/答辩/助教/其他）
+get_upcoming_events(days=7, category="报名")
+# 显式同步种子语料（启动时由 server/lifespan.py 自动调用；纯regex，不需嵌入）
+sync_notice_events()
+```
+
+返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / url`。事件同步已挂入 `add_public_documents` / `replace_public_documents` / `delete_public_data`、RAG 初始化（`_ensure_init`）与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，`get_upcoming_events` 仍可用。无法解析的相对表述（如“开学三周内”）`deadline` 记为 `None`，该通知仍可被语义检索到。
+
 ## 模块构成
 
 | 文件 | 职责 |
@@ -63,6 +80,7 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 | `keyword_retriever.py` | `BM25Retriever`：rank_bm25 + jieba 分词（jieba 缺失时正则回退） |
 | `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口 |
 | `query_engine.py` | RAG 管线：向量检索 → BM25 预过滤加权 → 重排序 → LLM 生成 |
+| `events.py` | 通知事件时间索引：确定性正则抽取截止日/发布日/类别，存入 `events.db`，供 `get_upcoming_events` 按时间查询（不依赖 LLM，离线可用） |
 | `auth.py` | 话题 CRUD + 工具偏好 CRUD（SQLite，锚定项目根 `users.db`）；另含遗留的登录函数（`authenticate` / `register_user` / `list_users`），本地单用户形态下无路由调用 |
 | `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建） |
 
@@ -87,6 +105,7 @@ ChromaDB（项目根 chroma_db/）
 ```
 
 - 默认数据目录与向量库目录均为锚定项目根的绝对路径，不依赖启动 CWD。
+- **事件时间索引**独立存于项目根 `events.db`（SQLite，与 `schedule.db`/`users.db` 同层），与向量库解耦： ChromaDB 管“语义相似”，`events.db` 管“时间排序”，两者均由 `campus_rag/data` 与同步文档派生，删除后重启可自愈。
 - **维度守卫**：集合已存向量维度与当前嵌入模型不一致时，公共集合自动删除并从源数据重建；个人集合抛出可操作错误（避免 MockEmbedding 维度 1 永久污染）。
 - **写路径安全**：`update_user_data` / `replace_public_documents` 在删除旧数据前先探测嵌入可用性，不可用则拒绝整个操作，原数据不受影响。
 

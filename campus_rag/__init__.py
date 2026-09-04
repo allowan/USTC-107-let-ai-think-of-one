@@ -19,3 +19,4 @@ from .auth import create_topic, list_topics, delete_topic, get_topic, rename_top
 from .auth import get_user_tool_prefs, set_user_tool_prefs
 from .query_engine import get_rag_response, rerank_nodes
 from .index_manager import RAGSystem
+from .events import get_upcoming_events, sync_notice_events

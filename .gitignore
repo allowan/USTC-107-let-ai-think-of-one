@@ -15,6 +15,7 @@ sync_server/data/*.db-journal
 campus_rag/.env
 users.db
 schedule.db
+events.db
 workspace/
 output/
 

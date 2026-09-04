@@ -41,6 +41,7 @@ TOOL_METADATA = [
     {"name": "course_review_search", "label": "评课社区搜索", "description": "搜索 icourse.club 的公开课程评价和课程详情页"},
     {"name": "course_review_fetch", "label": "评课社区正文", "description": "读取 icourse.club 公开课程详情与学生点评"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
+    {"name": "get_upcoming_events", "label": "即将截止事件", "description": "按截止日期查询未来 N 天内到期的报名/选课/考试/评奖等事件"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
     {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
@@ -53,6 +54,7 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 工具使用
 - 校园活动、比赛、课程、讲座、报名 → search_campus_notices
+- 用户问“最近/本周/本月有什么要截止的报名、选课、提交、答辩”等时间敏感问题 → get_upcoming_events（按真实截止日期排序，优先于语义检索）
 - 需要查看通知原文或对比多条信息 → search_notices_raw
 - 用户个人课表、成绩、教务信息 → search_my_data
 - 用户询问已导入的具体课表安排 → get_my_schedule
@@ -121,6 +123,41 @@ def search_notices_raw(query: str) -> str:
     except Exception as e:
         logger.error("search_notices_raw failed: %s", e, exc_info=True)
         return f"搜索通知原文时出错: {e}"
+
+
+@tool
+def get_upcoming_events(days: int = 30, category: str = "") -> str:
+    """按截止日期查询未来 N 天内到期的校园事件（报名/选课/考试/评奖/竞赛/讲座/实习/答辩等）。
+
+    用户问"最近有什么要截止的""这周/这个月有哪些报名""快到期的活动"时优先用此工具，
+    而不是语义检索——它按真实日期排序，不会漏掉措辞不同但时间临近的通知。
+    days 为向后看的天数（默认 30）；category 可选，留空返回全部类别。
+    """
+    try:
+        # 惰性导入并用别名：模块级名 get_upcoming_events 已被 @tool 重绑为
+        # StructuredTool，直接同名调用会递归到工具自身（不可调用）。
+        from campus_rag import get_upcoming_events as query_upcoming_events
+        today = datetime.now().date()
+        rows = query_upcoming_events(days=days, category=category.strip() or None, today=today)
+        if not rows:
+            scope = f"{category.strip()}类" if category.strip() else ""
+            return f"未来 {days} 天内没有{scope}即将截止的校园事件。"
+        lines = [f"未来 {days} 天内即将截止的事件（共 {len(rows)} 条，按截止日期排序）："]
+        for row in rows:
+            remaining = (date.fromisoformat(row["deadline"]) - today).days
+            when = "今天截止" if remaining == 0 else f"还剩 {remaining} 天"
+            cat = f"[{row['category']}]" if row.get("category") else ""
+            aud = f"（面向{row['audience']}）" if row.get("audience") else ""
+            line = f"- {cat}{row.get('title') or row['source']}{aud}：截止 {row['deadline']}（{when}）"
+            if row.get("deadline_text"):
+                line += f"\n  原文：{row['deadline_text'][:80]}"
+            if row.get("url"):
+                line += f"\n  来源：{row['url']}"
+            lines.append(line)
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("get_upcoming_events failed: %s", e, exc_info=True)
+        return f"查询即将截止事件时出错: {e}"
 
 
 # ── Per-user tool factories ───────────────────────────────────────
@@ -286,6 +323,7 @@ _shared_tools = {
     "course_review_fetch": fetch_course_review_text,
     "search_campus_notices": search_campus_notices,
     "search_notices_raw": search_notices_raw,
+    "get_upcoming_events": get_upcoming_events,
 }
 
 
