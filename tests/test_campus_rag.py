@@ -498,16 +498,22 @@ class TestRerankNodes(unittest.TestCase):
         from campus_rag import query_engine
         from llama_index.core.schema import NodeWithScore, TextNode
 
+        class _DeterministicReranker:
+            @staticmethod
+            def compute_score(pairs, normalize=True):
+                self.assertEqual(len(pairs), 3)
+                return [0.1, 0.9, 0.5]
+
         nodes = [
             NodeWithScore(node=TextNode(text="苹果是一种常见的水果。"), score=0.5),
             NodeWithScore(node=TextNode(text="深度学习使用反向传播算法。"), score=0.5),
             NodeWithScore(node=TextNode(text="机器学习是人工智能的分支。"), score=0.5),
         ]
-        reranked = query_engine.rerank_nodes("神经网络训练方法", nodes, top_n=2)
+        with patch.object(query_engine, "_get_reranker", return_value=_DeterministicReranker()):
+            reranked = query_engine.rerank_nodes("神经网络训练方法", nodes, top_n=2)
         self.assertEqual(len(reranked), 2, "应返回 top_n 条结果")
-        if query_engine._reranker_available:
-            self.assertIn("反向传播", reranked[0].node.text,
-                          "机器学习相关节点应排在最前")
+        self.assertIn("反向传播", reranked[0].node.text,
+                      "最高重排序分数的节点应排在最前")
 
     def test_rerank_empty_list(self):
         from campus_rag.query_engine import rerank_nodes
@@ -640,9 +646,11 @@ class TestDimensionGuard(unittest.TestCase):
         col = client.get_or_create_collection("public")
         col.add(ids=["m1"], embeddings=[[0.5]], documents=["mock pollution"])
         old_client = index_manager._chroma_client
+        old_client_path = index_manager._chroma_client_path
         try:
             # RAGSystem 的 chroma client 是模块级缓存，测试中临时指向临时库
             index_manager._chroma_client = client
+            index_manager._chroma_client_path = str(Path(db_dir).resolve())
             rag = RAGSystem(persist_dir=db_dir)
             rag.get_or_create_public_index(data_dir=str(self._RAG_BASE / "data"))
             rebuilt = client.get_collection("public")
@@ -651,6 +659,7 @@ class TestDimensionGuard(unittest.TestCase):
                              "重建后的向量维度应与当前嵌入模型一致")
         finally:
             index_manager._chroma_client = old_client
+            index_manager._chroma_client_path = old_client_path
 
 
 # ── 写路径数据安全守卫 ──────────────────────────────────────────────────
@@ -666,11 +675,17 @@ class TestDataSafetyGuard(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.client = chromadb.PersistentClient(path=self.tmpdir)
         self.old_client = index_manager._chroma_client
+        self.old_client_path = index_manager._chroma_client_path
+        self.old_default_persist_dir = index_manager._DEFAULT_PERSIST_DIR
         index_manager._chroma_client = self.client
+        index_manager._chroma_client_path = str(Path(self.tmpdir).resolve())
+        index_manager._DEFAULT_PERSIST_DIR = self.tmpdir
 
     def tearDown(self):
         from campus_rag import index_manager, reset_caches
         index_manager._chroma_client = self.old_client
+        index_manager._chroma_client_path = self.old_client_path
+        index_manager._DEFAULT_PERSIST_DIR = self.old_default_persist_dir
         reset_caches()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

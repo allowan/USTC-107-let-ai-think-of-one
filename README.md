@@ -138,24 +138,16 @@ TAVILY_API_KEY=tvly-your-tavily-key
 python server.py
 
 # ② Sync Server（可选，端口 8001；不启动则同步页显示离线，不影响其他功能）
-=======
-服务运行在 `http://localhost:8000`，API 文档在 `http://localhost:8000/api/docs`。
-
-未配置 `LLM_API_KEY` 时，后端仍会启动；聊天功能会显示模型配置错误，但课表导入、课表查询和个人数据功能仍可使用。
-
-> **Windows 注意**：如果使用 conda，确保先 `conda activate 107`。如果遇到 Ollama 嵌入返回 502 错误，说明系统代理干扰了 httpx，`llm_factory.py` 已内置清除代理环境变量的逻辑，重启服务即可。
-
-### 6. 启动 Sync Server（可选）
-
-Sync Server 是公共通知同步服务端，独立运行在端口 8001：
-
-```bash
-
 cd sync_server && python main.py
 
 # ③ 前端（端口 3000）
 cd frontend && npm run dev
 ```
+
+后端服务运行在 `http://localhost:8000`，API 文档在 `http://localhost:8000/api/docs`。
+未配置 `LLM_API_KEY` 时，后端仍会启动；聊天功能会显示模型配置错误，但课表导入、课表查询和个人数据功能仍可使用。
+
+> **Windows 注意**：如果使用 conda，确保先 `conda activate 107`。如果遇到 Ollama 嵌入返回 502 错误，说明系统代理干扰了 httpx，`llm_factory.py` 已内置清除代理环境变量的逻辑，重启服务即可。
 
 ### 5. 验证
 
