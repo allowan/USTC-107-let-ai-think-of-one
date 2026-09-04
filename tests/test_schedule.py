@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from server.services.schedule_service import ScheduleService
 
@@ -79,6 +81,55 @@ class ScheduleServiceTest(unittest.TestCase):
             client.close()
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(allowed.status_code, 200)
+
+
+class CurrentSemesterTest(unittest.TestCase):
+    def test_semester_mapping_by_month(self):
+        from server.services.schedule_service import current_semester
+
+        self.assertEqual(current_semester(datetime(2026, 2, 1)), "2026年春季学期")
+        self.assertEqual(current_semester(datetime(2026, 3, 1)), "2026年春季学期")
+        self.assertEqual(current_semester(datetime(2026, 6, 30)), "2026年春季学期")
+        self.assertEqual(current_semester(datetime(2026, 7, 15)), "2026年夏季学期")
+        self.assertEqual(current_semester(datetime(2026, 8, 31)), "2026年夏季学期")
+        self.assertEqual(current_semester(datetime(2026, 9, 1)), "2026年秋季学期")
+        self.assertEqual(current_semester(datetime(2026, 12, 31)), "2026年秋季学期")
+        # 秋季学期跨年：1 月仍属于上一年秋季
+        self.assertEqual(current_semester(datetime(2027, 1, 5)), "2026年秋季学期")
+
+    def test_get_my_schedule_defaults_to_current_semester(self):
+        from main import _make_get_my_schedule
+        from server.services import schedule_service as svc
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = ScheduleService(Path(temp_dir) / "schedule.db")
+            service.replace("u1", "2026年春季学期", [{"name": "春季课", "meetings": []}])
+            service.replace("u1", "2026年秋季学期", [{"name": "秋季课", "meetings": []}])
+            tool = _make_get_my_schedule("u1")
+            with patch.object(svc, "get_schedule_service", return_value=service), patch(
+                "main.datetime"
+            ) as fake_datetime:
+                fake_datetime.now.return_value = datetime(2026, 9, 4)
+                result = tool.invoke({"semester": ""})
+            self.assertIn("秋季课", result)
+            self.assertNotIn("春季课", result)
+
+    def test_get_my_schedule_reports_missing_current_semester(self):
+        from main import _make_get_my_schedule
+        from server.services import schedule_service as svc
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = ScheduleService(Path(temp_dir) / "schedule.db")
+            service.replace("u1", "2026年春季学期", [{"name": "春季课", "meetings": []}])
+            tool = _make_get_my_schedule("u1")
+            with patch.object(svc, "get_schedule_service", return_value=service), patch(
+                "main.datetime"
+            ) as fake_datetime:
+                fake_datetime.now.return_value = datetime(2026, 9, 4)
+                result = tool.invoke({"semester": ""})
+            self.assertIn("尚未导入", result)
+            self.assertIn("2026年春季学期", result)
+            self.assertNotIn("春季课", result)
 
 
 if __name__ == "__main__":

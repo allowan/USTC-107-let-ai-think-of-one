@@ -23,6 +23,18 @@ SECTION_TIME_RANGES = {
 }
 
 
+def current_semester(today: datetime | None = None) -> str:
+    """按今天日期推断当前学期名（中科大三学期制）。"""
+
+    now = today or datetime.now()
+    if 2 <= now.month <= 6:
+        return f"{now.year}年春季学期"
+    if now.month in (7, 8):
+        return f"{now.year}年夏季学期"
+    # 秋季学期跨年：1 月仍属于上一年秋季
+    return f"{now.year - 1 if now.month == 1 else now.year}年秋季学期"
+
+
 class ScheduleService:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = Path(db_path)
@@ -107,6 +119,7 @@ class ScheduleService:
         return len(rows)
 
     def list(self, username: str, semester: str | None = None) -> dict:
+        """查询课表。semester 为 None 时返回该用户所有学期的课程。"""
         query = "SELECT * FROM schedule_courses WHERE username = ?"
         params: list = [username]
         if semester:

@@ -17,10 +17,10 @@
 
 | 服务 | 职责 |
 |---|---|
-| `chat_service.py` | Agent 生命周期（默认/按用户缓存）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
+| `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
 | `auth_service.py` | 话题 CRUD（委托 `campus_rag.auth`） |
 | `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`） |
-| `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关） |
+| `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
 
@@ -35,7 +35,7 @@
 | DELETE | `/api/topics/{id}` | 删除话题及对话记录（含 checkpoint） |
 | POST | `/api/topics/{id}/summarize` | 自动生成话题标题 |
 | GET | `/api/topics/{id}/history` | 获取话题对话历史 |
-| POST | `/api/chat/stream` | SSE 流式对话（`{"content","topic_id"}`），事件：`thinking` / `tool_use` / `token` / `error` / `done` |
+| POST | `/api/chat/stream` | SSE 流式对话（`{"content","topic_id"}`），事件：`thinking` / `tool_use` / `token` / `error` / `done`；客户端断开连接（前端“停止生成”/切页）即中止模型生成 |
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合，按 `chunk_index` 还原顺序） |
 | POST | `/api/personal-data` | 添加个人数据 |
 | POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库供检索（仅限本地来源） |
@@ -64,6 +64,7 @@
 - **SSE 损坏自愈**：检测到 checkpoint 损坏（tool_calls 与 tool messages 不匹配）时自动删除该 thread 并重试一次。
 - **设置变更失效链**：更新配置/切换模型 → `clear_agent_cache()`（含默认 agent）；更新工具开关 → 仅失效该用户 agent。
 - **课表写入口仅限本地来源**：`/api/schedule/import*` 与 `/api/personal-data/import-schedule` 统一经 `ensure_local_origin` 校验 Origin（无 Origin 或 localhost/127.0.0.1 才放行）。
+- **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（春季≈2-6 月、夏季≈7-8 月、秋季≈9 月-次年1月）；`get_my_schedule` 工具不指定学期时按 `current_semester()` 确定性推断，未导入当前学期时明确报告已导入学期列表，不返回其他学期课表。
 
 ## 测试
 

@@ -284,25 +284,6 @@ class RAGSystem:
                            user_id, source, e)
             return 0
 
-    def list_public_documents(self) -> dict:
-        """列出公共集合中所有文档，返回 {ids, metadatas, documents, previews}。"""
-        try:
-            collection = self.chroma_client.get_collection("public")
-            result = collection.get(include=["metadatas", "documents"])
-        except Exception:
-            return {"ids": [], "metadatas": [], "documents": [], "previews": []}
-        docs = result.get("documents") or []
-        result["previews"] = [d[:200] + "..." if len(d) > 200 else d for d in docs]
-        return result
-
-    def delete_public_document(self, doc_id: str) -> bool:
-        """按 ChromaDB ID 删除公共集合中的单条文档。"""
-        try:
-            self.chroma_client.get_collection("public").delete(ids=[doc_id])
-            return True
-        except Exception:
-            return False
-
     def delete_public_documents_by_source(self, source: str) -> int:
         """删除指定来源（文件名）的所有文档块，返回删除数量。"""
         try:
@@ -315,39 +296,6 @@ class RAGSystem:
         except Exception as e:
             # 返回 0 会掩盖同步增量删除的真实失败，必须留痕
             logger.warning("delete_public_documents_by_source(%s) 失败: %s", source, e)
-            return 0
-
-    def get_public_documents_by_source(self, source: str) -> dict:
-        """按 source 获取公共集合中的文档，返回 {ids, metadatas, documents}。"""
-        try:
-            collection = self.chroma_client.get_collection("public")
-            result = collection.get(
-                where={"source": source},
-                include=["metadatas", "documents"],
-            )
-            return result
-        except Exception:
-            return {"ids": [], "metadatas": [], "documents": []}
-
-    def get_collection_stats(self) -> dict:
-        """返回各集合的文档计数。"""
-        stats = {}
-        try:
-            stats["public"] = self.chroma_client.get_collection("public").count()
-        except Exception:
-            stats["public"] = 0
-        user_count = 0
-        for c in self.chroma_client.list_collections():
-            if c.name.startswith("user_"):
-                user_count += 1
-        stats["user_collections_count"] = user_count
-        return stats
-
-    def get_user_collection_size(self, username: str) -> int:
-        """返回用户私有集合中的文档数量。"""
-        try:
-            return self.chroma_client.get_collection(f"user_{username}").count()
-        except Exception:
             return 0
 
     def _get_existing_hashes(self, collection_name: str) -> set:

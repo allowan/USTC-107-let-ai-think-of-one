@@ -17,5 +17,5 @@ from .query import reset_caches
 from .auth import authenticate, register_user, list_users
 from .auth import create_topic, list_topics, delete_topic, get_topic, rename_topic
 from .auth import get_user_tool_prefs, set_user_tool_prefs
-from .query_engine import get_rag_response, rerank_nodes, get_rag_response_hybrid
+from .query_engine import get_rag_response, rerank_nodes
 from .index_manager import RAGSystem

@@ -1,6 +1,7 @@
 import aiosqlite
 import logging
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from langchain.agents import create_agent
 from langchain.tools import tool
@@ -22,6 +23,8 @@ class AgentContext:
     agent: object
     conn: object
     username: str = ""
+    # prompt 中注入的“当前日期”生成于构建当日；缓存跨天后需重建（见 chat_service）
+    built_date: date | None = None
 
 
 logger = logging.getLogger("agent")
@@ -42,7 +45,7 @@ TOOL_METADATA = [
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
     {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
     {"name": "add_personal_data", "label": "添加个人数据", "description": "将文本内容添加到个人知识库，用于后续检索"},
-    {"name": "get_my_schedule", "label": "获取我的课表", "description": "读取本地已导入的结构化课表，按学期和上课安排返回"},
+    {"name": "get_my_schedule", "label": "获取我的课表", "description": "读取本地已导入的结构化课表；不指定学期时按当前日期自动返回当前学期"},
     {"name": "import_ustc_schedule", "label": "导入教务课表", "description": "解析用户提供的中国科大教务课表 HTML/JSON 并更新本地课表数据库"},
 ]
 
@@ -77,7 +80,24 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 2. 查看检索结果后，判断信息是否完整；如果不完整，从结果中提取关键线索（如具体活动名称、部门名称）进行第二次检索
 3. 可能需要多次检索不同关键词才能覆盖问题的所有方面
 4. 综合所有检索结果后给出完整回答
+
+## 学期与相对时间
+- 中科大三学期制：春季学期约 2-6 月，夏季学期约 7-8 月，秋季学期约 9 月-次年 1 月
+- 用户说“这学期/本学期/下学期/上学期”等相对时间时，先根据当前日期换算成具体学期名（如“2026年秋季学期”），再查询或筛选，不得把其他学期的课程混入回答
+- 查课表优先用 get_my_schedule：留空学期即自动取当前学期；检索个人数据时，按来源或正文中的学期名只保留所问学期的内容
 """
+
+
+_WEEKDAY_NAMES = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+
+def _system_prompt_with_date() -> str:
+    """构建 agent 时注入当天日期：模型知识有截止日，不注入则无法解析“这学期”等相对时间。"""
+
+    today = datetime.now()
+    return SYSTEM_PROMPT + (
+        f"\n\n## 当前日期\n今天是 {today:%Y-%m-%d}（{_WEEKDAY_NAMES[today.weekday()]}）。"
+    )
 
 
 # ── Shared (non-user-specific) tools ──────────────────────────────
@@ -147,15 +167,30 @@ def _make_search_user_data_raw(username: str):
 def _make_get_my_schedule(username: str):
     @tool
     def get_my_schedule(semester: str = "") -> str:
-        """读取用户已经导入本地数据库的课表；可选填写学期名称。"""
+        """读取用户已导入本地数据库的课表。学期名称格式如“2026年秋季学期”；
+        留空时按今天日期自动返回当前学期的课表，不要把其他学期的课程混入。"""
         try:
-            from server.services.schedule_service import get_schedule_service
+            from server.services.schedule_service import current_semester, get_schedule_service
 
-            data = get_schedule_service().list(username, semester.strip() or None)
+            service = get_schedule_service()
+            requested = semester.strip()
+            today = datetime.now()
+            if not requested:
+                requested = current_semester(today)
+                imported = service.list(username).get("semesters") or []
+                if requested not in imported:
+                    names = "、".join(imported) if imported else "（无）"
+                    return (
+                        f"今天是 {today:%Y-%m-%d}，当前学期应为 {requested}，但尚未导入该学期的课表。"
+                        f"已导入的学期：{names}。请引导用户在‘我的课表’中导入后重试。"
+                    )
+                data = service.list(username, requested)
+            else:
+                data = service.list(username, requested)
             courses = data.get("courses") or []
             if not courses:
-                return "当前没有已导入的课表。请在‘我的课表’中导入教务课表 HTML 或结构化 JSON。"
-            lines = [f"学期：{data.get('semester') or semester or '未指定'}"]
+                return f"没有找到 {requested} 的课表。请在‘我的课表’中导入教务课表 HTML 或结构化 JSON。"
+            lines = [f"学期：{data.get('semester') or requested}"]
             weekday_names = ["", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
             for row in courses:
                 teachers = "、".join(row.get("teachers") or []) or "教师待定"
@@ -302,13 +337,13 @@ async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = N
         agent = create_agent(
             model=model,
             tools=tools,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=_system_prompt_with_date(),
             checkpointer=checkpointer,
         )
     except Exception:
         await conn.close()
         raise
-    ctx = AgentContext(agent=agent, conn=conn, username=username)
+    ctx = AgentContext(agent=agent, conn=conn, username=username, built_date=date.today())
 
     if not username and tool_prefs is None:
         _SINGLETON_CONN = conn

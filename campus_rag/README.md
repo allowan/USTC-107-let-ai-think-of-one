@@ -62,8 +62,8 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 | `index_manager.py` | `RAGSystem`：ChromaDB 集合管理、维度守卫与自愈、MD5 去重 |
 | `keyword_retriever.py` | `BM25Retriever`：rank_bm25 + jieba 分词（jieba 缺失时正则回退） |
 | `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口 |
-| `query_engine.py` | RAG 管线：向量检索 → BM25 混合 → 重排序 → LLM 生成 |
-| `auth.py` | 话题 CRUD + 工具偏好 CRUD（SQLite，锚定项目根 `users.db`） |
+| `query_engine.py` | RAG 管线：向量检索 → BM25 预过滤加权 → 重排序 → LLM 生成 |
+| `auth.py` | 话题 CRUD + 工具偏好 CRUD（SQLite，锚定项目根 `users.db`）；另含遗留的登录函数（`authenticate` / `register_user` / `list_users`），本地单用户形态下无路由调用 |
 | `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建） |
 
 ## 检索管线
@@ -71,7 +71,7 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 ```
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
-  ├── BM25 关键词检索（混合模式 / 预过滤）
+  ├── BM25 关键词检索（对向量结果预过滤，命中节点加权；仅公共通知检索启用）
   ├── 合并去重
   ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点；不可用时降级为原始分数排序)
   └── LLM 生成回答（携带来源文件名 + 源链接）

@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染和“停止生成”打断
+- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染（含 GFM 表格）和“停止生成”打断
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
@@ -36,7 +36,7 @@
      ├── search_my_data / search_user_data_raw        → campus_rag 个人数据检索
      ├── web_search / web_fetch / ustc_web_search / ustc_web_fetch → 联网搜索与网页抓取（tools/）
      ├── course_review_search / course_review_fetch → 评课社区课程评价（tools/）
-     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取与教务课表导入
+     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取（默认按日期自动取当前学期）与教务课表导入
      └── add_personal_data                            → 个人知识库入库
   → SSE 流式回传前端（thinking / tool_use / token / done 事件）
 ```
@@ -248,7 +248,7 @@ USTC-107-let-ai-think-of-one/
 ├── frontend/                  # React 18 前端
 │   └── src/
 │       ├── pages/
-│       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染
+│       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染（GFM 表格）+ 停止生成
 │       │   ├── PersonalDataPage.tsx #   个人知识库管理
 │       │   ├── SchedulePage.tsx    #   结构化课表导入与离线查看
 │       │   └── SyncPage.tsx        #   公共通知同步
@@ -262,14 +262,12 @@ USTC-107-let-ai-think-of-one/
 │       ├── services/
 │       │   └── api.ts              #   API 调用封装
 │       ├── stores/
-│       │   ├── userStore.ts         #   用户状态
 │       │   └── topicStore.ts        #   话题状态
 │       └── types/
 │           └── index.ts            #   TypeScript 类型定义
 ├── tests/                     # 单元测试（`pytest tests/ -v`）
 ├── scripts/                   # 网页源同步与通知栏目采集（详见 campus_rag/README.md）
 ├── data/                      # 运行时数据（checkpoint DB，gitignore）
-├── workspace/                 # 用户文件存储（gitignore）
 ├── chroma_db/                 # ChromaDB 向量数据库（gitignore）
 └── settings.example.json      # LLM 配置模板
 ```

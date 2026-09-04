@@ -118,14 +118,9 @@ export default function ChatPage() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const isComposingRef = useRef(false);
   const summarizedRef = useRef<Set<string>>(new Set());
-  // 流式请求的中止控制器提升到 ref：组件卸载（切去其他页面）时必须中止，
-  // 否则流在后台继续跑完并对已卸载组件 setState。
-  const abortRef = useRef<AbortController | null>(null);
   const autoCreatedRef = useRef(false);
   const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
   const { message } = App.useApp();
-
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   const scrollBottom = useCallback(() => {
     setTimeout(() => {
@@ -173,7 +168,8 @@ export default function ChatPage() {
     return () => { cancelled = true; };
   }, [activeTopicId]);
 
-  // Navigating away from the chat page should not leave a stream running.
+  // Navigating away from the chat page should not leave a stream running
+  // (abort on unmount is the same mechanism as the stop button).
   useEffect(() => () => {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
@@ -214,7 +210,6 @@ export default function ChatPage() {
     if (loading) return;
     const content = input.trim();
     if (!content) return;
-    if (loading) return;
     if (!activeTopicId) { message.warning('请先在左侧创建一个话题'); return; }
 
     const topicId = activeTopicId;

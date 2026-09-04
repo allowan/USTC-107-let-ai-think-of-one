@@ -22,20 +22,13 @@ def reset_caches() -> None:
     _user_retrievers = {}
 
 
-def _init():
+def _ensure_init():
+    """确保 RAG 已初始化。ChromaDB 恢复由 get_or_create_public_index 内部处理。"""
     global _rag, _public_retriever
     if _rag is None:
         _rag = RAGSystem()
         index = _rag.get_or_create_public_index(str(_base / "data"))
         _public_retriever = index.as_retriever(similarity_top_k=10)
-    return True
-
-
-def _ensure_init():
-    """确保 RAG 已初始化。ChromaDB 恢复由 get_public_index 内部处理。"""
-    global _rag, _public_retriever
-    if _rag is None:
-        return _init()
     return True
 
 
