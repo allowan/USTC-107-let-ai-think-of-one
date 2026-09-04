@@ -144,6 +144,11 @@ cd sync_server && python main.py
 cd frontend && npm run dev
 ```
 
+后端服务运行在 `http://localhost:8000`，API 文档在 `http://localhost:8000/api/docs`。
+未配置 `LLM_API_KEY` 时，后端仍会启动；聊天功能会显示模型配置错误，但课表导入、课表查询和个人数据功能仍可使用。
+
+> **Windows 注意**：如果使用 conda，确保先 `conda activate 107`。如果遇到 Ollama 嵌入返回 502 错误，说明系统代理干扰了 httpx，`llm_factory.py` 已内置清除代理环境变量的逻辑，重启服务即可。
+
 ### 5. 验证
 
 - 浏览器访问 `http://localhost:3000`，新建话题，发送“有什么暑期学校的活动？”
@@ -357,6 +362,188 @@ USTC-107-let-ai-think-of-one/
 | DELETE | `/api/admin/notices/{source}` | 删除通知 |
 | GET | `/api/admin/stats` | 系统统计 |
 | GET | `/admin` | 管理后台 HTML 页面 |
+
+## 测试
+
+### 网页采集与更新
+
+需要长期跟踪的公开网页配置在 `campus_rag/web_sources.json`：
+
+```json
+[
+  {
+    "name": "中国科大网络信息中心柜面服务",
+    "url": "https://ustcnet.ustc.edu.cn/40939/list.htm",
+    "output": "ustcnet_40939_counter_service.txt"
+  }
+]
+```
+
+抓取并比较网页正文；只有内容变化时才更新本地 TXT：
+
+```bash
+python scripts/sync_web_sources.py
+```
+
+抓取完成后同时重建公共 ChromaDB 向量索引：
+
+```bash
+python scripts/sync_web_sources.py --reindex
+```
+
+通知栏目批量采集配置在 `campus_rag/ustc_columns.json`。默认同步中国科大主页
+“服务类通知”最近一页中的 10 条文章，并将每篇公开正文保存成独立 TXT：
+
+```bash
+python scripts/sync_ustc_columns.py
+python scripts/sync_ustc_columns.py --reindex
+```
+
+`max_pages` 控制追溯页数，`max_articles` 控制单次文章上限。旧版通知若跳转到
+统一身份认证，将记为 `skipped`，不会尝试绕过登录。
+
+Agent 提供六个互补的联网工具：`web_search` 按关键词查找公开网页，
+`web_fetch` 在已知 URL 时提取网页可见正文；`ustc_web_search` 只搜索配置中的
+中国科大官方网站，`ustc_web_fetch` 只读取白名单校站；`course_review_search`
+和 `course_review_fetch` 专门搜索、读取 USTC 评课社区的公开课程页。校站清单配置在
+`campus_rag/ustc_sites.json`，已包含综合教务系统
+`https://jw.ustc.edu.cn/home` 和公开课程目录
+`https://catalog.ustc.edu.cn/query`；评课社区配置在
+`campus_rag/course_review_sites.json`，入口为 `https://icourse.club/`。
+
+### 选课信息与评课对比
+
+综合教务系统的个人课表、已选课程和选课结果需要统一身份认证。项目可以打开并检索
+教务公开页面，但不会保存账号、密码、Cookie，也不会代替用户提交选课；个人课表继续
+通过“获取课表”导入用户主动复制或选择的 HTML/JSON。公开课程目录可作为官方课程信息
+来源。用户询问选课建议时，Agent 会先使用教务系统/课程目录获取课程名称、教师、学分、
+时间等官方信息，再使用 `course_review_search` / `course_review_fetch` 查询
+`icourse.club` 的评分、难度、作业量、给分、收获和学生点评，回答中分别标注官方事实与
+学生主观意见。评课内容可能过时或存在样本偏差，只作为参考。
+
+抓取器拒绝本机和私有网络地址，
+限制单页响应大小为 2 MiB、工具输出为 20000 字符；中国科大官方域名允许兼容
+本地代理的 Fake-IP DNS 映射。
+
+搜索工具会将网页标题和 URL 组合成 Markdown 链接（`[标题](URL)`），Agent 在回答中应保留这种格式；聊天页面也会将裸 URL 渲染为可点击链接，并把链接外的括号、句号等标点保留在链接外，在新标签页打开。
+
+### RAG 模块测试
+
+```bash
+# 公共数据检索
+python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
+
+# LLM 总结检索（需配置 settings.json 中的 api_key 或 LLM_API_KEY）
+python -c "from campus_rag import search_notices_answer; print(search_notices_answer('今年暑假有什么活动？'))"
+
+# 个人数据入库与检索
+python -c "
+from campus_rag import add_user_data, search_user_data
+from llama_index.core import Document
+docs = [Document(text='【7月5日】编程比赛 地点：线上', metadata={'source': '个人备忘'})]
+add_user_data('local_user', docs)
+print(search_user_data('编程比赛', user_id='local_user'))
+"
+
+# BM25 独立检索
+python -c "
+from campus_rag.keyword_retriever import BM25Retriever
+bm25 = BM25Retriever('./campus_rag/data/')
+nodes = bm25.retrieve('编程比赛', top_k=5)
+for n in nodes:
+    print(n.score, n.node.text[:100])
+"
+
+# 高级查询引擎
+python -c "
+from campus_rag import RAGSystem, get_rag_response
+rag = RAGSystem()
+pub_idx, user_idx = rag.get_combined_query_engine('local_user')
+print(get_rag_response('今年暑假有什么活动？', pub_idx, user_idx))
+"
+```
+
+### 课表导入与离线查看
+
+“我的课表”是项目自己的 UI，课程数据保存在本机 `schedule.db`，查看不依赖 Chrome
+或教务系统。进入页面后可以使用“导入课表文件”导入 JSON/CSV，也可以点击“获取课表”，
+在教务系统打开“我的课表”，等待课程加载完成后，在开发者工具 Console 执行
+`copy(document.documentElement.outerHTML)`，再将复制内容粘贴到导入窗口。解析器读取 USTC
+教务系统的 `#lessons` 明细表和 `timetable` 节次时间，导入后使用“刷新本地课表”重新读取
+本机数据。个人数据页面的“导入已有课表”会选择本机已保存的学期课表并同步到个人知识库，
+不会重新请求或解析教务 HTML，也不会修改结构化课表。项目不保存账号、密码或浏览器 Cookie。
+
+JSON 格式示例：
+
+```json
+{
+  "semester": "2026年秋季学期",
+  "courses": [
+    {
+      "course_code": "210716.01",
+      "name": "课程名称",
+      "teachers": ["教师姓名"],
+      "credits": 2,
+      "meetings": [
+        {
+          "weekday": 5,
+          "sections": [8, 9],
+          "weeks": [1, 2, 3],
+          "start_time": "15:55",
+          "end_time": "17:30",
+          "location": "教室"
+        }
+      ]
+    }
+  ]
+}
+```
+
+CSV 至少包含 `name,weekday,sections,weeks,location,start_time,end_time` 列。
+课表卡片会同时显示具体时间和节次；未提供具体时间时，系统会对常见节次使用默认时间段。
+
+课表接口：
+
+| Method | Path | 说明 |
+|---|---|---|
+| GET | `/api/schedule` | 获取当前用户的本地课表 |
+| POST | `/api/schedule/import` | 用结构化课程数据替换指定学期课表 |
+| POST | `/api/schedule/import-ustc` | 解析用户提供的 USTC 课表 HTML/JSON 并更新课表 |
+| POST | `/api/personal-data/import-schedule` | 读取已保存课表并同步到个人数据 |
+
+### 后端测试
+
+```bash
+# 运行单元测试
+pytest tests/ -v
+
+# 手动测试 API
+curl http://localhost:8000/api/health
+curl "http://localhost:8000/api/search/notices?q=讲座"
+curl "http://localhost:8000/api/personal-data"
+curl "http://localhost:8000/api/sync/status"
+```
+
+### 前端测试
+
+```bash
+cd frontend
+npx tsc --noEmit   # TypeScript 类型检查
+npm run build       # 生产构建
+```
+
+### 端到端测试流程
+
+1. 启动 Ollama：`ollama serve`
+2. 启动后端：`python server.py`
+3. （可选）启动 Sync Server：`cd sync_server && python main.py`
+4. 启动前端：`cd frontend && npm run dev`
+5. 浏览器打开 `http://localhost:3000`
+6. 创建话题：侧边栏点击 + 按钮
+7. 测试对话：发送"有什么暑期学校的活动？"
+8. 测试个人知识库：侧边栏"个人数据" → 添加/编辑/删除
+9. 测试同步：侧边栏"同步" → 查看状态 → 触发同步
+10. 测试设置：顶栏齿轮图标 → 切换模型 / 管理工具开关
 
 ## 已知注意事项
 

@@ -11,18 +11,32 @@ from server.services.chat_service import ChatService, get_chat_service
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 _SETTINGS_PATH = Path(__file__).resolve().parent.parent.parent / "settings.json"
+_SETTINGS_EXAMPLE_PATH = Path(__file__).resolve().parent.parent.parent / "settings.example.json"
+
+
+def _load_default_settings() -> dict:
+    """返回可展示的默认配置，不把示例占位 Key 当成真实凭据。"""
+    try:
+        with open(_SETTINGS_EXAMPLE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"默认设置模板不可用，请检查 settings.example.json（{e}）",
+        ) from e
+    api_key = data.get("env", {}).get("api_key", "")
+    if api_key.startswith("your-") or api_key.startswith("sk-your-"):
+        data["env"]["api_key"] = ""
+    return data
 
 
 def _load_settings() -> dict:
-    """读取 settings.json；缺失或损坏时给出可操作的错误而非裸 500。"""
+    """读取本地设置；首次启动缺少私有配置时返回安全的模板默认值。"""
     try:
         with open(_SETTINGS_PATH, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="settings.json 不存在，请复制 settings.example.json 为 settings.json 并填入配置",
-        )
+        return _load_default_settings()
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=500,

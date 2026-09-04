@@ -399,15 +399,18 @@ class TestSettingsRoutes(unittest.TestCase):
         r = self.client.put("/api/settings/tools", json={"tools": "not-a-dict"})
         self.assertEqual(r.status_code, 400)
 
-    def test_get_settings_missing_file_actionable_error(self):
-        # settings.json 缺失时不得裸 500，必须给出可操作的修复指引
+    def test_get_settings_missing_file_uses_safe_defaults(self):
+        # 首次启动没有私有配置时，设置页仍应可打开且不得暴露示例占位 Key。
         from server.routes import settings as settings_routes
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "settings.json"
             with patch.object(settings_routes, "_SETTINGS_PATH", missing):
                 r = self.client.get("/api/settings")
-            self.assertEqual(r.status_code, 500)
-            self.assertIn("settings.example.json", r.json()["detail"])
+            self.assertEqual(r.status_code, 200)
+            data = r.json()
+            self.assertIn("env", data)
+            self.assertIn("groups", data)
+            self.assertEqual(data["env"]["api_key"], "")
 
     def test_update_settings_ignores_empty_values(self):
         # 前端清空字段保存时不得把 base_url 写成空串（会直接打断 LLM 初始化）

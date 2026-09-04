@@ -79,14 +79,12 @@ def _get_chroma_client(persist_dir: str = _DEFAULT_PERSIST_DIR) -> chromadb.Pers
                 # 路径必须已就绪，否则会误报绑定路径不一致警告
                 _chroma_client_path = resolved
                 _chroma_client = chromadb.PersistentClient(path=resolved)
-    elif _chroma_client_path != resolved:
-        # 单例已绑定其他目录：chroma 客户端进程内复用是有意为之，但请求的
-        # persist_dir 被忽略必须留痕，否则调用方拿到错误的库却毫无察觉。
-        logger.warning(
-            "ChromaDB 客户端已绑定 %s，忽略本次请求的 persist_dir=%s",
-            _chroma_client_path, resolved,
-        )
-    return _chroma_client
+    if _chroma_client_path == resolved:
+        return _chroma_client
+
+    # 调用方显式指定其他持久化目录时必须严格隔离。这里不替换默认客户端，
+    # 避免测试、迁移或临时索引把生产查询悄悄导向另一套数据。
+    return chromadb.PersistentClient(path=resolved)
 
 
 def _user_collection_name(user_id: str) -> str:
@@ -113,7 +111,7 @@ def _public_sources_match_dir(collection, data_dir: str) -> bool:
 
 
 class RAGSystem:
-    def __init__(self, persist_dir: str = _DEFAULT_PERSIST_DIR):
+    def __init__(self, persist_dir: str | None = None):
         from .config import init_embed
         # 嵌入不可用时 llama_index 会静默回退 MockEmbedding（维度 1），
         # 一旦 Mock 向量写入集合，ChromaDB 维度将被永久锁定，后续真实
@@ -124,7 +122,7 @@ class RAGSystem:
                 "污染向量库）。请检查 campus_rag/.env 的 EMBED_* 配置及"
                 "嵌入 API 的网络可达性（校园网关需校园网/VPN）。"
             )
-        self.chroma_client = _get_chroma_client(persist_dir)
+        self.chroma_client = _get_chroma_client(persist_dir or _DEFAULT_PERSIST_DIR)
 
     # ── 公共数据（官方通知）──────────────────────────────────────
     def create_public_index(self, data_dir=_DEFAULT_DATA_DIR):
