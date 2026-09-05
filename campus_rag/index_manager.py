@@ -307,14 +307,3 @@ class RAGSystem:
             # 返回空集合会退化为"不去重"而非报错，静默时难以察觉重复入库
             logger.debug("_get_existing_hashes(%s) 失败: %s", collection_name, e)
             return set()
-
-    def get_combined_query_engine(self, user_id: str):
-        """返回 (public_index, user_index) 元组，user_index 可能为 None。"""
-        pub_idx = self.get_public_index()
-        user_idx = None
-        try:
-            user_idx = self.get_user_index(user_id)
-        except Exception as e:
-            # 个人索引不可用（含维度不匹配）时降级为仅公共检索，但必须留痕
-            logger.warning("用户 %s 的个人索引不可用: %s", user_id, e)
-        return pub_idx, user_idx

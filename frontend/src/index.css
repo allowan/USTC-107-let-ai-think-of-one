@@ -258,3 +258,162 @@ html, body, #root {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── 今日面板（DigestPage）────────────────────────────── */
+.digest-page {
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+.digest-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.digest-today {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: #1f1f1f;
+}
+
+.digest-sub {
+  font-size: 12px;
+}
+
+.digest-card {
+  margin-bottom: 16px;
+  border-radius: 12px;
+  border: 1px solid #f0f0f0;
+}
+
+.digest-card > .ant-card-head {
+  border-bottom: 1px solid #f5f5f5;
+  min-height: 40px;
+}
+
+.digest-card > .ant-card-body {
+  padding: 4px 16px 8px;
+}
+
+.digest-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 10px 8px;
+  border-bottom: 1px solid #f5f5f5;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.digest-event:last-child {
+  border-bottom: none;
+}
+
+.digest-event:hover {
+  background: #fafafa;
+}
+
+.digest-date-badge {
+  flex-shrink: 0;
+  width: 62px;
+  padding: 6px 4px;
+  border-radius: 10px;
+  text-align: center;
+  line-height: 1.25;
+}
+
+.digest-badge-date {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.digest-badge-left {
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
+
+.badge-urgent { background: #fff1f0; color: #cf1322; }
+.badge-soon { background: #fff7e6; color: #d46b08; }
+.badge-start { background: #e6f4ff; color: #1677ff; }
+.badge-ongoing { background: #f6ffed; color: #389e0d; }
+.badge-recent { background: #f5f5f5; color: #595959; }
+
+.digest-event-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.digest-event-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 22px;
+  color: #262626;
+}
+
+.digest-event-title > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-kind-deadline { color: #d46b08; background: #fff7e6; border-color: #ffd591; }
+.tag-kind-start { color: #1677ff; background: #e6f4ff; border-color: #91caff; }
+
+.digest-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.digest-event-meta .anticon {
+  margin-right: 4px;
+}
+
+.digest-track-btn {
+  flex-shrink: 0;
+  color: #bfbfbf;
+}
+
+.digest-track-btn:hover {
+  color: #faad14;
+}
+
+.digest-track-btn.is-tracked {
+  color: #faad14;
+}
+
+/* ── 侧边栏品牌区 ─────────────────────────────────────── */
+.sidebar-brand {
+  height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+
+.sidebar-brand-logo {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #1677ff;
+}
+
+.sidebar-brand-sub {
+  margin-top: 1px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #8c8c8c;
+}

@@ -5,8 +5,14 @@ from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
 import os
 
-# URL 合法字符白名单匹配：\S+ 会吞掉紧邻的中文标点（如“）”），从源头杜绝尾部粘连
+# URL 合法字符白名单匹配：\S+ 会吞掉紧邻的中文标点（如"）"），从源头杜绝尾部粘连
 _URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+
+# 爬虫文档的正文首部带有"来源：<URL>"行（见 tools/ustc_crawler.sync_column）。
+_SOURCE_LINE_RE = re.compile(r"^来源[:：]\s*(https?://\S+)\s*$", re.MULTILINE | re.IGNORECASE)
+
+# URL 尾部可能粘连的中英文标点，统一剥除
+_URL_TRAILING_PUNCT = ".,;)]）。，；、"
 
 
 def extract_source_url(filename: str, content: str) -> str | None:
@@ -21,8 +27,19 @@ def extract_source_url(filename: str, content: str) -> str | None:
     notice_id = match.group(1)
     for url in _URL_RE.findall(content):
         if notice_id in url:
-            return url.rstrip(".,;)]")
+            return url.rstrip(_URL_TRAILING_PUNCT)
     return None
+
+
+def extract_source_url_from_text(content: str) -> str | None:
+    """从正文的"来源：<URL>"行提取源链接。
+
+    爬虫生成的文档（文件名形如 ustc_teach_notice_20429.txt）没有数字 ID
+    前缀，extract_source_url 的 ID 匹配必然落空；其来源只写在正文行里，
+    必须按行解析，否则这批文档在检索结果中永远缺失源链接。
+    """
+    match = _SOURCE_LINE_RE.search(content or "")
+    return match.group(1).rstrip(_URL_TRAILING_PUNCT) if match else None
 
 
 def load_documents_from_files(directory: str) -> list:
@@ -37,7 +54,7 @@ def load_documents_from_files(directory: str) -> list:
                 content = f.read()
                 if content.strip():
                     metadata = {"source": filename}
-                    url = extract_source_url(filename, content)
+                    url = extract_source_url(filename, content) or extract_source_url_from_text(content)
                     if url:
                         metadata["url"] = url
                     documents.append(Document(text=content, metadata=metadata))

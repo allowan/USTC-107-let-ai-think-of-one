@@ -72,62 +72,6 @@ def has_llm() -> bool:
     return _LLM_OK
 
 
-# ── Auth ─────────────────────────────────────────────────────────────
-
-
-class TestAuth(unittest.TestCase):
-    """认证模块：注册、登录、用户列表。"""
-
-    @classmethod
-    def setUpClass(cls):
-        from campus_rag import auth as auth_module
-        cls.auth = auth_module
-        cls.test_user = "test_auth_runner"
-        cls.test_pass = "test1234"
-
-    @classmethod
-    def tearDownClass(cls):
-        db = cls.auth.SessionLocal()
-        user = db.query(cls.auth.User).filter_by(username=cls.test_user).first()
-        if user:
-            db.delete(user)
-            db.commit()
-        db.close()
-
-    def test_01_default_admin_exists(self):
-        ok, is_admin = self.auth.authenticate("admin", "admin123")
-        self.assertTrue(ok, "默认管理员应能登录")
-        self.assertTrue(is_admin, "admin 应为管理员")
-
-    def test_02_register_new_user(self):
-        ok = self.auth.register_user(self.test_user, self.test_pass)
-        self.assertTrue(ok, "注册新用户应成功")
-
-    def test_03_register_duplicate_fails(self):
-        ok = self.auth.register_user(self.test_user, "other")
-        self.assertFalse(ok, "重复注册应失败")
-
-    def test_04_authenticate_success(self):
-        ok, is_admin = self.auth.authenticate(self.test_user, self.test_pass)
-        self.assertTrue(ok, "正确密码应登录成功")
-        self.assertFalse(is_admin, "新用户不应是管理员")
-
-    def test_05_authenticate_wrong_password(self):
-        ok, _ = self.auth.authenticate(self.test_user, "wrong")
-        self.assertFalse(ok, "错误密码应登录失败")
-
-    def test_06_authenticate_nonexistent(self):
-        ok, _ = self.auth.authenticate("nonexistent_user", "x")
-        self.assertFalse(ok, "不存在的用户应登录失败")
-
-    def test_07_list_users(self):
-        users = self.auth.list_users()
-        self.assertIsInstance(users, list)
-        usernames = [u[0] for u in users]
-        self.assertIn("admin", usernames, "列表中应包含 admin")
-        self.assertIn(self.test_user, usernames, "列表中应包含测试用户")
-
-
 # ── data_loader ──────────────────────────────────────────────────────
 
 
@@ -241,20 +185,6 @@ class TestBM25Retriever(unittest.TestCase):
             tokens = _tokenize("2026年暑期学校")
             self.assertGreater(len(tokens), 1, "至少分成多个 token")
 
-    def test_06_from_nodes(self):
-        """通过 from_nodes 创建 BM25 索引，匹配向量检索粒度。"""
-        from campus_rag.keyword_retriever import BM25Retriever
-        from llama_index.core.schema import TextNode
-        nodes = [
-            TextNode(text="操作系统 周三3-4节 3A201"),
-            TextNode(text="数据库 周五1-2节 线上"),
-            TextNode(text="深度学习入门笔记"),
-        ]
-        bm25 = BM25Retriever.from_nodes(nodes)
-        results = bm25.retrieve("操作系统课程", top_k=3)
-        self.assertGreater(len(results), 0)
-        self.assertIn("操作系统", results[0].node.text)
-
 
 # ── index_manager ────────────────────────────────────────────────────
 
@@ -301,12 +231,7 @@ class TestRAGSystem(unittest.TestCase):
         idx = self.rag.add_user_documents(self.TEST_USER, [doc])
         self.assertIsNotNone(idx)
 
-    def test_06_get_combined_query_engine(self):
-        pub, user = self.rag.get_combined_query_engine(self.TEST_USER)
-        self.assertIsNotNone(pub)
-        self.assertIsNotNone(user)
-
-    def test_07_clear_user_index(self):
+    def test_06_clear_user_index(self):
         self.rag.clear_user_index(self.TEST_USER)
         from llama_index.core import Document
         doc = Document(text="重新添加。", metadata={"source": "after_clear"})
@@ -840,6 +765,33 @@ class TestSourceUrlExtraction(unittest.TestCase):
         url = extract_source_url("3384_助教申报通知.txt", "（https://gradschool.ustc.edu.cn/article/3384）。")
         self.assertEqual(url, "https://gradschool.ustc.edu.cn/article/3384")
 
+    def test_crawler_source_line(self):
+        """爬虫文档（ustc_* 前缀，无数字 ID）从正文"来源："行提取源链接。"""
+        from campus_rag.data_loader import extract_source_url_from_text
+        text = (
+            "标题：关于某某活动的通知\n"
+            "来源：https://www.ustc.edu.cn/info/1366/25445.htm\n"
+            "栏目：中国科大服务类通知\n\n正文..."
+        )
+        self.assertEqual(extract_source_url_from_text(text), "https://www.ustc.edu.cn/info/1366/25445.htm")
+        self.assertIsNone(extract_source_url_from_text("正文里没有来源行"))
+        # 行尾标点不粘连
+        text2 = "来源：https://news.ustc.edu.cn/info/1055/95379.htm。"
+        self.assertEqual(extract_source_url_from_text(text2), "https://news.ustc.edu.cn/info/1055/95379.htm")
+
+    def test_crawler_doc_gets_url_metadata(self):
+        """load_documents_from_files 必须给爬虫文档补上 url 元数据（回归守护）。"""
+        import tempfile
+        from campus_rag.data_loader import load_documents_from_files
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ustc_service_notice_legacy_22309.txt").write_text(
+                "标题：某通知\n来源：https://www.ustc.edu.cn/tzggcontent.jsp?urltype=news.NewsContentUrl&wbtreeid=1365&wbnewsid=22309\n\n正文",
+                encoding="utf-8",
+            )
+            docs = load_documents_from_files(tmp)
+        self.assertEqual(len(docs), 1)
+        self.assertIn("url", docs[0].metadata)
+
     def test_real_data_files_carry_url_metadata(self):
         from campus_rag.data_loader import load_documents_from_files
         docs = load_documents_from_files(str(Path(__file__).resolve().parent.parent / "campus_rag" / "data"))
@@ -848,7 +800,9 @@ class TestSourceUrlExtraction(unittest.TestCase):
         self.assertGreater(len(with_url), 0, "至少部分本地通知应提取到源网址")
         for d in with_url:
             notice_id = d.metadata["source"].split("_", 1)[0]
-            self.assertIn(notice_id, d.metadata["url"])
+            # 数字 ID 前缀文件按 ID 匹配；爬虫文档（ustc_* 前缀）按正文"来源："行匹配
+            if notice_id.isdigit():
+                self.assertIn(notice_id, d.metadata["url"])
 
 
 class _FakeNode:

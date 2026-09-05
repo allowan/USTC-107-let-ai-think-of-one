@@ -57,6 +57,15 @@ class ScheduleServiceTest(unittest.TestCase):
         self.assertEqual([row["name"] for row in self.service.list("student-a", "秋季")["courses"]], ["课程D"])
         self.assertEqual([row["name"] for row in self.service.list("student-b")["courses"]], ["课程B"])
 
+    def test_semester_list_is_not_collapsed_by_semester_filter(self):
+        """按学期过滤后，semesters 必须仍包含所有学期，否则前端下拉框无法切回。"""
+        course = {"name": "课程A", "meetings": [{"weekday": 1, "sections": [1], "weeks": [1]}]}
+        self.service.replace("student-a", "2026年秋季学期", [course])
+        self.service.replace("student-a", "2026年春季学期", [course])
+        filtered = self.service.list("student-a", "2026年春季学期")
+        self.assertEqual(filtered["semester"], "2026年春季学期")
+        self.assertEqual(filtered["semesters"], ["2026年秋季学期", "2026年春季学期"])
+
     def test_schedule_import_api_rejects_untrusted_web_origin(self):
         from fastapi.testclient import TestClient
         from server import create_app

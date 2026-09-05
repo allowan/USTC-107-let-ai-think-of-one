@@ -2,8 +2,67 @@
   {
     "name": "中国科大服务类通知",
     "url": "https://www.ustc.edu.cn/tzgg/fwltz.htm",
+    "max_pages": 6,
+    "max_articles": 240
+  },
+  {
+    "name": "中国科大通知公告",
+    "url": "https://www.ustc.edu.cn/tzgg.htm",
     "max_pages": 1,
-    "max_articles": 10,
-    "output_prefix": "ustc_service_notice"
+    "max_articles": 60
+  },
+  {
+    "name": "教务处教学通知",
+    "url": "https://www.teach.ustc.edu.cn/category/notice/notice-teaching",
+    "max_pages": 1,
+    "max_articles": 40
+  },
+  {
+    "name": "教务处信息通知",
+    "url": "https://www.teach.ustc.edu.cn/category/notice/notice-info",
+    "max_pages": 1,
+    "max_articles": 40
+  },
+  {
+    "name": "教务处学生事务",
+    "url": "https://www.teach.ustc.edu.cn/category/service/svc-student",
+    "max_pages": 1,
+    "max_articles": 60
+  },
+  {
+    "name": "教务处管理规定",
+    "url": "https://www.teach.ustc.edu.cn/category/document/doc-administration",
+    "max_pages": 1,
+    "max_articles": 30
+  },
+  {
+    "name": "研究生院通知公告",
+    "url": "https://gradschool.ustc.edu.cn/column/9",
+    "max_pages": 2,
+    "max_articles": 50
+  },
+  {
+    "name": "研究生院新闻动态",
+    "url": "https://gradschool.ustc.edu.cn/column/10",
+    "max_pages": 1,
+    "max_articles": 30
+  },
+  {
+    "name": "研究生院招生政策",
+    "url": "https://gradschool.ustc.edu.cn/column/7",
+    "max_pages": 1,
+    "max_articles": 10
+  },
+  {
+    "name": "网络信息中心新闻公告",
+    "url": "https://ustcnet.ustc.edu.cn/33415/list.htm",
+    "max_pages": 2,
+    "max_articles": 40
+  },
+  {
+    "name": "网络信息中心系统发布",
+    "url": "https://ustcnet.ustc.edu.cn/33496/list.htm",
+    "max_pages": 2,
+    "max_articles": 40
   }
 ]

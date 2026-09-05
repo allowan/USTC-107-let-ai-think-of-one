@@ -113,3 +113,39 @@ export interface ScheduleImportPayload {
   semester: string;
   courses: ScheduleCourseInput[];
 }
+
+export interface DigestEvent {
+  source: string;
+  title: string | null;
+  category: string | null;
+  audience: string | null;
+  publish_date: string | null;
+  deadline: string | null;
+  deadline_text: string | null;
+  event_start: string | null;
+  event_end: string | null;
+  location: string | null;
+  url: string | null;
+  kind?: 'deadline' | 'start';
+  /** 开始型事件中，开始日已过、尚未结束的事件（展览/施工等长期事件） */
+  ongoing?: boolean;
+  days_left?: number;
+  days_since?: number;
+}
+
+export interface DigestData {
+  generated_on: string;
+  days: number;
+  upcoming: DigestEvent[];
+  recent: DigestEvent[];
+}
+
+export interface TrackedEvent {
+  source: string;
+  title: string | null;
+  category: string | null;
+  date_kind: 'deadline' | 'start';
+  date_value: string | null;
+  url: string | null;
+  created_at: string;
+}

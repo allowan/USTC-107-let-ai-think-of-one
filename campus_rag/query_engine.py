@@ -63,6 +63,18 @@ _retriever_cache: dict[tuple, VectorIndexRetriever] = {}
 _bm25_cache: dict[str, object] = {}
 
 
+def reset_caches() -> None:
+    """清空检索器/BM25 缓存。
+
+    底层向量集合被删除重建（全量同步、--reindex）后，缓存的 retriever
+    仍指向旧集合对象，查询会报错或返回旧数据，必须随 query.reset_caches
+    一并失效。
+    """
+    global _retriever_cache, _bm25_cache
+    _retriever_cache = {}
+    _bm25_cache = {}
+
+
 def _get_reranker():
     """按 .env 的 RERANK_* 配置构建 API reranker；未配置或失败时返回 None。"""
     global _reranker, _reranker_available
@@ -193,6 +205,15 @@ def get_rag_response(
     if user_index is not None:
         retriever = _get_cached_retriever(user_index, top_k)
         all_nodes.extend(retriever.retrieve(query))
+
+    # 检索自愈：首次召回为空时用 jieba 关键词缩减重试一次
+    if not all_nodes:
+        from .keyword_retriever import extract_keywords
+        retry = extract_keywords(query)
+        if retry and retry != query.strip():
+            for idx in (public_index, user_index):
+                if idx is not None:
+                    all_nodes.extend(_get_cached_retriever(idx, top_k).retrieve(retry))
 
     if not all_nodes:
         return "未找到相关信息。"

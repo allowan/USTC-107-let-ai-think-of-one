@@ -15,6 +15,19 @@ def _tokenize(text: str) -> list[str]:
         return re.findall(r"[一-鿿]+|[a-zA-Z0-9]+", text.lower())
 
 
+def extract_keywords(query: str, top_k: int = 6) -> str:
+    """用 jieba 抽取查询的核心关键词并重组为重试查询（检索自愈用）。
+
+    首次检索为空时，常见原因是查询带过多修饰词；去掉修饰保留核心名词
+    再试一次往往能命中。jieba 不可用时返回空串，调用方跳过重试。
+    """
+    try:
+        import jieba.analyse
+    except ImportError:
+        return ""
+    return " ".join(jieba.analyse.extract_tags(query, topK=top_k))
+
+
 _splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=50)
 
 
@@ -46,11 +59,6 @@ class BM25Retriever:
                 for chunk in chunks:
                     self.documents.append(chunk.get_content())
                     self.corpus.append(_tokenize(chunk.get_content()))
-
-    @classmethod
-    def from_nodes(cls, nodes: List) -> "BM25Retriever":
-        """Build BM25 index from pre-chunked nodes matching vector index granularity."""
-        return cls(nodes=nodes)
 
     def retrieve(self, query: str, top_k: int = 10) -> List[NodeWithScore]:
         if not self.bm25:

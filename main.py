@@ -41,7 +41,7 @@ TOOL_METADATA = [
     {"name": "course_review_search", "label": "评课社区搜索", "description": "搜索 icourse.club 的公开课程评价和课程详情页"},
     {"name": "course_review_fetch", "label": "评课社区正文", "description": "读取 icourse.club 公开课程详情与学生点评"},
     {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
-    {"name": "get_upcoming_events", "label": "即将截止事件", "description": "按截止日期查询未来 N 天内到期的报名/选课/考试/评奖等事件"},
+    {"name": "get_upcoming_events", "label": "即将发生事件", "description": "按真实日期查询未来 N 天内截止（报名/选课/评奖）或开始（展览/施工/班车）的校园事件"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
     {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
     {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
@@ -54,7 +54,8 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 工具使用
 - 校园活动、比赛、课程、讲座、报名 → search_campus_notices
-- 用户问“最近/本周/本月有什么要截止的报名、选课、提交、答辩”等时间敏感问题 → get_upcoming_events（按真实截止日期排序，优先于语义检索）
+- 用户问“最近/本周/本月有什么要截止的报名、选课、提交、答辩”等时间敏感问题 → get_upcoming_events(kind="deadline")（按真实截止日期排序，优先于语义检索）
+- 用户问“这周有什么活动/展览/讲座”“哪天停水/停电/施工/通车”等即将发生的事 → get_upcoming_events(kind="start")（按真实开始日期排序）
 - 需要查看通知原文或对比多条信息 → search_notices_raw
 - 用户个人课表、成绩、教务信息 → search_my_data
 - 用户询问已导入的具体课表安排 → get_my_schedule
@@ -69,6 +70,7 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 重要规则
 - 用户要求写文章时直接在对话中回复
+- 本地检索工具会自动做关键词重试；若检索结果仍为空或完全无关，且问题涉及时效性信息（比赛/讲座/政策/活动），可用 web_search 兜底确认；确认无果再如实说明“未找到相关信息”，不要编造
 
 ## 回答规范
 1. 先在心里梳理检索到的信息要点，再用自己的话组织成自然的回答
@@ -126,30 +128,54 @@ def search_notices_raw(query: str) -> str:
 
 
 @tool
-def get_upcoming_events(days: int = 30, category: str = "") -> str:
-    """按截止日期查询未来 N 天内到期的校园事件（报名/选课/考试/评奖/竞赛/讲座/实习/答辩等）。
+def get_upcoming_events(days: int = 30, category: str = "", kind: str = "deadline") -> str:
+    """按日期查询未来 N 天内的校园事件（确定性时间索引，按真实日期排序）。
 
-    用户问"最近有什么要截止的""这周/这个月有哪些报名""快到期的活动"时优先用此工具，
-    而不是语义检索——它按真实日期排序，不会漏掉措辞不同但时间临近的通知。
+    kind="deadline"：即将截止的报名/选课/考试/评奖/竞赛/讲座/实习/答辩等（默认）。
+    kind="start"：即将开始的展览/施工/停水停电/班车/活动等。
+    用户问"最近有什么要截止的""这周有哪些报名"用 deadline；
+    问"这周有什么活动/展览""哪天停水/施工"用 start。
     days 为向后看的天数（默认 30）；category 可选，留空返回全部类别。
     """
     try:
         # 惰性导入并用别名：模块级名 get_upcoming_events 已被 @tool 重绑为
         # StructuredTool，直接同名调用会递归到工具自身（不可调用）。
         from campus_rag import get_upcoming_events as query_upcoming_events
+        from campus_rag import get_upcoming_starts as query_upcoming_starts
         today = datetime.now().date()
-        rows = query_upcoming_events(days=days, category=category.strip() or None, today=today)
+        if kind == "start":
+            rows = query_upcoming_starts(days=days, category=category.strip() or None, today=today)
+            when_label = "开始/进行"
+        else:
+            rows = query_upcoming_events(days=days, category=category.strip() or None, today=today)
+            when_label = "截止"
         if not rows:
             scope = f"{category.strip()}类" if category.strip() else ""
-            return f"未来 {days} 天内没有{scope}即将截止的校园事件。"
-        lines = [f"未来 {days} 天内即将截止的事件（共 {len(rows)} 条，按截止日期排序）："]
+            return f"未来 {days} 天内没有{scope}即将{when_label}的校园事件。"
+        lines = [f"未来 {days} 天内{when_label}的校园事件（共 {len(rows)} 条，按日期排序）："]
         for row in rows:
-            remaining = (date.fromisoformat(row["deadline"]) - today).days
-            when = "今天截止" if remaining == 0 else f"还剩 {remaining} 天"
             cat = f"[{row['category']}]" if row.get("category") else ""
             aud = f"（面向{row['audience']}）" if row.get("audience") else ""
-            line = f"- {cat}{row.get('title') or row['source']}{aud}：截止 {row['deadline']}（{when}）"
-            if row.get("deadline_text"):
+            loc = f"（地点：{row['location']}）" if row.get("location") else ""
+            head = f"- {cat}{row.get('title') or row['source']}{aud}{loc}："
+            if kind == "start":
+                started = bool(row.get("event_start")) and date.fromisoformat(row["event_start"]) <= today
+                if started:
+                    # 时间窗相交会把进行中的事件带出来，剩余天数按结束日算
+                    if row.get("event_end"):
+                        left = (date.fromisoformat(row["event_end"]) - today).days
+                        when_text = f"进行中，至 {row['event_end']} 结束（还剩 {left} 天）"
+                    else:
+                        when_text = f"{row['event_start']} 起进行中（未标注结束日期）"
+                else:
+                    left = (date.fromisoformat(row["event_start"]) - today).days
+                    when_text = f"{row['event_start']} 开始（还剩 {left} 天）"
+            else:
+                remaining = (date.fromisoformat(row["deadline"]) - today).days
+                left_text = "就是今天" if remaining == 0 else f"还剩 {remaining} 天"
+                when_text = f"截止 {row['deadline']}（{left_text}）"
+            line = f"{head}{when_text}"
+            if row.get("deadline_text") and kind == "deadline":
                 line += f"\n  原文：{row['deadline_text'][:80]}"
             if row.get("url"):
                 line += f"\n  来源：{row['url']}"
@@ -157,7 +183,7 @@ def get_upcoming_events(days: int = 30, category: str = "") -> str:
         return "\n".join(lines)
     except Exception as e:
         logger.error("get_upcoming_events failed: %s", e, exc_info=True)
-        return f"查询即将截止事件时出错: {e}"
+        return f"查询即将发生的校园事件时出错: {e}"
 
 
 # ── Per-user tool factories ───────────────────────────────────────

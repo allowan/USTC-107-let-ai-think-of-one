@@ -21,6 +21,9 @@ def reset_caches() -> None:
     _rag = None
     _public_retriever = None
     _user_retrievers = {}
+    # query_engine 缓存的检索器绑定具体索引对象，集合重建后必须一并失效
+    from .query_engine import reset_caches as _reset_engine_caches
+    _reset_engine_caches()
 
 
 def _ensure_init():
@@ -57,19 +60,28 @@ def _format_nodes(nodes, empty_message: str) -> str:
     return "\n\n".join(contexts)
 
 
+def _retrieve_with_fallback(retriever, query: str, empty_message: str) -> str:
+    """检索自愈：首次为空时用 jieba 关键词缩减重试一次，仍空再返回未找到。"""
+    nodes = retriever.retrieve(query)
+    if not nodes:
+        from .keyword_retriever import extract_keywords
+        retry = extract_keywords(query)
+        if retry and retry != query.strip():
+            nodes = retriever.retrieve(retry)
+    return _format_nodes(nodes, empty_message)
+
+
 def search_notices(query: str) -> str:
     """只在官方通知（公共数据）中搜索。"""
     _ensure_init()
-    return _format_nodes(_public_retriever.retrieve(query),
-                         "未在通知中找到相关信息。")
+    return _retrieve_with_fallback(_public_retriever, query, "未在通知中找到相关信息。")
 
 
 def search_user_data(query: str, user_id: str) -> str:
     """只在用户个人数据中搜索。"""
     _ensure_init()
     retriever = _get_user_retriever(user_id)
-    return _format_nodes(retriever.retrieve(query),
-                         "未在个人数据中找到相关信息。")
+    return _retrieve_with_fallback(retriever, query, "未在个人数据中找到相关信息。")
 
 
 def search_notices_answer(query: str) -> str:
@@ -90,10 +102,12 @@ def search_user_data_answer(query: str, user_id: str) -> str:
 
 def _enrich_url_metadata(documents: list) -> None:
     """为缺失源链接的公共文档补全 url 元数据（同步与本地文件共用入口）。"""
-    from .data_loader import extract_source_url
+    from .data_loader import extract_source_url, extract_source_url_from_text
     for doc in documents:
         if not doc.metadata.get("url"):
-            url = extract_source_url(doc.metadata.get("source", ""), doc.text)
+            source = doc.metadata.get("source", "")
+            # 数字 ID 前缀文件按 ID 匹配；爬虫文档（ustc_* 前缀）回退到正文"来源："行
+            url = extract_source_url(source, doc.text) or extract_source_url_from_text(doc.text)
             if url:
                 doc.metadata["url"] = url
 

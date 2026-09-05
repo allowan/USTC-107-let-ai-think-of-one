@@ -54,17 +54,40 @@ _DEADLINE_MARKERS = (
     "前提交", "之前提交", "前上报", "前报送", "前缴纳", "前上传", "前填报",
 )
 # 日期后置标记：紧跟在日期之后表示“在该日之前”（如“9月4日前”）。
+# lstrip 容忍网页正文在日期与“前”之间插入的空格。
 _AFTER_RE = re.compile(r"^(之前|以前|截止|止|前)")
-# 日期前置动词：紧邻日期之前表示该动作的时间点（如“报名9月4日”）。
+# 日期前置动词：紧邻日期之前表示该动作的时间点（如“报名9月4日”“即日起至10月20日”）。
 # 用 $ 锚定“紧邻”，避免子串误中（“水上报告”不会匹配“上报$”）。
 _BEFORE_RE = re.compile(
     r"(截止|截至|报名|申报|申请|提交|上报|报送|上传|填报|缴纳|录入|受理|"
-    r"答辩|开题|结题|评审|评选|评奖|招募|招新|扫码|扫描)$"
+    r"答辩|开题|结题|评审|评选|评奖|招募|招新|扫码|扫描|至)$"
 )
 # 子句切分：按中文句读与换行切分（保留冒号，使“截止时间为：9月8日”同子句）。
 _CLAUSE_SPLIT_RE = re.compile(r"[。，、；！？\n\r]+")
 
+# ── 事件发生型抽取（区别于截止型）─────────────────────────────
+# “何时发生”标签行：标签与日期可跨行（网页表格转文本后标签与值常分行）。
+_EVENT_LABEL_RE = re.compile(
+    r"(停水|停电|停气|封闭|施工|展览|开放|试运行|发车|恢复|开展|活动|上课|开课|通车)(时间|日期)"
+)
+# 子句级事件动词：与日期同子句时表示“何时发生”（如“自8月27日起试运行”）。
+_EVENT_VERB_RE = re.compile(r"(试运行|开幕|举行|举办|通车|开赛|开课|恢复供水|恢复通车|启用)")
+# 地点标签的两种形态：
+# (a) 带冒号同行取值（“展览地点：东区师生活动中心…”）；
+# (b) 纯标签行、值在下一非空行（“二、停电范围”后接内容行）。
+# 拆成两个正则是为了根治“地址为/地点是 xxx”这类叙述句被冒号可选误当标签。
+_LOCATION_LABELED_RE = re.compile(r"^[^：:]{0,10}(地点|地址|范围)[:：]\s*(.+)$")
+_LOCATION_BARE_RE = re.compile(r"^[^：:]{0,10}(地点|地址|范围)\s*$")
+# 标题回退：标题形如“关于教五楼北侧道路封闭施工的通知”时取事件主体作地点。
+# 不含“道路封闭”分支——它会在“道路”处抢先匹配导致 group 丢掉“道路”二字；
+# 用“封闭施工”覆盖即可（“道路封闭施工”与“道路施工”同样以“封闭施工/施工”收尾）。
+_LOCATION_TITLE_RE = re.compile(r"关于(.{2,20}?)(封闭施工|停水|停电|停气|道路施工)")
+# 地点值中的“详见附件”类占位不算真实地点。
+_LOCATION_SKIP_PREFIX = ("详见", "见下", "见附", "另行", "待定")
+
 # 类别分类：按 (类别名, 关键词) 顺序匹配，先命中先归类。
+# 业务类在前（选课/考试等），通用后勤类（交通/展览/后勤）居中，
+# “报名”的关键词（申请/招募等）过于宽泛，放最后兜底。
 _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("选课", ("选课", "退课", "补选", "重修", "置课")),
     ("考试", ("考试", "缓考", "补考", "期末", "考核")),
@@ -74,6 +97,9 @@ _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("讲座", ("讲座", "报告", "论坛", "讲堂", "宣讲")),
     ("实习", ("实习", "实践")),
     ("助教", ("助教",)),
+    ("交通", ("班车", "公交", "出行", "乘车")),
+    ("展览", ("艺术展", "作品展", "书画展", "档案展", "展览")),
+    ("后勤", ("停水", "停电", "停气", "封闭", "施工", "维修", "停运")),
     ("报名", ("报名", "申报", "申请", "招募", "招新")),
 )
 
@@ -151,7 +177,8 @@ def _clause_deadline(
         if d is None:
             continue
         start, end = m.span()
-        after = clause[end:end + 3]
+        # 网页正文常在日期与“前”之间插空格（“10 月 10 日 前反馈”），lstrip 后再判
+        after = clause[end:end + 3].lstrip()
         before = clause[max(0, start - 4):start]
         if has_marker or _AFTER_RE.match(after) or _BEFORE_RE.search(before):
             dates.append(d)
@@ -167,11 +194,87 @@ def _classify(text: str) -> str:
     return "其他"
 
 
+def _next_nonempty(lines: list[str], i: int) -> str | None:
+    """返回第 i 行之后的首个非空行（最多向下看 2 行），无则 None。"""
+    for j in range(i + 1, min(i + 3, len(lines))):
+        if lines[j].strip():
+            return lines[j]
+    return None
+
+
+def _extract_event_times(
+    body_lines: list[str], clauses: list[str],
+    ref_year: int, anchor: date, allow_bump: bool,
+) -> tuple[date | None, date | None]:
+    """抽取事件发生时间（span 或 instant），返回 (start, end)。
+
+    两条路径，标签行优先：
+    1. “XX时间/日期”标签行（停水/展览/封闭等发生型动词），日期在本行
+       或下一非空行（网页表格转文本后标签与值常跨行）；
+    2. 子句内事件动词与日期同现（“自8月27日起试运行”）。
+    单日期且紧邻“至/截止”时视为结束日（“即日起至10月20日”）。
+    只抽日粒度；月粒度区间（“2026.9-2027.1”）与新闻式时间状语先行
+    （“6月15日下午，…”）不在此覆盖，由语义检索兜底。
+    """
+    dates: list[date] = []
+    end_hint = False
+    for i, line in enumerate(body_lines):
+        if not _EVENT_LABEL_RE.search(line):
+            continue
+        content = line if _DATE_RE.search(line) else (_next_nonempty(body_lines, i) or "")
+        for m in _DATE_RE.finditer(content):
+            d = _date_from_match(m, ref_year, anchor, allow_bump)
+            if d is None:
+                continue
+            dates.append(d)
+            if _BEFORE_RE.search(content[max(0, m.start() - 4):m.start()]):
+                end_hint = True
+    if not dates:
+        for clause in clauses:
+            if not _EVENT_VERB_RE.search(clause):
+                continue
+            for m in _DATE_RE.finditer(clause):
+                d = _date_from_match(m, ref_year, anchor, allow_bump)
+                if d is not None:
+                    dates.append(d)
+    if not dates:
+        return None, None
+    if len(dates) == 1:
+        return (None, dates[0]) if end_hint else (dates[0], None)
+    return min(dates), max(dates)
+
+
+def _extract_location(body_lines: list[str], title: str) -> str | None:
+    """抽取地点：优先“XX地点/地址/范围”标签行（值同行或下一行），标题回退兜底。"""
+    for i, line in enumerate(body_lines):
+        s = line.strip()
+        labeled = _LOCATION_LABELED_RE.match(s)
+        if labeled:
+            value = labeled.group(2).strip()
+        elif _LOCATION_BARE_RE.match(s):
+            value = (_next_nonempty(body_lines, i) or "").strip()
+        else:
+            continue
+        # 切掉句末说明与分号后的并列项，只留第一段
+        value = re.split(r"[。；;]", value)[0].strip(" ，,")
+        if not (2 <= len(value) <= 60):
+            continue
+        if value.startswith(_LOCATION_SKIP_PREFIX):
+            continue
+        return value
+    if title:
+        m = _LOCATION_TITLE_RE.search(title)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
 def parse_notice(text: str, source: str = "", today: date | None = None) -> dict:
     """从单条通知正文抽取结构化事件字段（确定性，无 LLM）。
 
     返回 dict：title / category / audience / publish_date / deadline /
-    deadline_text / url，日期为 ISO 字符串或 None。
+    deadline_text / event_start / event_end / location / url，
+    日期为 ISO 字符串或 None。
     """
     today = today or date.today()
     lines = [ln for ln in (text or "").splitlines()]
@@ -246,6 +349,10 @@ def parse_notice(text: str, source: str = "", today: date | None = None) -> dict
         if future:
             deadline, deadline_text = min(future, key=lambda x: x[0])
 
+    event_start, event_end = _extract_event_times(
+        body_lines, _CLAUSE_SPLIT_RE.split(body_text), ref_year, anchor, allow_bump
+    )
+    location = _extract_location(body_lines, title)
     category = _classify(f"{title}\n{text[:300] if text else ''}")
 
     return {
@@ -255,11 +362,19 @@ def parse_notice(text: str, source: str = "", today: date | None = None) -> dict
         "publish_date": publish_date.isoformat() if publish_date else None,
         "deadline": deadline.isoformat() if deadline else None,
         "deadline_text": deadline_text,
+        "event_start": event_start.isoformat() if event_start else None,
+        "event_end": event_end.isoformat() if event_end else None,
+        "location": location,
         "url": url,
     }
 
 
 # ── SQLite 存储 ────────────────────────────────────────────────────
+
+# 抽取器版本：写入时随记录保存。升级抽取逻辑后递增此值，旧记录因版本
+# 不匹配会自动重抽（否则内容哈希未变的新字段永远不会回填）。
+EXTRACTOR_VERSION = "regex-v2"
+
 
 class EventStore:
     """通知事件的结构化存储（每条通知一行，source 为主键，天然幂等）。"""
@@ -287,21 +402,30 @@ class EventStore:
                     publish_date TEXT,
                     deadline TEXT,
                     deadline_text TEXT,
+                    event_start TEXT,
+                    event_end TEXT,
+                    location TEXT,
                     url TEXT,
-                    extracted_at TEXT NOT NULL
+                    extracted_at TEXT NOT NULL,
+                    extractor TEXT
                 )
                 """
             )
+            # 旧库迁移：v2 新增 event_start/event_end/location/extractor 四列
+            cols = {row[1] for row in db.execute("PRAGMA table_info(notice_events)")}
+            for col in ("event_start", "event_end", "location", "extractor"):
+                if col not in cols:
+                    db.execute(f"ALTER TABLE notice_events ADD COLUMN {col} TEXT")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_notice_events_deadline "
                 "ON notice_events(deadline)"
             )
 
-    def existing_hashes(self) -> dict[str, str]:
-        """返回 {source: source_hash}，用于跳过内容未变的通知，避免无谓重写。"""
+    def existing_states(self) -> dict[str, tuple[str, str]]:
+        """返回 {source: (source_hash, extractor)}，用于跳过未变化且未换抽取器的通知。"""
         with closing(self._connect()) as db, db:
-            rows = db.execute("SELECT source, source_hash FROM notice_events").fetchall()
-        return {r[0]: r[1] for r in rows}
+            rows = db.execute("SELECT source, source_hash, extractor FROM notice_events").fetchall()
+        return {r[0]: (r[1], r[2] or "") for r in rows}
 
     def upsert_events(self, events: list[dict]) -> int:
         """写入/更新事件，返回实际写入条数。source 为主键，重复即覆盖。"""
@@ -312,7 +436,9 @@ class EventStore:
             (
                 e["source"], e["source_hash"], e.get("title"), e.get("category"),
                 e.get("audience"), e.get("publish_date"), e.get("deadline"),
-                e.get("deadline_text"), e.get("url"), now,
+                e.get("deadline_text"), e.get("event_start"), e.get("event_end"),
+                e.get("location"), e.get("url"), now,
+                e.get("extractor") or EXTRACTOR_VERSION,
             )
             for e in events
         ]
@@ -321,8 +447,9 @@ class EventStore:
                 """
                 INSERT OR REPLACE INTO notice_events (
                     source, source_hash, title, category, audience,
-                    publish_date, deadline, deadline_text, url, extracted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    publish_date, deadline, deadline_text, event_start,
+                    event_end, location, url, extracted_at, extractor
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -348,7 +475,7 @@ class EventStore:
         （非用户输入），category 走参数化绑定；日期存 ISO 串，字典序即时间序。"""
         sql = (
             "SELECT source, title, category, audience, publish_date, deadline, "
-            "deadline_text, url FROM notice_events "
+            "deadline_text, event_start, event_end, location, url FROM notice_events "
             f"WHERE {date_col} IS NOT NULL AND {date_col} >= ? AND {date_col} <= ?"
         )
         params: list = [start.isoformat(), end.isoformat()]
@@ -367,6 +494,33 @@ class EventStore:
         start = today or date.today()
         end = start + timedelta(days=max(0, days))
         return self._select_window("deadline", start, end, category, "deadline ASC, source ASC")
+
+    def query_upcoming_starts(
+        self, days: int = 30, category: str | None = None, today: date | None = None
+    ) -> list[dict]:
+        """返回与 [today, today+days] 有交集的“发生型”事件，按开始日升序。
+
+        用时间窗相交而非“开始日 >= today”：展览/施工/停水这类事件跨度可达
+        数月（7月26日—10月26日），只看未来开始日会把所有“正在进行中”的
+        事件漏掉，而用户问“现在有什么展览/哪里在施工”恰恰要的就是它们。
+        事件区间为 [event_start, COALESCE(event_end, event_start)]。
+        """
+        start = today or date.today()
+        end = start + timedelta(days=max(0, days))
+        sql = (
+            "SELECT source, title, category, audience, publish_date, deadline, "
+            "deadline_text, event_start, event_end, location, url FROM notice_events "
+            "WHERE event_start IS NOT NULL AND event_start <= ? "
+            "AND COALESCE(event_end, event_start) >= ?"
+        )
+        params: list = [end.isoformat(), start.isoformat()]
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        sql += " ORDER BY event_start ASC, source ASC"
+        with closing(self._connect()) as db, db:
+            db.row_factory = sqlite3.Row
+            return [dict(r) for r in db.execute(sql, params).fetchall()]
 
     def query_recent(
         self, days: int = 30, category: str | None = None, today: date | None = None
@@ -417,9 +571,9 @@ def sync_events_from_documents(documents: list, today: date | None = None) -> in
         return 0
     store = get_event_store()
     try:
-        existing = store.existing_hashes()
+        existing = store.existing_states()
     except Exception:
-        logger.warning("读取事件哈希失败，本批全量重抽", exc_info=True)
+        logger.warning("读取事件状态失败，本批全量重抽", exc_info=True)
         existing = {}
     events: list[dict] = []
     for doc in documents:
@@ -430,7 +584,9 @@ def sync_events_from_documents(documents: list, today: date | None = None) -> in
             continue
         if event is None:
             continue
-        if existing.get(event["source"]) == event["source_hash"]:
+        # 内容哈希未变且抽取器版本一致才跳过：升级抽取逻辑（版本递增）
+        # 后旧记录会被自动重抽，新字段得以回填。
+        if existing.get(event["source"]) == (event["source_hash"], EXTRACTOR_VERSION):
             continue
         events.append(event)
     if not events:
@@ -496,8 +652,19 @@ def get_upcoming_events(
         return []
 
 
+def get_upcoming_starts(
+    days: int = 30, category: str | None = None, today: date | None = None
+) -> list[dict]:
+    """查询未来 N 天内开始发生的校园事件（展览/施工/班车等）。"""
+    try:
+        return get_event_store().query_upcoming_starts(days=days, category=category, today=today)
+    except Exception:
+        logger.warning("查询即将开始事件失败", exc_info=True)
+        return []
+
+
 def get_notice_digest(days: int = 7, today: date | None = None) -> dict:
-    """聚合“最近新通知 + 临近截止事件”两份数据（供前端今日面板/主动推送消费）。
+    """聚合“最近新通知 + 临近事件（截止/开始）”两份数据（供前端今日面板消费）。
 
     days_left / days_since 等日期差在代码里算好（以服务端本地日期为基准），
     前端与 LLM 不再做日期运算。best-effort：事件库不可用时返回空列表。
@@ -507,13 +674,33 @@ def get_notice_digest(days: int = 7, today: date | None = None) -> dict:
     recent: list[dict] = []
     try:
         store = get_event_store()
-        upcoming = store.query_upcoming(days=days, today=today)
+        deadlines = store.query_upcoming(days=days, today=today)
+        for e in deadlines:
+            e["kind"] = "deadline"
+        starts = store.query_upcoming_starts(days=days, today=today)
+        for e in starts:
+            e["kind"] = "start"
+            # 时间窗相交会把"已开始未结束"的事件一起带出来，前端需要区分
+            # "进行中"与"即将开始"，否则会显示成负数剩余天数。
+            started = bool(e.get("event_start")) and date.fromisoformat(e["event_start"]) <= today
+            e["ongoing"] = started
+        # 同一通知既在截止窗口又在开始窗口时以截止为准（罕见，防御性去重）
+        seen = {e["source"] for e in deadlines}
+        upcoming = deadlines + [e for e in starts if e["source"] not in seen]
+        upcoming.sort(key=lambda e: e.get("deadline") or e.get("event_start") or "")
         recent = store.query_recent(days=days, today=today)
     except Exception:
         logger.warning("生成通知摘要失败", exc_info=True)
     for e in upcoming:
-        if e.get("deadline"):
-            e["days_left"] = (date.fromisoformat(e["deadline"]) - today).days
+        if e.get("kind") == "deadline":
+            when = e.get("deadline")
+        elif e.get("ongoing"):
+            # 进行中：剩余天数按结束日算（无结束日则不给 days_left，由前端显示"进行中"）
+            when = e.get("event_end")
+        else:
+            when = e.get("event_start")
+        if when:
+            e["days_left"] = (date.fromisoformat(when) - today).days
     for e in recent:
         if e.get("publish_date"):
             e["days_since"] = (today - date.fromisoformat(e["publish_date"])).days

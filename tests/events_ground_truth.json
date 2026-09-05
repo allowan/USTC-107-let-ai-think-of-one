@@ -1,0 +1,148 @@
+{
+  "20161_关于2025秋开题的“大学生研究计划”项目中期检查的通知.txt": {
+    "category": "答辩",
+    "publish_date": "2026-05-29",
+    "deadline": "2026-06-12",
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "_note": "中期检查截止期；落地落款日期"
+  },
+  "20406_关于2026年秋季学期本科课程助教岗位发布及申请的通知.txt": {
+    "category": "助教",
+    "publish_date": "2026-07-13",
+    "deadline": "2026-09-04",
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "_note": "助教申请时间7月13日-9月4日，取结束日"
+  },
+  "20412_关于中国科大“一〇七杯”算力与智能体开发大赛补报名的通知.txt": {
+    "category": "竞赛",
+    "publish_date": "2026-07-14",
+    "deadline": "2026-07-20",
+    "event_start": null,
+    "event_end": null,
+    "location": null
+  },
+  "20425_2026年秋季学期本科生选课通知.txt": {
+    "category": "选课",
+    "publish_date": null,
+    "deadline": "2026-09-11",
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "_note": "选课阶段时间表跨行分散（网页表格格式），预期抽取miss；正选截止9月11日"
+  },
+  "20455_关于进一步规范2026年度本科生实习管理的通知.txt": {
+    "category": "实习",
+    "publish_date": "2026-07-22",
+    "deadline": "2026-07-23",
+    "event_start": null,
+    "event_end": null,
+    "location": null
+  },
+  "3384_2026-2027学年第一学期研究生课程助教申报通知.txt": {
+    "category": "助教",
+    "publish_date": null,
+    "deadline": null,
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "_note": "岗位时间为2026.9-2027.1（月粒度），设计外不抽；落款2026年7月无日"
+  },
+  "95379_校党委书记舒歌群院士为2026届毕业生讲授毕业思政课.txt": {
+    "category": "讲座",
+    "publish_date": null,
+    "deadline": null,
+    "event_start": "2026-06-15",
+    "event_end": null,
+    "location": "东区水上报告厅",
+    "_note": "新闻式时间状语先行（6月15日下午…讲授），预期event/location miss"
+  },
+  "ustc_service_notice_1366_25445.txt": {
+    "category": "展览",
+    "publish_date": "2026-07-23",
+    "deadline": null,
+    "event_start": "2026-07-26",
+    "event_end": "2026-10-26",
+    "location": "东区师生活动中心六楼博物馆第四展厅"
+  },
+  "ustc_service_notice_1366_25465.txt": {
+    "category": "展览",
+    "publish_date": "2026-07-27",
+    "deadline": null,
+    "event_start": null,
+    "event_end": null,
+    "location": "东区师生活动中心 6 楼博物馆 捐赠陈列室",
+    "_note": "开放时间为周循环（周二至周日9:30-17:30），非日期"
+  },
+  "ustc_service_notice_1366_25490.txt": {
+    "category": "交通",
+    "publish_date": "2026-07-28",
+    "deadline": "2026-10-10",
+    "event_start": null,
+    "event_end": "2026-10-20",
+    "location": null,
+    "_note": "活动即日起至10月20日(event_end)；信息更正截止10月10日前(deadline)"
+  },
+  "ustc_service_notice_1366_25495.txt": {
+    "category": "后勤",
+    "publish_date": "2026-07-30",
+    "deadline": null,
+    "event_start": "2026-08-01",
+    "event_end": "2026-08-25",
+    "location": "教五楼北侧道路"
+  },
+  "ustc_service_notice_1366_25525.txt": {
+    "category": "后勤",
+    "publish_date": "2026-08-03",
+    "deadline": null,
+    "event_start": "2026-08-05",
+    "event_end": "2026-08-30",
+    "location": "西校区英才路部分道路"
+  },
+  "ustc_service_notice_1366_25537.txt": {
+    "category": "后勤",
+    "publish_date": "2026-08-07",
+    "deadline": null,
+    "event_start": "2026-08-08",
+    "event_end": "2026-08-09",
+    "location": "教学行政楼、管理科学教学科研楼、教五楼、网络中心及科研楼、固态量子芯片实验室"
+  },
+  "ustc_service_notice_1366_25571.txt": {
+    "category": "其他",
+    "publish_date": "2026-08-19",
+    "deadline": null,
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "_note": "慰问信，无时间地点"
+  },
+  "ustc_service_notice_1366_25572.txt": {
+    "category": "后勤",
+    "publish_date": "2026-08-19",
+    "deadline": null,
+    "event_start": "2026-08-21",
+    "event_end": "2026-08-23",
+    "location": "同步辐射园区 5 号楼全楼、专家楼全楼"
+  },
+  "ustc_service_notice_1366_25592.txt": {
+    "category": "交通",
+    "publish_date": "2026-08-24",
+    "deadline": null,
+    "event_start": "2026-08-27",
+    "event_end": null,
+    "location": "东区乘车点：下穿通道北侧站台",
+    "_note": "班车自8月27日起试运行(instant)；乘车点多值，取第一条"
+  },
+  "ustcnet_40939_counter_service.txt": {
+    "category": "其他",
+    "publish_date": null,
+    "deadline": null,
+    "event_start": null,
+    "event_end": null,
+    "location": "东区师生活动中心北一楼",
+    "_note": "常驻服务页，多校区地址取东区主校区；周循环时间非日期"
+  }
+}

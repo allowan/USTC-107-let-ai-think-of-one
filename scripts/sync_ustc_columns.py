@@ -27,7 +27,20 @@ def main() -> int:
         "failed": 0,
     }
     for column in load_columns(args.config):
-        stats = sync_column(column, args.data_dir)
+        try:
+            stats = sync_column(column, args.data_dir)
+        except Exception as exc:
+            # 单个栏目不可达（改版、404、需要登录）不应中断整批同步，
+            # 否则一次网络抖动就会让其余栏目的语料全部抓不到。
+            stats = {
+                "discovered": 0,
+                "created": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "failed": 1,
+                "errors": [f"{column['url']}: {type(exc).__name__}: {exc}"],
+            }
         print(f"{column['name']}=" + json.dumps(stats, ensure_ascii=False, sort_keys=True))
         for key in total:
             total[key] += stats[key]

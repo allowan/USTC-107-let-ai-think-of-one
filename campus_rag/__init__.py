@@ -14,9 +14,9 @@ from .query import search_notices, search_user_data, add_user_data, add_user_fil
 from .query import search_notices_answer, search_user_data_answer
 from .query import update_user_data, add_public_documents, delete_public_data, replace_public_documents
 from .query import reset_caches
-from .auth import authenticate, register_user, list_users
 from .auth import create_topic, list_topics, delete_topic, get_topic, rename_topic
 from .auth import get_user_tool_prefs, set_user_tool_prefs
+from .auth import track_event, untrack_event, list_tracked_events
 from .query_engine import get_rag_response, rerank_nodes
 from .index_manager import RAGSystem
-from .events import get_upcoming_events, get_notice_digest, sync_notice_events
+from .events import get_upcoming_events, get_upcoming_starts, get_notice_digest, sync_notice_events

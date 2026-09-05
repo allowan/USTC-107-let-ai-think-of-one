@@ -53,15 +53,16 @@ def sync_sources(config_path: Path, data_dir: Path) -> dict[str, int]:
 
 def rebuild_public_index(data_dir: Path) -> int:
     from campus_rag.index_manager import RAGSystem
-    from campus_rag.query import _reset
+    from campus_rag.query import reset_caches
 
     rag = RAGSystem()
     try:
         rag.chroma_client.delete_collection("public")
     except Exception:
         pass
-    index = rag.create_public_index(str(data_dir))
-    _reset()
+    rag.create_public_index(str(data_dir))
+    # 集合被重建，进程内的检索器必须失效，否则仍指向旧集合
+    reset_caches()
     return rag.chroma_client.get_collection("public").count()
 
 

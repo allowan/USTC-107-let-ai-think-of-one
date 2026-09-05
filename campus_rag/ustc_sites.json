@@ -20,6 +20,21 @@
     "topics": "登录后查看个人课表、选课、成绩；公开入口与统一身份认证"
   },
   {
+    "name": "中国科大新闻网",
+    "url": "https://news.ustc.edu.cn/",
+    "topics": "学校新闻、科研进展、人物专访；通知列表常外链到本站文章"
+  },
+  {
+    "name": "超级计算中心",
+    "url": "https://scc.ustc.edu.cn/",
+    "topics": "算力平台、超算资源申请、上机与培训通知"
+  },
+  {
+    "name": "人文与社会科学学院",
+    "url": "https://hsss.ustc.edu.cn/",
+    "topics": "人文社科讲座、学术活动、学院通知"
+  },
+  {
     "name": "本科课程目录与公共查询",
     "url": "https://catalog.ustc.edu.cn/query",
     "topics": "课程目录、培养方案、执行计划、公共查询"

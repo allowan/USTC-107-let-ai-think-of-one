@@ -126,9 +126,18 @@ class ScheduleService:
             query += " AND semester = ?"
             params.append(semester)
         query += " ORDER BY semester DESC, weekday, start_section, name"
+        # 学期列表是数据集的属性，必须独立于 semester 过滤条件查询；
+        # 否则按学期过滤后下拉框只剩当前学期，前端无法切回其他学期。
         with closing(self._connect()) as db, db:
             db.row_factory = sqlite3.Row
             rows = [dict(row) for row in db.execute(query, params).fetchall()]
+            semesters = [
+                row["semester"]
+                for row in db.execute(
+                    "SELECT DISTINCT semester FROM schedule_courses WHERE username = ? ORDER BY semester DESC",
+                    (username,),
+                ).fetchall()
+            ]
         for row in rows:
             row["teachers"] = json.loads(row["teachers"])
             row["weeks"] = json.loads(row["weeks"])
@@ -137,7 +146,6 @@ class ScheduleService:
                     (row["start_section"], row["end_section"]), (None, None)
                 )
                 row["start_time"], row["end_time"] = start, end
-        semesters = list(dict.fromkeys(row["semester"] for row in rows))
         return {"semester": semester or (semesters[0] if semesters else None), "semesters": semesters, "courses": rows}
 
 

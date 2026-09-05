@@ -1,9 +1,10 @@
 # auth.py
+# 本地单用户形态：无登录、无 JWT，get_user() 恒返回 "local_user"。
+# 本模块只保留话题、工具偏好、追踪事件三张业务表的 CRUD。
 import uuid
 from datetime import datetime
 from pathlib import Path
-import bcrypt
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # 锚定项目根目录的绝对路径：相对路径 "./users.db" 依赖启动 CWD，
@@ -12,21 +13,6 @@ DATABASE_URL = f"sqlite:///{Path(__file__).resolve().parent.parent / 'users.db'}
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
-
-
-def _hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-
-def _verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
-
-
-class User(Base):
-    __tablename__ = "users"
-    username = Column(String, primary_key=True)
-    hashed_password = Column(String)
-    is_admin = Column(Boolean, default=False)
 
 
 class Topic(Base):
@@ -44,56 +30,20 @@ class UserToolPref(Base):
     enabled = Column(Boolean, nullable=False, default=True)
 
 
+class TrackedEvent(Base):
+    """用户主动追踪的校园事件（今日面板顶部固定展示，便于到期提醒）。"""
+    __tablename__ = "tracked_events"
+    username = Column(String, primary_key=True)
+    source = Column(String, primary_key=True)
+    title = Column(String)
+    category = Column(String)
+    date_kind = Column(String)   # 'deadline' | 'start'
+    date_value = Column(String)  # ISO 日期
+    url = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 Base.metadata.create_all(bind=engine)
-
-
-def create_default_admin():
-    db = SessionLocal()
-    if not db.query(User).filter_by(username="admin").first():
-        db.add(User(
-            username="admin",
-            hashed_password=_hash_password("admin123"),
-            is_admin=True,
-        ))
-        db.commit()
-    db.close()
-
-
-create_default_admin()
-
-
-def authenticate(username: str, password: str) -> tuple:
-    """返回 (是否成功, 是否为管理员)"""
-    db = SessionLocal()
-    user = db.query(User).filter_by(username=username).first()
-    db.close()
-    if not user:
-        return False, False
-    if _verify_password(password, user.hashed_password):
-        return True, user.is_admin
-    return False, False
-
-
-def register_user(username: str, password: str, is_admin: bool = False) -> bool:
-    db = SessionLocal()
-    if db.query(User).filter_by(username=username).first():
-        db.close()
-        return False
-    db.add(User(
-        username=username,
-        hashed_password=_hash_password(password),
-        is_admin=is_admin,
-    ))
-    db.commit()
-    db.close()
-    return True
-
-
-def list_users() -> list:
-    db = SessionLocal()
-    users = db.query(User).all()
-    db.close()
-    return [(u.username, u.is_admin) for u in users]
 
 
 # ── Topic CRUD ────────────────────────────────────────────────
@@ -173,3 +123,71 @@ def set_user_tool_prefs(username: str, prefs: dict[str, bool]) -> None:
         db.add(UserToolPref(username=username, tool_name=tool_name, enabled=bool(enabled)))
     db.commit()
     db.close()
+
+
+# ── TrackedEvent CRUD（今日面板用）───────────────────────────────────
+
+def track_event(
+    username: str, source: str, title: str | None, category: str | None,
+    date_kind: str, date_value: str | None, url: str | None,
+) -> dict:
+    """标记某条校园事件为用户追踪（重复标记即更新，幂等）。"""
+    db = SessionLocal()
+    existing = db.query(TrackedEvent).filter_by(
+        username=username, source=source
+    ).first()
+    if existing is None:
+        existing = TrackedEvent(
+            username=username, source=source, title=title, category=category,
+            date_kind=date_kind, date_value=date_value, url=url,
+        )
+        db.add(existing)
+    else:
+        existing.title = title
+        existing.category = category
+        existing.date_kind = date_kind
+        existing.date_value = date_value
+        existing.url = url
+    db.commit()
+    db.refresh(existing)
+    result = {
+        "source": existing.source, "title": existing.title,
+        "category": existing.category, "date_kind": existing.date_kind,
+        "date_value": existing.date_value, "url": existing.url,
+        "created_at": existing.created_at.isoformat() if existing.created_at else None,
+    }
+    db.close()
+    return result
+
+
+def untrack_event(username: str, source: str) -> bool:
+    """取消追踪某事件，返回是否确实删除了一条。"""
+    db = SessionLocal()
+    row = db.query(TrackedEvent).filter_by(
+        username=username, source=source
+    ).first()
+    if row is None:
+        db.close()
+        return False
+    db.delete(row)
+    db.commit()
+    db.close()
+    return True
+
+
+def list_tracked_events(username: str) -> list[dict]:
+    """列出用户追踪的全部事件（按创建时间倒序）。"""
+    db = SessionLocal()
+    rows = db.query(TrackedEvent).filter_by(username=username).order_by(
+        TrackedEvent.created_at.desc()
+    ).all()
+    result = [
+        {
+            "source": r.source, "title": r.title, "category": r.category,
+            "date_kind": r.date_kind, "date_value": r.date_value, "url": r.url,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+    db.close()
+    return result

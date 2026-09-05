@@ -19,7 +19,7 @@
 |---|---|
 | `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
 | `auth_service.py` | 话题 CRUD（委托 `campus_rag.auth`） |
-| `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`）；`get_digest()` 聚合“最近新通知 + 临近截止”（委托 `campus_rag.get_notice_digest`，基于 `events.db` 时间索引） |
+| `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`）；`get_digest()` 聚合“最近新通知 + 临近/进行中事件”（委托 `campus_rag.get_notice_digest`，基于 `events.db` 时间索引） |
 | `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
@@ -46,7 +46,10 @@
 | POST | `/api/schedule/import-ustc` | 解析用户粘贴/导出的教务课表 HTML/JSON 并替换该学期（仅限本地来源） |
 | GET | `/api/search/notices?q=` | 搜索公共通知（纯检索，不经 LLM） |
 | GET | `/api/search/my-data?q=` | 搜索个人数据（纯检索，不经 LLM） |
-| GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止事件（基于 `events.db`，不依赖嵌入/LLM；days 0–365） |
+| GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止/进行中与即将开始事件（基于 `events.db`，不依赖嵌入/LLM；days 0–365） |
+| GET | `/api/digest/tracked` | 列出用户追踪的事件（今日面板顶部固定展示） |
+| POST | `/api/digest/tracked` | 追踪一条事件（body：`source` 必填 + `title/category/date_kind(deadline|start)/date_value/url`） |
+| DELETE | `/api/digest/tracked/{source}` | 取消追踪（未追踪返回 404） |
 | GET | `/api/settings` | 获取 LLM 配置 |
 | PUT | `/api/settings` | 更新 API Key / Base URL（忽略空值，原子写回） |
 | POST | `/api/settings/model` | 按分组切换模型 |
@@ -65,6 +68,8 @@
 - **SSE 损坏自愈**：检测到 checkpoint 损坏（tool_calls 与 tool messages 不匹配）时自动删除该 thread 并重试一次。
 - **设置变更失效链**：更新配置/切换模型 → `clear_agent_cache()`（含默认 agent）；更新工具开关 → 仅失效该用户 agent。
 - **课表写入口仅限本地来源**：`/api/schedule/import*` 与 `/api/personal-data/import-schedule` 统一经 `ensure_local_origin` 校验 Origin（无 Origin 或 localhost/127.0.0.1 才放行）。
+- **追踪事件存 `users.db`**：`tracked_events` 表（username+source 主键，重复追踪即更新），CRUD 在 `campus_rag/auth.py`，与话题/工具偏好同库。
+- **事件窗口语义**：`get_notice_digest` 的 upcoming 合并两类——`deadline` 型（`event_start <= end 且 deadline >= today`）与 `start` 型（时间窗相交：`event_start <= window_end 且 COALESCE(event_end, event_start) >= today`）。后者会把“已开始未结束”的展览/施工带出来并标记 `ongoing=true`，前端据此显示“进行中”而非负数剩余天数。
 - **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（春季≈2-6 月、夏季≈7-8 月、秋季≈9 月-次年1月）；`get_my_schedule` 工具不指定学期时按 `current_semester()` 确定性推断，未导入当前学期时明确报告已导入学期列表，不返回其他学期课表。
 
 ## 测试

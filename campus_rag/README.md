@@ -47,30 +47,45 @@ delete_user_data("local_user", "课表.txt")
 from campus_rag import RAGSystem, get_rag_response, rerank_nodes
 
 rag = RAGSystem()
-pub_idx, user_idx = rag.get_combined_query_engine("local_user")
-answer = get_rag_response("暑假有什么活动？", pub_idx, user_idx)
+pub_idx = rag.get_public_index()
+answer = get_rag_response("暑假有什么活动？", public_index=pub_idx, data_dir="campus_rag/data")
 nodes = rerank_nodes("查询文本", nodes, top_n=10)
 ```
 
-### 事件时间索引（截止日查询）
+### 事件时间索引（截止日/发生时间查询）
 
-把通知里的截止时间抽取成结构化记录，使“未来 N 天内截止的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
+把通知里的关键字段抽取成结构化记录，使“未来 N 天内截止/发生的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
 
 ```python
-from campus_rag import get_upcoming_events, sync_notice_events
+from campus_rag import get_upcoming_events, get_upcoming_starts, sync_notice_events
 
 # 未来 30 天内截止的全部事件，按截止日升序
 get_upcoming_events(days=30)
-# 只看某类（选课/报名/考试/评奖/竞赛/讲座/实习/答辩/助教/其他）
+# 只看某类（选课/考试/答辩/评奖/竞赛/讲座/实习/助教/交通/展览/后勤/报名/其他）
 get_upcoming_events(days=7, category="报名")
+# 与 [today, today+days] 有交集的“发生型”事件（展览/施工/停水停电/班车等）：
+# 时间窗相交语义，进行中（已开始未结束）的事件同样返回
+get_upcoming_starts(days=30)
 # 显式同步种子语料（启动时由 server/lifespan.py 自动调用；纯regex，不需嵌入）
 sync_notice_events()
-# 聚合“最近新通知 + 临近截止”为一份 dict（供前端今日面板/主动推送消费）
-#   返回 {generated_on, days, upcoming:[{…,days_left}], recent:[{…,days_since}]}
+# 聚合“最近新通知 + 临近/进行中事件”为一份 dict（供前端今日面板消费）
+#   返回 {generated_on, days, upcoming:[{…,kind,ongoing,days_left}], recent:[{…,days_since}]}
 get_notice_digest(days=7)
 ```
 
-返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / url`。事件同步已挂入 `add_public_documents` / `replace_public_documents` / `delete_public_data`、RAG 初始化（`_ensure_init`）与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，`get_upcoming_events` 仍可用。无法解析的相对表述（如“开学三周内”）`deadline` 记为 `None`，该通知仍可被语义检索到。
+返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `replace_public_documents` / `delete_public_data`、RAG 初始化（`_ensure_init`）与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
+
+抽取边界（评测可见 `scripts/eval_events.py`）：只抽日粒度；月粒度区间（“2026.9-2027.1”）、新闻式时间状语先行（“6月15日下午，…”）、网页表格转文本的跨行时间表（如选课阶段表）不在覆盖范围，由语义检索兜底。
+
+### 追踪事件（今日面板用）
+
+```python
+from campus_rag import track_event, untrack_event, list_tracked_events
+
+track_event("local_user", "20425_xxx.txt", "秋季选课", "选课", "deadline", "2026-09-11", url)
+untrack_event("local_user", "20425_xxx.txt")
+list_tracked_events("local_user")
+```
 
 ## 模块构成
 
@@ -78,14 +93,14 @@ get_notice_digest(days=7)
 |---|---|
 | `config.py` | LlamaIndex 全局设置（分块参数）；`init_llm/init_embed` + `require_llm/require_embed_model` fail-fast 守卫，禁止静默降级到 Mock |
 | `llm_factory.py` | `get_llm()` / `get_embed_model()` 工厂，支持 openai / ollama 后端 |
-| `data_loader.py` | `.txt` 加载、SentenceSplitter 分块（打 `chunk_index` 序号）、按通知 ID 提取源网址 |
+| `data_loader.py` | `.txt` 加载、SentenceSplitter 分块（打 `chunk_index` 序号）、源网址提取（数字 ID 前缀文件按 ID 匹配；爬虫文档回退到正文"来源："行） |
 | `index_manager.py` | `RAGSystem`：ChromaDB 集合管理、维度守卫与自愈、MD5 去重 |
 | `keyword_retriever.py` | `BM25Retriever`：rank_bm25 + jieba 分词（jieba 缺失时正则回退） |
-| `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口 |
-| `query_engine.py` | RAG 管线：向量检索 → BM25 预过滤加权 → 重排序 → LLM 生成 |
-| `events.py` | 通知事件时间索引：确定性正则抽取截止日/发布日/类别，存入 `events.db`，供 `get_upcoming_events` 按时间查询（不依赖 LLM，离线可用） |
-| `auth.py` | 话题 CRUD + 工具偏好 CRUD（SQLite，锚定项目根 `users.db`）；另含遗留的登录函数（`authenticate` / `register_user` / `list_users`），本地单用户形态下无路由调用 |
-| `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建） |
+| `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口；空结果时 jieba 关键词缩减重试一次（检索自愈）；`reset_caches` 同时失效 query_engine 的检索器/BM25 缓存 |
+| `query_engine.py` | RAG 管线：向量检索 → 空召回关键词重试 → BM25 预过滤加权 → 重排序 → LLM 生成 |
+| `events.py` | 通知事件时间索引：确定性正则抽取截止日/发生时间（span·instant）/发布日/类别/适用对象/地点，存入 `events.db`（抽取器版本 `EXTRACTOR_VERSION` 控制旧记录自动重抽），供 `get_upcoming_events` / `get_upcoming_starts` 按时间查询（不依赖 LLM，离线可用） |
+| `auth.py` | 话题 / 工具偏好 / 追踪事件 CRUD（SQLite，锚定项目根 `users.db`）。本地单用户形态，无登录函数 |
+| `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建）。统一格式：文件名 `{通知ID}_{标题}.txt`，文档头三行 `来源：<URL>` / `标题：<标题>` / 空行，之后为正文。主体由 `scripts/sync_ustc_columns.py` 采集（主站服务类通知、教务处教学/信息通知、研究生院通知、网络信息中心公告等，约 330 篇），不入 git（`.gitignore` 白名单只放行 7 个手写种子），换机后重跑脚本 + `--reindex` 即可恢复 |
 
 ## 检索管线
 
@@ -135,6 +150,11 @@ ChromaDB（项目根 chroma_db/）
 
 ```bash
 pytest tests/test_campus_rag.py -v
+
+# 事件抽取质量评测（零第三方依赖，仅标准库）：
+# 对比 campus_rag/data 真值（tests/events_ground_truth.json）与 parse_notice 输出，
+# 输出逐字段 P/R 与偏差明细；调整 events.py 抽取正则后重跑验证。
+python scripts/eval_events.py
 
 # 快速冒烟（需嵌入/LLM API 可达）
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
