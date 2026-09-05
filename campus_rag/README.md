@@ -15,7 +15,7 @@ search_notices("暑假有什么活动？")
 search_user_data("我的课表", user_id="local_user")
 ```
 
-### LLM 总结检索（向量检索 + 重排序 + LLM 生成）
+### LLM 总结检索（混合检索 + 重排序 + LLM 生成）
 
 ```python
 from campus_rag import search_notices_answer, search_user_data_answer
@@ -43,7 +43,7 @@ delete_user_data("local_user", "课表.txt")
 
 写入先完成新分块的嵌入与持久化，再删除被替换的旧 ID；新增写入失败会尝试清理本次新增 ID；移除旧 ID 失败时保留已写入的新内容供重试，异常继续上抛。公共全量同步沿用现有集合，空快照保持为空。该顺序保障嵌入/新增写入失败时旧数据仍在，但不是跨 ChromaDB 与事件库的事务：进程在写新与删旧之间崩溃可能暂留重复块，需重试同步。进程内写操作串行化，查询仍可并行。
 
-个人数据操作不再初始化公共通知索引。公共检索器失效后按需重建，回答查询复用索引对象；高级查询检索器缓存有容量上限。
+个人数据操作不再初始化公共通知索引。纯检索与回答查询复用索引对象及同一套检索器缓存；向量与关键词缓存均有容量上限。
 
 ### 高级查询引擎
 
@@ -101,7 +101,7 @@ list_tracked_events("local_user")
 | `index_manager.py` | `RAGSystem`：ChromaDB 集合管理、维度守卫、安全替换、MD5 去重 |
 | `keyword_retriever.py` | `BM25Retriever`：rank_bm25 + jieba 分词（jieba 缺失时正则回退） |
 | `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口；空结果时 jieba 关键词缩减重试一次（检索自愈）；`reset_caches` 同时失效 query_engine 的检索器/BM25 缓存 |
-| `query_engine.py` | RAG 管线：向量检索 → 空召回关键词重试 → BM25 预过滤加权 → 重排序 → LLM 生成 |
+| `query_engine.py` | RAG 管线：向量检索 → 空召回关键词重试 → BM25 候选并集排名融合 → 重排序 → LLM 生成 |
 | `events.py` | 通知事件时间索引：确定性正则抽取截止日/发生时间（span·instant）/发布日/类别/适用对象/地点，存入 `events.db`（抽取器版本 `EXTRACTOR_VERSION` 控制旧记录自动重抽），供 `get_upcoming_events` / `get_upcoming_starts` 按时间查询（不依赖 LLM，离线可用） |
 | `auth.py` | 话题 / 工具偏好 / 追踪事件 CRUD（SQLite，锚定项目根 `users.db`）。本地单用户形态，无登录函数 |
 | `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建）。统一格式：文件名 `{通知ID}_{标题}.txt`，文档头三行 `来源：<URL>` / `标题：<标题>` / 空行，之后为正文（段间无空行，正文只含通知内容，无站点导航/页脚噪声）。主体由 `scripts/sync_ustc_columns.py` 采集（主站服务类通知、教务处教学/信息通知、研究生院通知、网络信息中心公告等）。当前共 323 篇：7 个为 git 跟踪的手写种子，其余为未跟踪文件（数据未加忽略规则，提交时自行 `git add campus_rag/data/`）。改动数据源后需重跑 `--reindex` 重建公共索引；`events.db` 会在启动时自动重抽 |
@@ -113,10 +113,10 @@ list_tracked_events("local_user")
 ```
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
-  ├── BM25 关键词检索（对向量结果预过滤，命中节点加权；仅公共通知检索启用）
-  ├── 合并去重
-  ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点；不可用时降级为原始分数排序)
-  └── LLM 生成回答（携带来源文件名 + 源链接）
+  ├── BM25 关键词检索（读取对应公共/个人集合的当前分块）
+  ├── RRF 排名融合（保留不同来源）
+  ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点；不可用时保留融合排名，60 秒后重试)
+  └── 返回带来源的片段；仅 *_answer 接口继续调用 LLM 生成回答
 ```
 
 ## 数据隔离模型
@@ -176,10 +176,14 @@ python -c "from campus_rag import search_notices_answer; print(search_notices_an
 
 嵌入或 LLM 不可用时，依赖网络的用例会自动跳过（不视为失败）。
 
-## 后续检索优化方案（待确认）
+## 统一检索管线
 
-当前 Agent 默认的总结检索工具会额外调用一次 LLM；BM25 预过滤仅在去重后候选超过 10 条时执行，默认单索引 top_k=10 的路径不会进入该分支。这里尚未调整召回/生成策略，避免把恢复正确性与回答质量变化混在一起。
+已确认的实现约定：Agent 检索工具只返回带来源的片段，由 Agent 生成最终回答；保留 `*_answer` 接口供独立调用。公共与个人检索共用向量召回、BM25 排名融合及可选重排序。
 
-建议下一阶段复用一套纯检索与重排序管线，由 Agent 统一生成最终回答，保留 `*_answer` 兼容接口；再让 BM25 与向量检索从同一份当前通知集合召回候选，使用排名融合而非相交过滤。验证应比较召回率、来源准确性、LLM 调用次数及首字/总耗时，不能只按少一次调用推断最终质量和实际提速幅度。
+BM25 从当前 ChromaDB 集合读取分块，保留节点身份、来源和链接。写入前后均使关键词缓存失效（包括失败路径）；缓存最多保留 64 个索引。跨进程修改需重置缓存或重启；与写入重叠的请求不保证事务快照。
 
-本轮故障与并发回归在 `tests/test_integrity_regressions.py`：真实内存 ChromaDB 配合离线嵌入替身，覆盖部分写入失败、删除提交后报错、重试、空快照、检索器重建与缓存容量。进程崩溃时跨存储的一致性、BM25 同步语料一致性仍需下一阶段处理。
+两路候选取并集，按 `sum(1 / (60 + rank))` 融合，rank 从 1 开始，避免直接比较不同尺度的分数。算法参考 [Elastic RRF 文档](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion)。空查询和无关键词匹配不会产生 BM25 噪声结果。
+
+验证关注来源保留、删除/等量替换后的缓存一致性、失败降级以及工具内部 LLM 调用次数；实际首字时间、总耗时及端到端质量需要在线模型评测。
+
+本轮对抗性回归位于 `tests/test_integrity_regressions.py`，新增代码集中在共享召回、缓存失效和重排序响应校验，以及对应的故障测试；未增加新模块。关键词缓存首次构建需要读取并分词整个集合，后续查询复用；大语料的内存与冷启动耗时仍需专项测量。纯搜索现在也可能调用已配置的重排序服务，其耗时不能等同于纯本地检索。

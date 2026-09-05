@@ -3,7 +3,6 @@ import threading
 from pathlib import Path
 
 from llama_index.core import Document, VectorStoreIndex
-from llama_index.core.retrievers import VectorIndexRetriever
 
 _base = Path(__file__).resolve().parent
 
@@ -14,22 +13,18 @@ from .index_manager import RAGSystem
 logger = logging.getLogger("campus_rag.query")
 
 _rag = None
-_public_retriever = None
 _public_index = None
 _user_indexes: dict[str, VectorStoreIndex] = {}
-_user_retrievers: dict[str, VectorIndexRetriever] = {}
 _init_lock = threading.RLock()
 
 
 def reset_caches() -> None:
     """重置所有缓存状态，下次调用时自动重建。"""
-    global _rag, _public_retriever, _public_index
+    global _rag, _public_index
     with _init_lock:
         _rag = None
         _public_index = None
-        _public_retriever = None
         _user_indexes.clear()
-        _user_retrievers.clear()
         from .query_engine import reset_caches as _reset_engine_caches
         _reset_engine_caches()
 
@@ -44,13 +39,11 @@ def _get_rag() -> RAGSystem:
 
 def _ensure_init() -> bool:
     """确保 RAG 已初始化。ChromaDB 恢复由 get_or_create_public_index 内部处理。"""
-    global _public_retriever, _public_index
+    global _public_index
     with _init_lock:
         rag = _get_rag()
         if _public_index is None:
             _public_index = rag.get_or_create_public_index(str(_base / "data"))
-        if _public_retriever is None:
-            _public_retriever = _public_index.as_retriever(similarity_top_k=10)
     return True
 
 
@@ -59,13 +52,6 @@ def _get_user_index(user_id: str) -> VectorStoreIndex:
         if user_id not in _user_indexes:
             _user_indexes[user_id] = _get_rag().get_or_create_user_index(user_id)
         return _user_indexes[user_id]
-
-
-def _get_user_retriever(user_id: str) -> VectorIndexRetriever:
-    with _init_lock:
-        if user_id not in _user_retrievers:
-            _user_retrievers[user_id] = _get_user_index(user_id).as_retriever(similarity_top_k=10)
-        return _user_retrievers[user_id]
 
 
 def _format_nodes(nodes, empty_message: str) -> str:
@@ -81,29 +67,19 @@ def _format_nodes(nodes, empty_message: str) -> str:
     return "\n\n".join(contexts)
 
 
-def _retrieve_with_fallback(retriever, query: str, empty_message: str) -> str:
-    """检索自愈：首次为空时用 jieba 关键词缩减重试一次，仍空再返回未找到。"""
-    nodes = retriever.retrieve(query)
-    if not nodes:
-        from .keyword_retriever import extract_keywords
-        retry = extract_keywords(query)
-        if retry and retry != query.strip():
-            nodes = retriever.retrieve(retry)
-    return _format_nodes(nodes, empty_message)
-
-
 def search_notices(query: str) -> str:
-    """只在官方通知（公共数据）中搜索。"""
+    """混合检索公共通知片段，不调用生成模型。"""
+    from .query_engine import retrieve_nodes
     with _init_lock:
         _ensure_init()
-        retriever = _public_retriever
-    return _retrieve_with_fallback(retriever, query, "未在通知中找到相关信息。")
+        index = _public_index
+    return _format_nodes(retrieve_nodes(query, public_index=index), "未在通知中找到相关信息。")
 
 
 def search_user_data(query: str, user_id: str) -> str:
-    """只在用户个人数据中搜索。"""
-    retriever = _get_user_retriever(user_id)
-    return _retrieve_with_fallback(retriever, query, "未在个人数据中找到相关信息。")
+    """混合检索用户私有片段，不调用生成模型。"""
+    from .query_engine import retrieve_nodes
+    return _format_nodes(retrieve_nodes(query, user_index=_get_user_index(user_id)), "未在个人数据中找到相关信息。")
 
 
 def search_notices_answer(query: str) -> str:
@@ -139,8 +115,6 @@ def add_public_documents(documents: list) -> None:
     _enrich_url_metadata(documents)
     _ensure_init()
     _rag.add_documents_to_public(documents)
-    global _public_retriever
-    _public_retriever = None
     # 同步新通知的事件时间索引（best-effort，内部吞异常）。
     events.sync_events_from_documents(documents)
 
@@ -155,8 +129,6 @@ def upsert_public_documents(documents: list) -> None:
 def delete_public_data(source: str) -> int:
     """按来源删除公共集合中的文档块，返回删除数量（同步服务增量更新用）。"""
     count = _get_rag().delete_public_documents_by_source(source)
-    global _public_retriever
-    _public_retriever = None
     # 通知被删除时同步移除其事件，避免时间索引残留已下线通知。
     events.delete_events_by_source(source)
     return count
@@ -189,7 +161,6 @@ def update_user_data(user_id: str, source: str, content: str) -> None:
 def add_user_data(user_id: str, documents: list) -> None:
     """向用户个人索引添加文档（llama_index Document 列表）。"""
     _get_rag().add_user_documents(user_id, documents)
-    _user_retrievers.pop(user_id, None)
 
 
 def add_user_files(user_id: str, path: str):
@@ -223,5 +194,4 @@ def list_user_data(user_id: str) -> dict:
 def delete_user_data(user_id: str, source: str) -> int:
     """删除用户个人知识库中指定来源的所有文档块。"""
     count = _get_rag().delete_user_documents_by_source(user_id, source)
-    _user_retrievers.pop(user_id, None)
     return count

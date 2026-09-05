@@ -3,6 +3,8 @@ import hashlib
 import logging
 import os
 import threading
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 import chromadb
 from chromadb.errors import NotFoundError
@@ -17,6 +19,18 @@ _chroma_client = None
 _chroma_client_path: str | None = None
 _lock = threading.Lock()
 _write_lock = threading.RLock()
+
+
+@contextmanager
+def _index_write() -> Iterator[None]:
+    from .query_engine import invalidate_keyword_cache
+    with _write_lock:
+        invalidate_keyword_cache()
+        try:
+            yield
+        finally:
+            invalidate_keyword_cache()
+
 
 _embed_dim_cache: int | None = None
 
@@ -108,25 +122,28 @@ class RAGSystem:
         self.chroma_client = _get_chroma_client(persist_dir or _DEFAULT_PERSIST_DIR)
 
     # ── 公共数据（官方通知）──────────────────────────────────────
-    def create_public_index(self, data_dir=_DEFAULT_DATA_DIR):
-        collection = self.chroma_client.get_or_create_collection("public")
-        assert_collection_dim(collection)
-        vector_store = ChromaVectorStore(chroma_collection=collection)
-        docs = load_documents_from_files(data_dir)
-        nodes = split_documents(docs)
-        index = VectorStoreIndex.from_vector_store(vector_store)
-        index.insert_nodes(nodes)
-        return index
+    def create_public_index(self, data_dir: str = _DEFAULT_DATA_DIR) -> VectorStoreIndex:
+        """从本地种子向公共集合插入分块。"""
+        with _index_write():
+            collection = self.chroma_client.get_or_create_collection("public")
+            assert_collection_dim(collection)
+            vector_store = ChromaVectorStore(chroma_collection=collection)
+            docs = load_documents_from_files(data_dir)
+            nodes = split_documents(docs)
+            index = VectorStoreIndex.from_vector_store(vector_store)
+            index.insert_nodes(nodes)
+            return index
 
     def create_public_index_via_docs(self, documents: list) -> VectorStoreIndex:
         """从 Document 列表创建公共索引（用于全量同步）。"""
-        collection = self.chroma_client.get_or_create_collection("public")
-        assert_collection_dim(collection)
-        vector_store = ChromaVectorStore(chroma_collection=collection)
-        nodes = split_documents(documents)
-        index = VectorStoreIndex.from_vector_store(vector_store)
-        index.insert_nodes(nodes)
-        return index
+        with _index_write():
+            collection = self.chroma_client.get_or_create_collection("public")
+            assert_collection_dim(collection)
+            vector_store = ChromaVectorStore(chroma_collection=collection)
+            nodes = split_documents(documents)
+            index = VectorStoreIndex.from_vector_store(vector_store)
+            index.insert_nodes(nodes)
+            return index
 
     def replace_documents(
         self, collection_name: str, documents: list, *, replace_all: bool = False,
@@ -137,7 +154,7 @@ class RAGSystem:
             raise ValueError("替换文档必须提供非空 source")
         if not documents and not replace_all:
             return
-        with _write_lock:
+        with _index_write():
             collection = self.chroma_client.get_or_create_collection(collection_name)
             assert_collection_dim(collection)
             selection = {} if replace_all else {"where": {"source": {"$in": sorted(sources)}}}
@@ -172,7 +189,7 @@ class RAGSystem:
         try:
             collection = self.chroma_client.get_collection("public")
         except NotFoundError:
-            with _write_lock:
+            with _index_write():
                 # 另一个调用方可能已在等待期间建好集合。
                 try:
                     collection = self.chroma_client.get_collection("public")
@@ -188,7 +205,7 @@ class RAGSystem:
 
     def add_documents_to_public(self, documents: list) -> None:
         """增量添加文档到公共集合（仅管理员），自动跳过重复内容。"""
-        with _write_lock:
+        with _index_write():
             collection = self.chroma_client.get_or_create_collection("public")
             assert_collection_dim(collection)
             existing_hashes = self._get_existing_hashes("public")
@@ -200,26 +217,23 @@ class RAGSystem:
                 index.insert_nodes(new_nodes)
 
     # ── 用户私有数据 ────────────────────────────────────────────
-    def get_or_create_user_index(self, user_id: str, data_dir: str = None):
+    def get_or_create_user_index(self, user_id: str, data_dir: str | None = None) -> VectorStoreIndex:
+        """读取个人集合，仅缺失或空集合的显式种子导入执行写入。"""
         coll_name = _user_collection_name(user_id)
         try:
             collection = self.chroma_client.get_collection(coll_name)
-        except Exception:
+        except NotFoundError:
             collection = None
-        if collection is not None and collection.count() > 0:
-            # 个人数据无法自动重建：维度不匹配时显式报错，而不是静默忽略
+        if collection is not None and (collection.count() > 0 or not data_dir):
             assert_collection_dim(collection)
-            vector_store = ChromaVectorStore(chroma_collection=collection)
-            return VectorStoreIndex.from_vector_store(vector_store)
-
-        collection = self.chroma_client.get_or_create_collection(coll_name)
-        vector_store = ChromaVectorStore(chroma_collection=collection)
-        if data_dir and os.path.isdir(data_dir):
-            docs = load_documents_from_files(data_dir)
-            if docs:
-                nodes = split_documents(docs)
-                return VectorStoreIndex(nodes, vector_store=vector_store)
-        return VectorStoreIndex.from_vector_store(vector_store)
+            return VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
+        with _index_write():
+            collection = self.chroma_client.get_or_create_collection(coll_name)
+            assert_collection_dim(collection)
+            index = VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
+            if collection.count() == 0 and data_dir and os.path.isdir(data_dir):
+                index.insert_nodes(split_documents(load_documents_from_files(data_dir)))
+            return index
 
     def get_user_index(self, user_id: str):
         """获取用户个人索引（集合需已存在）。"""
@@ -231,7 +245,7 @@ class RAGSystem:
 
     def add_user_documents(self, user_id: str, documents: list) -> VectorStoreIndex:
         """向用户的私有索引中追加文档，自动跳过重复内容。"""
-        with _write_lock:
+        with _index_write():
             coll_name = _user_collection_name(user_id)
             collection = self.chroma_client.get_or_create_collection(coll_name)
             assert_collection_dim(collection)
@@ -245,14 +259,9 @@ class RAGSystem:
                 return index
             return VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
 
-    def clear_user_index(self, user_id: str):
-        """删除用户全部私有数据。"""
-        coll_name = _user_collection_name(user_id)
-        try:
-            self.chroma_client.delete_collection(coll_name)
-        except Exception as e:
-            # 集合不存在是正常路径（debug），其他异常必须留痕而非静默吞掉
-            logger.debug("clear_user_index(%s) 跳过: %s", user_id, e)
+    def clear_user_index(self, user_id: str) -> None:
+        """清空用户分块，保留集合身份供已缓存索引继续使用。"""
+        self.replace_documents(_user_collection_name(user_id), [], replace_all=True)
 
     def list_user_documents(self, user_id: str) -> dict:
         """列出用户私有集合中的所有文档，返回 {ids, metadatas, documents, previews}。"""
@@ -270,7 +279,7 @@ class RAGSystem:
 
     def delete_user_documents_by_source(self, user_id: str, source: str) -> int:
         """删除用户私有集合中指定来源的所有文档块，返回删除数量。"""
-        with _write_lock:
+        with _index_write():
             try:
                 collection = self.chroma_client.get_collection(_user_collection_name(user_id))
                 result = collection.get(where={"source": source}, include=[])
@@ -288,7 +297,7 @@ class RAGSystem:
 
     def delete_public_documents_by_source(self, source: str) -> int:
         """删除指定来源（文件名）的所有文档块，返回删除数量。"""
-        with _write_lock:
+        with _index_write():
             try:
                 collection = self.chroma_client.get_collection("public")
                 result = collection.get(where={"source": source}, include=[])

@@ -142,21 +142,20 @@ def test_delete_failure_is_not_reported_as_missing(monkeypatch: pytest.MonkeyPat
         instance.delete_public_documents_by_source("a")
 
 
-def test_query_rebuilds_invalidated_retriever(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_queries_share_pipeline_and_cached_index(monkeypatch: pytest.MonkeyPatch) -> None:
     retriever = Mock()
     retriever.retrieve.return_value = [NodeWithScore(node=TextNode(text="结果", metadata={"source": "a"}))]
     index = Mock()
-    index.as_retriever.return_value = retriever
+    monkeypatch.setattr(query_engine, "retrieve_nodes", lambda *args, **kwargs: retriever.retrieve(args[0]))
     fake_rag = Mock()
     fake_rag.get_or_create_public_index.return_value = index
     monkeypatch.setattr(query, "_rag", fake_rag)
     monkeypatch.setattr(query, "_public_index", None)
-    monkeypatch.setattr(query, "_public_retriever", None)
     monkeypatch.setattr(query.events, "sync_events_from_documents", Mock())
     assert "结果" in query.search_notices("查询")
     query.add_public_documents([])
     assert "结果" in query.search_notices("查询")
-    assert index.as_retriever.call_count == 2
+    assert retriever.retrieve.call_count == 2
     assert fake_rag.get_or_create_public_index.call_count == 1
 
 
@@ -167,7 +166,6 @@ def test_initialization_failure_can_be_retried(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(query, "RAGSystem", Mock(return_value=fake_rag))
     monkeypatch.setattr(query, "_rag", None)
     monkeypatch.setattr(query, "_public_index", None)
-    monkeypatch.setattr(query, "_public_retriever", None)
     with pytest.raises(OSError):
         query._ensure_init()
     query._ensure_init()
@@ -178,7 +176,6 @@ def test_answer_queries_reuse_public_index(monkeypatch: pytest.MonkeyPatch) -> N
     fake_rag = Mock()
     monkeypatch.setattr(query, "_rag", fake_rag)
     monkeypatch.setattr(query, "_public_index", None)
-    monkeypatch.setattr(query, "_public_retriever", None)
     answer = Mock(return_value="回答")
     monkeypatch.setattr(query_engine, "get_rag_response", answer)
     for _ in range(20):
@@ -193,7 +190,6 @@ def test_concurrent_cold_start_builds_one_index(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(query, "RAGSystem", Mock(return_value=fake_rag))
     monkeypatch.setattr(query, "_rag", None)
     monkeypatch.setattr(query, "_public_index", None)
-    monkeypatch.setattr(query, "_public_retriever", None)
     barrier = threading.Barrier(4)
 
     def initialize() -> bool:
@@ -465,3 +461,103 @@ def test_cancelled_agent_build_closes_connection(monkeypatch: pytest.MonkeyPatch
         connection.close.assert_awaited_once()
 
     asyncio.run(scenario())
+
+
+def test_hybrid_union_preserves_sources_and_never_generates(monkeypatch: pytest.MonkeyPatch) -> None:
+    from campus_rag.keyword_retriever import BM25Retriever
+    a = TextNode(id_="a", text="quantum", metadata={"source": "a", "url": "https://example.org/a"})
+    b = TextNode(id_="b", text="quantum", metadata={"source": "b"})
+    index = Mock()
+    monkeypatch.setattr(query_engine, "_get_cached_retriever", lambda *args: Mock(retrieve=lambda q: [NodeWithScore(node=a, score=999)]))
+    monkeypatch.setattr(query_engine, "_get_bm25_cached", lambda _: BM25Retriever(nodes=[a, b]))
+    monkeypatch.setattr(config, "require_llm", Mock(side_effect=AssertionError("nested LLM")))
+    result = query_engine.retrieve_nodes("quantum", public_index=index, rerank=False)
+    assert [n.node.node_id for n in result] == ["a", "b"]
+    assert result[0].metadata["url"] == "https://example.org/a"
+    assert result[0].score == pytest.approx(2 / 61)
+    assert query_engine.retrieve_nodes(" ", public_index=index) == []
+
+
+def test_bm25_empty_oov_and_singleton() -> None:
+    from campus_rag.keyword_retriever import BM25Retriever
+    node = TextNode(text="quantum", metadata={"source": "one"})
+    bm25 = BM25Retriever(nodes=[node, TextNode(text=" !!! ")])
+    assert bm25.retrieve("") == []
+    assert bm25.retrieve("missing") == []
+    assert bm25.retrieve("quantum", top_k=0) == []
+    assert bm25.retrieve("quantum")[0].node is node
+
+
+def test_keyword_cache_tracks_equal_size_replace_and_clear(rag: index_manager.RAGSystem) -> None:
+    user = uuid4().hex
+    rag.add_user_documents(user, [Document(text="oldword", metadata={"source": "a"})])
+    index = rag.get_user_index(user)
+    assert query_engine._get_bm25_cached(index).retrieve("oldword")
+    rag.replace_documents("user_" + user, [Document(text="newword", metadata={"source": "a"})])
+    assert not query_engine._get_bm25_cached(index).retrieve("oldword")
+    assert query_engine._get_bm25_cached(index).retrieve("newword")
+    rag.clear_user_index(user)
+    assert not query_engine._get_bm25_cached(index).retrieve("newword")
+    assert index.vector_store.get_nodes(node_ids=None) == []
+
+
+@pytest.mark.parametrize("scores", [[0.9], [0.9, float("nan")], [0.9, float("inf")]])
+def test_bad_reranker_preserves_all_original_scores(monkeypatch: pytest.MonkeyPatch, scores: list) -> None:
+    nodes = [NodeWithScore(node=TextNode(text="a"), score=0.1), NodeWithScore(node=TextNode(text="b"), score=0.2)]
+    monkeypatch.setattr(query_engine, "_get_reranker", lambda: Mock(compute_score=lambda *args, **kwargs: scores))
+    monkeypatch.setattr(query_engine, "_reranker_retry_at", 0.0)
+    result = query_engine.rerank_nodes("q", nodes)
+    assert result == [nodes[1], nodes[0]]
+    assert [n.score for n in nodes] == [0.1, 0.2]
+
+
+def test_agent_search_tools_use_pure_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    import main
+    notices = Mock(return_value="notice fragment")
+    personal = Mock(return_value="personal fragment")
+    monkeypatch.setattr(main, "search_notices", notices)
+    monkeypatch.setattr(main, "search_user_data", personal)
+    monkeypatch.setattr(config, "require_llm", Mock(side_effect=AssertionError("nested LLM")))
+    assert main.search_campus_notices.invoke({"query": "q"}) == "notice fragment"
+    assert main._make_search_my_data("local_user").invoke({"query": "q"}) == "personal fragment"
+    personal.assert_called_once_with("q", "local_user")
+
+
+def test_failed_write_invalidates_keyword_snapshot(rag: index_manager.RAGSystem, monkeypatch: pytest.MonkeyPatch) -> None:
+    user = uuid4().hex
+    rag.add_user_documents(user, [Document(text="oldword", metadata={"source": "a"})])
+    index = rag.get_user_index(user)
+    snapshot = query_engine._get_bm25_cached(index)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(MockEmbedding, "get_text_embedding_batch", Mock(side_effect=OSError("offline")))
+        with pytest.raises(OSError):
+            rag.replace_documents("user_" + user, [Document(text="newword", metadata={"source": "a"})])
+    current = query_engine._get_bm25_cached(index)
+    assert current is not snapshot
+    assert current.retrieve("oldword")
+    assert not current.retrieve("newword")
+
+
+def test_keyword_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections import OrderedDict
+    monkeypatch.setattr(query_engine, "_bm25_cache", OrderedDict())
+    for _ in range(100):
+        index = Mock()
+        index.vector_store.get_nodes.return_value = []
+        query_engine._get_bm25_cached(index)
+    assert len(query_engine._bm25_cache) == query_engine._MAX_RETRIEVERS
+
+
+@pytest.mark.parametrize("results", [
+    [{"index": -1, "score": 0.5}],
+    [{"index": 0, "score": 0.5}, {"index": 0, "score": 0.8}],
+    [{"index": 0, "score": 0.5}],
+    [{"index": "0", "score": 0.5}],
+])
+def test_rerank_api_rejects_invalid_indices(results: list) -> None:
+    reranker = object.__new__(query_engine._APIReranker)
+    reranker._client = Mock()
+    reranker._client.post.return_value.json.return_value = {"results": results}
+    reranker._url, reranker._headers, reranker._model = "unused", {}, "test"
+    with pytest.raises(ValueError):
+        reranker.compute_score([["q", "a"], ["q", "b"]])

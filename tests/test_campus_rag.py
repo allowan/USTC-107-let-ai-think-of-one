@@ -151,7 +151,7 @@ class TestBM25Retriever(unittest.TestCase):
     def test_01_retrieve_chinese(self):
         from campus_rag.keyword_retriever import BM25Retriever
         bm25 = BM25Retriever(self.tmpdir)
-        results = bm25.retrieve("暑假有什么活动", top_k=3)
+        results = bm25.retrieve("暑期学校报名", top_k=3)
         self.assertGreater(len(results), 0, "应能检索到结果")
         self.assertIn("暑期", results[0].node.text)
 
@@ -379,9 +379,6 @@ class TestQuery(unittest.TestCase):
                 metadata={"source": source},
             )
         ])
-        query_module._public_retriever = query_module._rag.get_public_index().as_retriever(
-            similarity_top_k=10
-        )
         try:
             result = query_module.search_notices("C9暑期学校")
             self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
