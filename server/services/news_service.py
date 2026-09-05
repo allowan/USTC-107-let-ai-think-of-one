@@ -22,13 +22,25 @@ class Node:
         self.tag, self.attrs, self.children = tag, dict(attrs), []
 
     def text(self):
-        return ' '.join(c if isinstance(c, str) else c.text() for c in self.children).strip()
+        # Iterative traversal: recursive descent overflows on pathologically
+        # nested pages, and that exception would bubble up to a 500.
+        parts, stack = [], list(reversed(self.children))
+        while stack:
+            c = stack.pop()
+            if isinstance(c, str):
+                parts.append(c)
+            else:
+                stack.extend(reversed(c.children))
+        return ' '.join(parts).strip()
 
     def walk(self):
-        yield self
-        for c in self.children:
-            if isinstance(c, Node):
-                yield from c.walk()
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            yield node
+            for c in reversed(node.children):
+                if isinstance(c, Node):
+                    stack.append(c)
 
 
 class Tree(HTMLParser):
