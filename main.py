@@ -418,6 +418,9 @@ async def close_agent(ctx: AgentContext | None = None):
     """Close an agent's checkpoint connection. Without arguments, closes the singleton."""
     global _SINGLETON_CONN
     if ctx is not None:
+        # 清掉指向同一连接的单例引用，避免之后无参 close_agent 二次关闭
+        if _SINGLETON_CONN is ctx.conn:
+            _SINGLETON_CONN = None
         await ctx.conn.close()
         return
     if _SINGLETON_CONN is not None:
@@ -427,7 +430,6 @@ async def close_agent(ctx: AgentContext | None = None):
 
 async def run_agent(content: str, thread_id: str = "default") -> str:
     """Convenience: run a single-turn agent invocation and return the final reply."""
-    global _SINGLETON_CONN
     ctx = await build_agent()
     try:
         result = await ctx.agent.ainvoke(
@@ -436,11 +438,8 @@ async def run_agent(content: str, thread_id: str = "default") -> str:
         )
         return result["messages"][-1].content
     finally:
-        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄。
-        # 注意：无参 build_agent 会同时记录为单例连接，此处一并清理引用，
-        # 避免 close_agent() 再次关闭已关连接。
-        if _SINGLETON_CONN is ctx.conn:
-            _SINGLETON_CONN = None
+        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄；
+        # close_agent(ctx) 内部会一并清理指向同一连接的单例引用。
         await close_agent(ctx)
 
 

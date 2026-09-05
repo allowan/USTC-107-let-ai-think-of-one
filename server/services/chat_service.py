@@ -42,6 +42,10 @@ class ChatService:
         self._user_agents: dict[str, object] = {}  # username -> AgentContext
         self._pending_closes: set[asyncio.Task] = set()
         self._initialization_error: str | None = None
+        # 构建去重锁：并发请求同一缓存未命中的 agent 时，无锁会重复 build，
+        # 先建出的 checkpoint 连接被覆盖后永不关闭（句柄泄漏）。
+        self._default_lock = asyncio.Lock()
+        self._user_locks: dict[str, asyncio.Lock] = {}
 
     async def initialize(self):
         if not _llm_credentials_configured():
@@ -53,9 +57,15 @@ class ChatService:
             return
 
         from main import build_agent
-        self._default_agent = await build_agent()
-        self._initialization_error = None
-        logger.info("ChatService initialized")
+        try:
+            self._default_agent = await build_agent()
+            self._initialization_error = None
+            logger.info("ChatService initialized")
+        except Exception as exc:
+            # 启动期构建失败（如 checkpoint DB 异常）不能拖垮整个服务：
+            # 记录错误保持降级，首次对话时 get_agent 会走重建重试路径。
+            self._initialization_error = f"Agent 初始化失败：{exc}"
+            logger.error("ChatService initialization failed", exc_info=True)
 
     @property
     def is_ready(self) -> bool:
@@ -75,51 +85,60 @@ class ChatService:
             raise RuntimeError(self._initialization_error)
 
         if username:
-            cached = self._user_agents.get(username)
-            if cached is not None:
-                if not _agent_date_is_stale(cached):
-                    return cached
-                self.invalidate_user_agent(username)
-            from campus_rag import get_user_tool_prefs
-            from main import build_agent
-            prefs = get_user_tool_prefs(username)
-            ctx = await build_agent(username=username, tool_prefs=prefs)
-            self._user_agents[username] = ctx
-            return ctx
-        if self._default_agent is not None and _agent_date_is_stale(self._default_agent):
-            # 跨天重建：旧 checkpoint 连接异步关闭，避免句柄泄漏
-            old = self._default_agent
-            self._default_agent = None
-            task = asyncio.create_task(self._close_conn(old.conn))
-            self._pending_closes.add(task)
-            task.add_done_callback(self._pending_closes.discard)
-        if self._default_agent is None:
-            from main import build_agent
-            try:
-                self._default_agent = await build_agent()
-                self._initialization_error = None
-            except Exception as exc:
-                self._initialization_error = str(exc)
-                raise
-        return self._default_agent
+            lock = self._user_locks.setdefault(username, asyncio.Lock())
+            async with lock:
+                cached = self._user_agents.get(username)
+                if cached is not None:
+                    if not _agent_date_is_stale(cached):
+                        return cached
+                    self.invalidate_user_agent(username)
+                from campus_rag import get_user_tool_prefs
+                from main import build_agent
+                prefs = get_user_tool_prefs(username)
+                ctx = await build_agent(username=username, tool_prefs=prefs)
+                self._user_agents[username] = ctx
+                return ctx
+        async with self._default_lock:
+            if self._default_agent is not None and _agent_date_is_stale(self._default_agent):
+                # 跨天重建：旧 checkpoint 连接异步关闭，避免句柄泄漏
+                old = self._default_agent
+                self._default_agent = None
+                self._schedule_close(old)
+            if self._default_agent is None:
+                from main import build_agent
+                try:
+                    self._default_agent = await build_agent()
+                    self._initialization_error = None
+                except Exception as exc:
+                    self._initialization_error = str(exc)
+                    raise
+            return self._default_agent
 
     def invalidate_user_agent(self, username: str):
         old = self._user_agents.pop(username, None)
         if old is not None and old.conn is not None:
-            task = asyncio.create_task(self._close_conn(old.conn))
-            self._pending_closes.add(task)
-            task.add_done_callback(self._pending_closes.discard)
+            self._schedule_close(old)
 
     def clear_agent_cache(self):
         for username in list(self._user_agents.keys()):
             self.invalidate_user_agent(username)
-        # 默认 agent 也持有旧的 LLM 配置，设置/模型变更后必须一并失效，
-        # 否则下次无用户名调用时仍用旧配置（连接由 main.close_agent 统一收尾）。
+        # 默认 agent 也持有旧的 LLM 配置，设置/模型变更后必须一并失效；
+        # 其连接必须一并关闭——仅置 None 会让 main._SINGLETON_CONN 被下次
+        # build 覆盖，旧连接再无引用可达，每次改配置泄漏一个句柄。
+        old = self._default_agent
         self._default_agent = None
+        if old is not None and old.conn is not None:
+            self._schedule_close(old)
 
-    async def _close_conn(self, conn):
+    def _schedule_close(self, ctx):
+        task = asyncio.create_task(self._close_ctx(ctx))
+        self._pending_closes.add(task)
+        task.add_done_callback(self._pending_closes.discard)
+
+    async def _close_ctx(self, ctx):
         try:
-            await conn.close()
+            from main import close_agent
+            await close_agent(ctx)
         except Exception as e:
             # 关闭失败不阻断失效流程，但静默吞掉会掩盖 checkpoint 连接泄漏
             logger.warning("关闭 agent checkpoint 连接失败: %s", e)
