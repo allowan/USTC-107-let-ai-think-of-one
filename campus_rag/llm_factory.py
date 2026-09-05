@@ -1,17 +1,11 @@
 # llm_factory.py
-import json
 import os
-from pathlib import Path
-
-_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.json"
 
 
 def _read_settings() -> dict:
-    try:
-        with open(_SETTINGS_PATH, encoding="utf-8") as f:
-            return json.load(f).get("env", {})
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    # 与聊天 Agent 使用同一套“当前模型 -> 所属分组 -> 连接参数”解析规则。
+    from model.config import read_json
+    return read_json()
 
 
 def get_llm():

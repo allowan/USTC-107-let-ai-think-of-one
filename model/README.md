@@ -28,5 +28,8 @@ LangChain `init_chat_model` 的初始化与热切换（`config.py`），供 `mai
 ## 行为要点
 
 - `init_chat()` 每次读取最新配置，配合 `ChatService.clear_agent_cache()` 实现热切换。
+- 模型分组中的 `api_key`、`base_url`、`api_type` 是可选覆盖项；留空时沿用 `env` 的全局连接配置，切换模型不会清空已有 Key 或地址。
+- 如果设置了环境变量 `LLM_MODEL`，它优先于本地设置，前端会显示环境变量锁定状态并禁止产生“已切换但未生效”的误导。
+- 设置页的“模型供应商”支持新增、编辑和删除分组；每个分组可维护独立连接参数和多个模型，聊天输入框旁的模型选择器按分组展示这些模型。
 - `change_model()` 原子写回 `settings.json`（临时文件 + rename），写一半崩溃不会损坏配置。
 - 路由侧更新 `env` 时会忽略空字符串，避免清空字段保存打断 LLM 初始化。

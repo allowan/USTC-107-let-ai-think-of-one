@@ -8,13 +8,14 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import { Input, Button, Empty, App } from 'antd';
-import { GlobalOutlined, MailOutlined, SendOutlined, LoadingOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
+import axios from 'axios';
+import { Input, Button, Empty, App, Select, Space, Tooltip } from 'antd';
+import { GlobalOutlined, MailOutlined, SendOutlined, LoadingOutlined, StopOutlined, ToolOutlined, RobotOutlined } from '@ant-design/icons';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTopicStore } from '@/stores/topicStore';
-import { topicApi } from '@/services/api';
-import type { ChatMessage } from '@/types';
+import { settingsApi, topicApi } from '@/services/api';
+import type { ChatMessage, GlobalSettings } from '@/types';
 import { normalizeAutoLink } from '@/utils/markdownLinks';
 
 type ChatMarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
@@ -83,7 +84,6 @@ const MARKDOWN_COMPONENTS: Components = {
   table: MarkdownTableRenderer,
 };
 const MARKDOWN_PLUGINS = [remarkGfm];
-
 const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
   const isUser = msg.role === 'user';
   return (
@@ -114,6 +114,9 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [statusText, setStatusText] = useState<string>('');
+  const [modelSettings, setModelSettings] = useState<GlobalSettings | null>(null);
+  const [modelSettingsLoading, setModelSettingsLoading] = useState(true);
+  const [switchingModel, setSwitchingModel] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const isComposingRef = useRef(false);
@@ -121,6 +124,28 @@ export default function ChatPage() {
   const autoCreatedRef = useRef(false);
   const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
   const { message } = App.useApp();
+
+  useEffect(() => () => { abortControllerRef.current?.abort(); }, []);
+
+  const loadModelSettings = useCallback(() => {
+    setModelSettingsLoading(true);
+    settingsApi.getGlobal()
+      .then(({ data }) => {
+        setModelSettings(data);
+      })
+      .catch(() => {
+        message.error('获取模型列表失败');
+      })
+      .finally(() => {
+        setModelSettingsLoading(false);
+      });
+  }, [message]);
+
+  useEffect(() => {
+    loadModelSettings();
+    window.addEventListener('model-settings-changed', loadModelSettings);
+    return () => window.removeEventListener('model-settings-changed', loadModelSettings);
+  }, [loadModelSettings]);
 
   const scrollBottom = useCallback(() => {
     setTimeout(() => {
@@ -326,6 +351,37 @@ export default function ChatPage() {
     void send();
   };
 
+  const modelChoices = (modelSettings?.groups || []).flatMap((group) =>
+    group.models.map((model) => ({
+      key: `${group.group_name}\u0000${model.request_id}`,
+      group: group.group_name,
+      model: model.request_id,
+      label: model.show_id,
+    })),
+  );
+  const effectiveModel = modelSettings?.runtime?.effective_model || modelSettings?.env.model || '';
+  const selectedChoice = modelChoices.find((choice) => choice.model === effectiveModel);
+
+  const switchChatModel = async (key: string) => {
+    const choice = modelChoices.find((item) => item.key === key);
+    if (!choice || modelSettings?.runtime?.model_locked || loading) return;
+    setSwitchingModel(true);
+    try {
+      const { data } = await settingsApi.switchModel(choice.group, choice.model);
+      setModelSettings((current) => current ? {
+        ...current,
+        env: { ...current.env, model: data.model },
+        runtime: { effective_model: data.model, model_source: 'settings', model_locked: false },
+      } : current);
+      message.success(`已切换到 ${data.show_id}`);
+    } catch (error) {
+      const detail = axios.isAxiosError(error) ? error.response?.data?.detail : null;
+      message.error(detail || '模型切换失败');
+    } finally {
+      setSwitchingModel(false);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
       <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
@@ -342,26 +398,50 @@ export default function ChatPage() {
         )}
       </div>
       <div style={{ padding: '16px 0', borderTop: '1px solid #f0f0f0' }}>
-        <Input.TextArea
-          value={input} onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleInputKeyDown}
-          onCompositionStart={() => { isComposingRef.current = true; }}
-          onCompositionEnd={() => { isComposingRef.current = false; }}
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-          autoSize={{ minRows: 1, maxRows: 4 }}
-        />
-        {loading ? (
-          <Button danger icon={<StopOutlined />} onClick={stopGeneration}
-            style={{ marginTop: 8, float: 'right' }}>
-            停止生成
-          </Button>
-        ) : (
-          <Button type="primary" icon={<SendOutlined />} onClick={send}
-            disabled={!input.trim()} style={{ marginTop: 8, float: 'right' }}>
-            发送
-          </Button>
-        )}
-        <div style={{ clear: 'both' }} />
+        <div className="chat-composer-row">
+          <Input.TextArea
+            className="chat-composer-input"
+            value={input} onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleInputKeyDown}
+            onCompositionStart={() => { isComposingRef.current = true; }}
+            onCompositionEnd={() => { isComposingRef.current = false; }}
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+            autoSize={{ minRows: 1, maxRows: 4 }}
+          />
+          <Tooltip title={modelSettings?.runtime?.model_locked
+            ? '模型由 LLM_MODEL 环境变量固定'
+            : loading ? '生成过程中不能切换模型' : '切换聊天模型'}>
+            <Space size={6} className="chat-model-switcher">
+              <RobotOutlined className="chat-model-icon" />
+              <Select
+                aria-label="切换聊天模型"
+                size="small"
+                className="chat-model-select"
+                value={selectedChoice?.key}
+                placeholder={effectiveModel || '选择模型'}
+                loading={modelSettingsLoading || switchingModel}
+                disabled={modelSettingsLoading || switchingModel || loading || modelSettings?.runtime?.model_locked}
+                onChange={(value) => { void switchChatModel(value); }}
+                options={(modelSettings?.groups || []).map((group) => ({
+                  label: group.group_name,
+                  options: group.models.map((model) => ({
+                    label: model.show_id,
+                    value: `${group.group_name}\u0000${model.request_id}`,
+                  })),
+                }))}
+              />
+            </Space>
+          </Tooltip>
+          {loading ? (
+            <Button danger icon={<StopOutlined />} onClick={stopGeneration}>
+              停止生成
+            </Button>
+          ) : (
+            <Button type="primary" icon={<SendOutlined />} onClick={send} disabled={!input.trim()}>
+              发送
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

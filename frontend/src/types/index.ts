@@ -42,6 +42,11 @@ export interface GlobalSettings {
     api_type: string;
   };
   groups: ModelGroup[];
+  runtime?: {
+    effective_model: string;
+    model_source: 'settings' | 'environment';
+    model_locked: boolean;
+  };
 }
 
 export interface PersonalDataItem {

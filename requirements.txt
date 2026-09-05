@@ -26,3 +26,6 @@ uvicorn[standard]>=0.32.0
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.18
 langgraph-checkpoint-sqlite>=2.0.0
+
+# PDF file import
+pypdf>=5,<7
