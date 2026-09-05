@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Button, Typography, App, Spin, Popconfirm, Input } from 'antd';
 import {
   MessageOutlined,
+  NotificationOutlined,
   DatabaseOutlined,
   SettingOutlined,
   SyncOutlined,
@@ -40,6 +41,7 @@ export default function AppLayout() {
     { key: '/chat', icon: <MessageOutlined />, label: '对话' },
     { key: '/personal-data', icon: <DatabaseOutlined />, label: '个人数据' },
     { key: '/schedule', icon: <CalendarOutlined />, label: '我的课表' },
+    { key: '/news', icon: <NotificationOutlined />, label: '最新消息' },
     { key: '/sync', icon: <SyncOutlined />, label: '数据同步' },
   ];
 

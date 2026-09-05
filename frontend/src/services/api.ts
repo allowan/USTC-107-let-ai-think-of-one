@@ -73,11 +73,16 @@ export const syncApi = {
 };
 
 export const personalDataApi = {
+  parseFile: (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post<{ filename: string; source: string; content: string; character_count: number }>('/personal-data/parse-file', form, { timeout: 60000 });
+  },
   list: () =>
     api.get<{ items: import('@/types').PersonalDataItem[] }>('/personal-data'),
 
   add: (content: string, source?: string) =>
-    api.post<{ message: string }>('/personal-data', { content, source }),
+    api.post<{ message: string }>('/personal-data', { content, source }, { timeout: 0 }),
 
   update: (source: string, content: string) =>
     api.put<{ message: string }>(`/personal-data/${encodeURIComponent(source)}`, { content }),

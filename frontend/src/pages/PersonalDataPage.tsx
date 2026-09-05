@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { Button, Input, Modal, Popconfirm, App, Empty, Card, Space, Typography } from 'antd';
-import { CalendarOutlined, PlusOutlined, EditOutlined, DeleteOutlined, DatabaseOutlined } from '@ant-design/icons';
+import { Button, Input, Modal, Popconfirm, App, Empty, Card, Space, Typography, Segmented, Upload, Alert } from 'antd';
+import { InboxOutlined, CalendarOutlined, PlusOutlined, EditOutlined, DeleteOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { personalDataApi } from '@/services/api';
 import type { PersonalDataItem } from '@/types';
 import ImportExistingScheduleModal from '@/components/Schedule/ImportExistingScheduleModal';
@@ -29,6 +29,39 @@ export default function PersonalDataPage() {
   const [editSource, setEditSource] = useState('');
   const [editContent, setEditContent] = useState('');
   const [saving, setSaving] = useState(false);
+  const [addMode, setAddMode] = useState<'text' | 'file'>('text');
+  const [parsing, setParsing] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [fileError, setFileError] = useState('');
+
+  const resetAdd = () => {
+    setAddVisible(false);
+    setNewContent('');
+    setNewSource('');
+    setFileName('');
+    setFileError('');
+    setAddMode('text');
+  };
+
+  const parseFile = async (file: File) => {
+    if (file.size > 10 * 1024 * 1024) {
+      setFileError('文件不能超过 10 MB');
+      return false;
+    }
+    setParsing(true);
+    setFileError('');
+    try {
+      const { data } = await personalDataApi.parseFile(file);
+      setNewContent(data.content);
+      setNewSource(data.source);
+      setFileName(data.filename);
+    } catch (e) {
+      setFileError(errDetail(e, '文件解析失败，请检查文件后重试'));
+    } finally {
+      setParsing(false);
+    }
+    return false;
+  };
   const [scheduleImportVisible, setScheduleImportVisible] = useState(false);
 
   const fetchData = () => {
@@ -50,9 +83,7 @@ export default function PersonalDataPage() {
     try {
       await personalDataApi.add(newContent, newSource.trim() || undefined);
       message.success('数据已添加');
-      setAddVisible(false);
-      setNewContent('');
-      setNewSource('');
+      resetAdd();
       fetchData();
     } catch (e) {
       message.error(errDetail(e, '添加失败'));
@@ -155,19 +186,54 @@ export default function PersonalDataPage() {
         title="添加个人数据"
         open={addVisible}
         onOk={handleAdd}
-        onCancel={() => { setAddVisible(false); setNewContent(''); setNewSource(''); }}
+        onCancel={() => { if (!saving && !parsing) resetAdd(); }}
+        closable={!saving && !parsing}
+        maskClosable={!saving && !parsing}
+        keyboard={!saving && !parsing}
+        cancelButtonProps={{ disabled: saving || parsing }}
+        okButtonProps={{ disabled: parsing || !newContent.trim() }}
+        styles={{ body: { maxHeight: '65vh', overflowY: 'auto' } }}
+        width={640}
         confirmLoading={saving}
         okText="添加"
         cancelText="取消"
         destroyOnClose
       >
+        <Segmented
+          aria-label="添加方式"
+          options={[{ label: '输入文本', value: 'text' }, { label: '上传文件', value: 'file' }]}
+          value={addMode}
+          onChange={value => setAddMode(value as 'text' | 'file')}
+          disabled={saving || parsing}
+          style={{ marginBottom: 16 }}
+        />
+        {addMode === 'file' && <div style={{ marginBottom: 16 }}>
+          <Upload.Dragger
+            accept=".txt,.md,.markdown,.csv,.json,.pdf,.docx"
+            multiple={false}
+            showUploadList={false}
+            beforeUpload={parseFile}
+            disabled={saving || parsing}
+          >
+            <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+            <p className="ant-upload-text">{parsing ? '正在解析文件…' : '点击或拖拽文件到这里'}</p>
+            <p className="ant-upload-hint">TXT、Markdown、CSV、JSON、PDF、DOCX；单个文件不超过 10 MB</p>
+          </Upload.Dragger>
+          <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 8 }}>解析后可检查并修改下方内容，点击“添加”才会存入个人知识库。仅导入文本，不保存原始附件；暂不支持图片和扫描件文字识别。</Paragraph>
+          {fileName && <Text>已解析：{fileName}（当前 {newContent.length} 字符）</Text>}
+          {fileError && <Alert type="error" showIcon message={fileError} style={{ marginTop: 8 }} />}
+        </div>}
         <Input
+          aria-label="数据来源"
+          disabled={saving || parsing}
           value={newSource}
           onChange={(e) => setNewSource(e.target.value)}
           placeholder="数据来源（可选，如：课表、成绩单）"
           style={{ marginBottom: 12 }}
         />
         <TextArea
+          aria-label="个人数据内容"
+          disabled={saving || parsing}
           value={newContent}
           onChange={(e) => setNewContent(e.target.value)}
           placeholder="输入要存储的数据内容..."

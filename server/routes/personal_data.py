@@ -2,7 +2,7 @@
 
 import asyncio
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, Field
 
 from server.deps import get_user
@@ -13,6 +13,8 @@ from server.services.ustc_schedule import (
     schedule_data_to_payload,
 )
 from server.routes.schedule import ensure_local_origin
+
+from server.services.file_import import extract_file, FileImportError, MAX_FILE_BYTES
 
 router = APIRouter(prefix="/api/personal-data", tags=["personal-data"])
 
@@ -86,6 +88,24 @@ async def add_personal_data(
     except RuntimeError as e:
         _embed_unavailable_to_503(e)
     return {"message": "数据已添加"}
+
+
+@router.post("/parse-file")
+async def parse_personal_file(
+    request: Request,
+    file: UploadFile = File(...),
+    user: str = Depends(get_user),
+):
+    ensure_local_origin(request)
+    try:
+        data = await file.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="文件不能超过 10 MB")
+        return await asyncio.to_thread(extract_file, file.filename or "", data)
+    except FileImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await file.close()
 
 
 @router.post("/import-schedule")
