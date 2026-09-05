@@ -8,18 +8,18 @@ router = APIRouter(prefix="/api/sync", tags=["sync"])
 
 
 @router.get("/version")
-async def get_version():
+def get_version() -> dict:
     """返回当前版本号和更新时间。客户端据此判断是否需要同步。"""
     return SyncService.get_version()
 
 
 @router.get("/changes")
-async def get_changes(since: int = Query(0, ge=0)):
+def get_changes(since: int = Query(0, ge=0)) -> dict:
     """增量同步：返回 since 版本之后的所有变更。since=0 表示从头开始。"""
     return SyncService.get_changes(since)
 
 
 @router.get("/full")
-async def full_sync():
+def full_sync() -> dict:
     """全量同步：返回所有文档和当前版本号（兜底）。"""
     return SyncService.get_full_snapshot()

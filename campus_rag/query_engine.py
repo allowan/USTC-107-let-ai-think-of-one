@@ -1,6 +1,8 @@
 # query_engine.py
 import logging
 import os
+import threading
+from collections import OrderedDict
 
 from typing import List, Optional
 from llama_index.core import VectorStoreIndex
@@ -59,7 +61,9 @@ class _APIReranker:
 _reranker = None
 _reranker_available = True
 
-_retriever_cache: dict[tuple, VectorIndexRetriever] = {}
+_retriever_cache: OrderedDict[tuple, VectorIndexRetriever] = OrderedDict()
+_retriever_lock = threading.Lock()
+_MAX_RETRIEVERS = 64
 _bm25_cache: dict[str, object] = {}
 
 
@@ -71,7 +75,8 @@ def reset_caches() -> None:
     一并失效。
     """
     global _retriever_cache, _bm25_cache
-    _retriever_cache = {}
+    with _retriever_lock:
+        _retriever_cache.clear()
     _bm25_cache = {}
 
 
@@ -128,11 +133,15 @@ def _get_bm25_cached(data_dir: str):
 
 
 def _get_cached_retriever(index: VectorStoreIndex, top_k: int) -> VectorIndexRetriever:
-    """Cache retrievers by index_id + top_k to avoid recreating on every call."""
-    key = (index.index_id, top_k)
-    if key not in _retriever_cache:
-        _retriever_cache[key] = VectorIndexRetriever(index=index, similarity_top_k=top_k)
-    return _retriever_cache[key]
+    """按索引对象缓存检索器，限制高级调用方不断创建索引时的驻留数量。"""
+    key = (id(index), top_k)
+    with _retriever_lock:
+        if key not in _retriever_cache:
+            _retriever_cache[key] = VectorIndexRetriever(index=index, similarity_top_k=top_k)
+        _retriever_cache.move_to_end(key)
+        if len(_retriever_cache) > _MAX_RETRIEVERS:
+            _retriever_cache.popitem(last=False)
+        return _retriever_cache[key]
 
 
 def rerank_nodes(query: str, nodes: List[NodeWithScore], top_n: int = 10) -> List[NodeWithScore]:
@@ -155,7 +164,7 @@ def rerank_nodes(query: str, nodes: List[NodeWithScore], top_n: int = 10) -> Lis
         logger.warning("reranker 不可用，降级为原始向量分数排序: %s", e)
         _reranker_available = False
         _reranker = None
-    sorted_nodes = sorted(nodes, key=lambda n: n.score, reverse=True)
+    sorted_nodes = sorted(nodes, key=lambda n: n.score or 0, reverse=True)
     return sorted_nodes[:top_n]
 
 

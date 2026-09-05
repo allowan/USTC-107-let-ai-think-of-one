@@ -20,7 +20,4 @@ class SyncService:
 
     @staticmethod
     def get_full_snapshot() -> dict:
-        return {
-            "version": db.current_version(),
-            "documents": db.get_documents(),
-        }
+        return db.get_full_snapshot()

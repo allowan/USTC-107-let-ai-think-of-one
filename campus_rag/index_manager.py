@@ -5,6 +5,7 @@ import os
 import threading
 from pathlib import Path
 import chromadb
+from chromadb.errors import NotFoundError
 from llama_index.core import VectorStoreIndex
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from .data_loader import load_documents_from_files, split_documents
@@ -15,6 +16,7 @@ logger = logging.getLogger("campus_rag.index_manager")
 _chroma_client = None
 _chroma_client_path: str | None = None
 _lock = threading.Lock()
+_write_lock = threading.RLock()
 
 _embed_dim_cache: int | None = None
 
@@ -64,8 +66,8 @@ def assert_collection_dim(collection) -> None:
         raise RuntimeError(
             f"向量集合 '{collection.name}' 维度({stored})与当前嵌入模型输出"
             f"维度({live})不一致，该集合已不可用（ChromaDB 维度在首次写入后"
-            "锁定）。请删除该集合并重建：公共数据可从 campus_rag/data 自动"
-            "重建，个人数据需重新导入。"
+            "锁定）。请恢复建库时的嵌入模型；需切换模型时先备份源文档并"
+            "显式重建索引，查询不会自动删除数据。"
         )
 
 
@@ -89,25 +91,6 @@ def _get_chroma_client(persist_dir: str = _DEFAULT_PERSIST_DIR) -> chromadb.Pers
 
 def _user_collection_name(user_id: str) -> str:
     return f"user_{user_id}"
-
-
-def _lacks_url_metadata(collection) -> bool:
-    """抽样检测集合分块是否缺失源链接元数据（旧版索引迁移用）。"""
-    sample = collection.get(include=["metadatas"], limit=1)
-    metas = sample.get("metadatas") or []
-    return bool(metas) and "url" not in (metas[0] or {})
-
-
-def _public_sources_match_dir(collection, data_dir: str) -> bool:
-    """集合中所有文档的 source 是否都在本地数据目录内。
-
-    只有成立时才可安全从源目录重建（同步服务端独有的文档不能丢）。"""
-    if not os.path.isdir(data_dir):
-        return False
-    local_files = set(os.listdir(data_dir))
-    result = collection.get(include=["metadatas"])
-    sources = {m.get("source") for m in result.get("metadatas") or []}
-    return bool(sources) and sources <= local_files
 
 
 class RAGSystem:
@@ -135,69 +118,86 @@ class RAGSystem:
         index.insert_nodes(nodes)
         return index
 
-    def create_public_index_via_docs(self, documents: list):
+    def create_public_index_via_docs(self, documents: list) -> VectorStoreIndex:
         """从 Document 列表创建公共索引（用于全量同步）。"""
         collection = self.chroma_client.get_or_create_collection("public")
         assert_collection_dim(collection)
         vector_store = ChromaVectorStore(chroma_collection=collection)
         nodes = split_documents(documents)
-        return VectorStoreIndex(nodes, vector_store=vector_store)
+        index = VectorStoreIndex.from_vector_store(vector_store)
+        index.insert_nodes(nodes)
+        return index
 
-    def get_or_create_public_index(self, data_dir=_DEFAULT_DATA_DIR):
+    def replace_documents(
+        self, collection_name: str, documents: list, *, replace_all: bool = False,
+    ) -> None:
+        """先写新分块再移除旧 ID，支持全量替换或按来源更新。"""
+        sources = {doc.metadata.get("source") for doc in documents}
+        if any(not isinstance(source, str) or not source.strip() for source in sources):
+            raise ValueError("替换文档必须提供非空 source")
+        if not documents and not replace_all:
+            return
+        with _write_lock:
+            collection = self.chroma_client.get_or_create_collection(collection_name)
+            assert_collection_dim(collection)
+            selection = {} if replace_all else {"where": {"source": {"$in": sorted(sources)}}}
+            old_ids = collection.get(include=[], **selection)["ids"]
+            nodes = split_documents(documents)
+            if documents and not nodes:
+                raise ValueError("替换内容不能为空")
+            new_ids = [node.node_id for node in nodes]
+            try:
+                if nodes:
+                    store = ChromaVectorStore(chroma_collection=collection)
+                    index = VectorStoreIndex.from_vector_store(store)
+                    index.insert_nodes(nodes)
+            except Exception:
+                logger.exception("替换集合 %s 失败，清理本次新增分块", collection_name)
+                if new_ids:
+                    try:
+                        collection.delete(ids=new_ids)
+                    except Exception:
+                        logger.exception("新增分块清理失败，旧数据保留；请重试替换")
+                raise
+            if old_ids:
+                try:
+                    collection.delete(ids=old_ids)
+                except Exception:
+                    # 删除可能已经提交后才报错，不能再清理已成功写入的新数据。
+                    logger.exception("移除旧分块失败，新数据已保留；请重试替换")
+                    raise
+
+    def get_or_create_public_index(self, data_dir: str = _DEFAULT_DATA_DIR) -> VectorStoreIndex:
+        """读取既有公共索引；仅在集合不存在时从本地种子创建。"""
         try:
             collection = self.chroma_client.get_collection("public")
-        except Exception:
-            collection = None
-        if collection is not None and collection.count() > 0:
-            stored = _stored_dim(collection)
-            if stored == _get_live_embed_dim():
-                # 旧版索引缺失源链接元数据，且集合内容可从本地源目录全量恢复时，
-                # 一次性重建以补全（溯源功能迁移，重建后不再触发）。
-                if _lacks_url_metadata(collection) and _public_sources_match_dir(collection, data_dir):
-                    logger.info("public 集合缺失源链接元数据，从 %s 重建（一次性迁移）", data_dir)
-                    self.chroma_client.delete_collection("public")
+        except NotFoundError:
+            with _write_lock:
+                # 另一个调用方可能已在等待期间建好集合。
+                try:
+                    collection = self.chroma_client.get_collection("public")
+                except NotFoundError:
                     return self.create_public_index(data_dir)
-                vector_store = ChromaVectorStore(chroma_collection=collection)
-                return VectorStoreIndex.from_vector_store(vector_store)
-            # 维度不匹配：集合由旧嵌入模型（或 MockEmbedding 降级）写入且已
-            # 不可查询。公共数据可从源目录全量重建，故自动删除恢复而非报错。
-            logger.warning(
-                "public 集合维度(%s)与当前嵌入模型(%s)不一致，删除并从 %s 重建",
-                stored, _get_live_embed_dim(), data_dir,
-            )
-            self.chroma_client.delete_collection("public")
-        return self.create_public_index(data_dir)
-
-    def get_public_index(self):
-        try:
-            collection = self.chroma_client.get_collection("public")
-            stored = _stored_dim(collection)
-            if stored is not None and stored != _get_live_embed_dim():
-                logger.warning(
-                    "public 集合维度(%s)与当前嵌入模型(%s)不一致，删除并重建",
-                    stored, _get_live_embed_dim(),
-                )
-                self.chroma_client.delete_collection("public")
-                return self.create_public_index()
-            vector_store = ChromaVectorStore(chroma_collection=collection)
-            return VectorStoreIndex.from_vector_store(vector_store)
-        except RuntimeError:
-            # 嵌入探测失败（网络不可达等）不应触发静默重建，让调用方看到原因
-            raise
-        except Exception:
-            return self.create_public_index()
-
-    def add_documents_to_public(self, documents: list):
-        """增量添加文档到公共集合（仅管理员），自动跳过重复内容。"""
-        collection = self.chroma_client.get_or_create_collection("public")
+        # 同步专有内容不一定存在于本地目录，维度或元数据异常不能靠删库修复。
         assert_collection_dim(collection)
-        existing_hashes = self._get_existing_hashes("public")
-        nodes = split_documents(documents)
-        new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
-        if new_nodes:
-            vector_store = ChromaVectorStore(chroma_collection=collection)
-            index = VectorStoreIndex.from_vector_store(vector_store)
-            index.insert_nodes(new_nodes)
+        return VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
+
+    def get_public_index(self) -> VectorStoreIndex:
+        """获取公共索引；维度不匹配时保留数据并明确报错。"""
+        return self.get_or_create_public_index()
+
+    def add_documents_to_public(self, documents: list) -> None:
+        """增量添加文档到公共集合（仅管理员），自动跳过重复内容。"""
+        with _write_lock:
+            collection = self.chroma_client.get_or_create_collection("public")
+            assert_collection_dim(collection)
+            existing_hashes = self._get_existing_hashes("public")
+            nodes = split_documents(documents)
+            new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
+            if new_nodes:
+                vector_store = ChromaVectorStore(chroma_collection=collection)
+                index = VectorStoreIndex.from_vector_store(vector_store)
+                index.insert_nodes(new_nodes)
 
     # ── 用户私有数据 ────────────────────────────────────────────
     def get_or_create_user_index(self, user_id: str, data_dir: str = None):
@@ -229,20 +229,21 @@ class RAGSystem:
         vector_store = ChromaVectorStore(chroma_collection=collection)
         return VectorStoreIndex.from_vector_store(vector_store)
 
-    def add_user_documents(self, user_id: str, documents: list):
+    def add_user_documents(self, user_id: str, documents: list) -> VectorStoreIndex:
         """向用户的私有索引中追加文档，自动跳过重复内容。"""
-        coll_name = _user_collection_name(user_id)
-        collection = self.chroma_client.get_or_create_collection(coll_name)
-        assert_collection_dim(collection)
-        existing_hashes = self._get_existing_hashes(coll_name)
-        nodes = split_documents(documents)
-        new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
-        if new_nodes:
-            vector_store = ChromaVectorStore(chroma_collection=collection)
-            index = VectorStoreIndex.from_vector_store(vector_store)
-            index.insert_nodes(new_nodes)
-            return index
-        return VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
+        with _write_lock:
+            coll_name = _user_collection_name(user_id)
+            collection = self.chroma_client.get_or_create_collection(coll_name)
+            assert_collection_dim(collection)
+            existing_hashes = self._get_existing_hashes(coll_name)
+            nodes = split_documents(documents)
+            new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
+            if new_nodes:
+                vector_store = ChromaVectorStore(chroma_collection=collection)
+                index = VectorStoreIndex.from_vector_store(vector_store)
+                index.insert_nodes(new_nodes)
+                return index
+            return VectorStoreIndex.from_vector_store(ChromaVectorStore(chroma_collection=collection))
 
     def clear_user_index(self, user_id: str):
         """删除用户全部私有数据。"""
@@ -269,32 +270,38 @@ class RAGSystem:
 
     def delete_user_documents_by_source(self, user_id: str, source: str) -> int:
         """删除用户私有集合中指定来源的所有文档块，返回删除数量。"""
-        try:
-            collection = self.chroma_client.get_collection(_user_collection_name(user_id))
-            result = collection.get(where={"source": source})
-            ids = result["ids"]
-            if ids:
-                collection.delete(ids=ids)
-            return len(ids)
-        except Exception as e:
-            # 返回 0 会让路由误报 404 "数据不存在"，真实失败原因必须留痕
-            logger.warning("delete_user_documents_by_source(%s, %s) 失败: %s",
-                           user_id, source, e)
-            return 0
+        with _write_lock:
+            try:
+                collection = self.chroma_client.get_collection(_user_collection_name(user_id))
+                result = collection.get(where={"source": source}, include=[])
+                ids = result["ids"]
+                if ids:
+                    collection.delete(ids=ids)
+                return len(ids)
+            except NotFoundError:
+                return 0
+            except Exception as e:
+                # 返回 0 会让路由误报 404 "数据不存在"，真实失败原因必须留痕
+                logger.warning("delete_user_documents_by_source(%s, %s) 失败: %s",
+                               user_id, source, e)
+                raise
 
     def delete_public_documents_by_source(self, source: str) -> int:
         """删除指定来源（文件名）的所有文档块，返回删除数量。"""
-        try:
-            collection = self.chroma_client.get_collection("public")
-            result = collection.get(where={"source": source})
-            ids = result["ids"]
-            if ids:
-                collection.delete(ids=ids)
-            return len(ids)
-        except Exception as e:
-            # 返回 0 会掩盖同步增量删除的真实失败，必须留痕
-            logger.warning("delete_public_documents_by_source(%s) 失败: %s", source, e)
-            return 0
+        with _write_lock:
+            try:
+                collection = self.chroma_client.get_collection("public")
+                result = collection.get(where={"source": source}, include=[])
+                ids = result["ids"]
+                if ids:
+                    collection.delete(ids=ids)
+                return len(ids)
+            except NotFoundError:
+                return 0
+            except Exception as e:
+                # 返回 0 会掩盖同步增量删除的真实失败，必须留痕
+                logger.warning("delete_public_documents_by_source(%s) 失败: %s", source, e)
+                raise
 
     def _get_existing_hashes(self, collection_name: str) -> set:
         """获取集合中已有文档的 MD5 哈希集合，用于去重。"""

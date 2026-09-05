@@ -1,8 +1,10 @@
-import aiosqlite
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+
+import aiosqlite
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -404,7 +406,8 @@ async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = N
             system_prompt=_system_prompt_with_date(),
             checkpointer=checkpointer,
         )
-    except Exception:
+    except (Exception, asyncio.CancelledError):
+        logger.warning("Agent 构建未完成，关闭 checkpoint 连接", exc_info=True)
         await conn.close()
         raise
     ctx = AgentContext(agent=agent, conn=conn, username=username, built_date=date.today())
@@ -484,6 +487,5 @@ async def get_history(thread_id: str, conn=None) -> list:
 
 
 if __name__ == "__main__":
-    import asyncio
     request = "今年暑假有什么活动？"
     print(asyncio.run(run_agent(request, thread_id="campus-query")))

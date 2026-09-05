@@ -22,6 +22,9 @@ SYNC_SERVER_URL = os.getenv("SYNC_SERVER_URL", "http://127.0.0.1:8001")
 class SyncService:
     """Manages sync of public documents from remote sync_server to local ChromaDB."""
 
+    def __init__(self) -> None:
+        self._sync_lock = asyncio.Lock()
+
     @staticmethod
     def get_local_version() -> int:
         try:
@@ -31,10 +34,12 @@ class SyncService:
             return 0
 
     @staticmethod
-    def _set_local_version(version: int):
+    def _set_local_version(version: int) -> None:
         SYNC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(SYNC_STATE_PATH, "w", encoding="utf-8") as f:
+        temporary = SYNC_STATE_PATH.with_suffix(".json.tmp")
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump({"version": version}, f)
+        os.replace(temporary, SYNC_STATE_PATH)
 
     @staticmethod
     async def _fetch(url: str) -> dict | None:
@@ -53,14 +58,28 @@ class SyncService:
 
     async def sync(self, force_full: bool = False) -> dict:
         """Run sync. Returns dict with status and details."""
+        async with self._sync_lock:
+            # to_thread 不会随 HTTP 取消停止；保留锁直到写入和版本提交收尾。
+            task = asyncio.create_task(self._sync(force_full))
+            cancelled = False
+            while True:
+                try:
+                    result = await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+    async def _sync(self, force_full: bool) -> dict:
         remote_version = await self.check_remote_version()
         if remote_version < 0:
             return {"status": "error", "message": "无法连接到同步服务器"}
 
         local_version = self.get_local_version()
-
-        if remote_version == 0:
-            return {"status": "ok", "message": "同步服务器无数据", "version": 0}
 
         if remote_version == local_version and not force_full:
             return {"status": "ok", "message": "已是最新", "version": local_version}
@@ -105,23 +124,25 @@ class SyncService:
             "document_count": len(full.get("documents") or []),
         }
 
-    def _apply_changes(self, changes: dict):
+    def _apply_changes(self, changes: dict) -> None:
         """Apply incremental changes to local ChromaDB（经 campus_rag 公共门面）。"""
         from llama_index.core import Document
-        from campus_rag import add_public_documents, delete_public_data
+        from campus_rag import upsert_public_documents, delete_public_data
 
         upsert = changes.get("upsert") or []
         deleted = changes.get("deleted_sources") or []
 
-        for source in deleted:
-            delete_public_data(source)
-
+        # 同批删除后重建的来源必须先写新再移除旧，不能先执行删除。
+        latest = {item["source"]: item["content"] for item in upsert}
         if upsert:
-            docs = [Document(text=item["content"], metadata={"source": item["source"]}) for item in upsert]
-            add_public_documents(docs)
+            docs = [Document(text=content, metadata={"source": source}) for source, content in latest.items()]
+            upsert_public_documents(docs)
+        for source in deleted:
+            if source not in latest:
+                delete_public_data(source)
 
-    def _apply_full_sync(self, full: dict):
-        """Full sync: wipe local public index and rebuild（经 campus_rag 公共门面）。"""
+    def _apply_full_sync(self, full: dict) -> None:
+        """全量同步通过公共门面先写新分块再移除旧分块。"""
         from llama_index.core import Document
         from campus_rag import replace_public_documents
 
