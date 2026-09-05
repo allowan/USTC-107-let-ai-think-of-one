@@ -7,6 +7,7 @@ React 18 + Vite 6 + TypeScript 5 + Ant Design + Zustand 的单页应用，通过
 | 位置 | 职责 |
 |---|---|
 | `pages/DigestPage.tsx` | 今日面板（默认首页 `/today`）：我追踪的事件 + 即将截止/进行中与即将开始 + 最近发布；左侧日期徽章（D-N 倒计时 / 进行中 / N 天前），7/14/30 天窗口切换，星标追踪/取消，紧急红色、进行中绿色、最近发布灰色徽章 |
+| `pages/NewsPage.tsx` | 最新消息（`/news`）：实时抓取五个校站首页头条（主站服务通知/教务处/网络信息中心/研究生院/图书馆），按发布时间排序，来源状态（ok/stale/error）展示，手动刷新 |
 | `pages/ChatPage.tsx` | SSE 流式对话（fetch + ReadableStream 解析）、Markdown 渲染（GFM 表格、带 favicon 的链接）、生成中可点“停止生成”中止流、首轮对话自动摘要生成话题标题 |
 | `pages/PersonalDataPage.tsx` | 个人知识库管理（按来源聚合、增删改、将已导入课表同步进个人数据） |
 | `pages/SchedulePage.tsx` | 本地课表周视图（时间/节次双显示，缺具体时间时用默认节次时间段） |

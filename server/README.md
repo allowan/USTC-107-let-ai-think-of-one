@@ -23,6 +23,8 @@
 | `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
+| `news_service.py` | 实时抓取五个校站首页头条（主站服务通知/教务处/网络信息中心/研究生院/图书馆），5 分钟内存缓存，抓取失败回退旧缓存并标记 stale/error；并发抓取，单站超时 12 秒 |
+| `file_import.py` | 个人文件解析：上传的 TXT/Markdown/CSV/JSON/PDF/DOCX 提取为可编辑文本（不保存原文件；10 MB / 20 万字符上限；扫描版 PDF 提示先 OCR） |
 
 ## API 总览（端口 8000）
 
@@ -38,7 +40,9 @@
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content","topic_id"}`），事件：`thinking` / `tool_use` / `token` / `error` / `done`；客户端断开连接（前端“停止生成”/切页）即中止模型生成 |
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合，按 `chunk_index` 还原顺序） |
 | POST | `/api/personal-data` | 添加个人数据 |
+| POST | `/api/personal-data/parse-file` | 解析上传文件（TXT/MD/CSV/JSON/PDF/DOCX）为文本供编辑后入库（仅限本地来源） |
 | POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库供检索（仅限本地来源） |
+| GET | `/api/news?refresh=` | 五个校站首页头条聚合（实时抓取，5 分钟缓存；`refresh=true` 强制刷新） |
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 | GET | `/api/schedule` | 获取本地课表（可按学期筛选） |

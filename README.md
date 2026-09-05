@@ -10,7 +10,8 @@
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
 - **今日面板** — 打开即见“我追踪的事件 + 即将截止/进行中与即将开始 + 最近发布”，数据全部来自本地时间索引，不依赖 LLM；事件可一键追踪置顶，临近 3 天高亮
 - **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据；检索为空时自动用 jieba 关键词缩减重试一次（检索自愈）
-- **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
+- **个人知识库** — 私有数据的增删改查，支持按来源聚合展示；支持上传 TXT/Markdown/CSV/JSON/PDF/DOCX 文件解析为文本后入库
+- **最新消息** — 实时抓取五个校站（主站服务通知/教务处/网络信息中心/研究生院/图书馆）首页头条，按发布时间排序，抓取失败自动回退缓存并标注来源状态
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
 - **多跳推理** — Agent 面对复杂问题自动进行多轮检索：先初次检索，从结果中提取关键线索发起二次检索，反复直到信息完整，综合所有结果回答
 - **时间感知** — 从通知中确定性抽取截止日/发生时间（展览·施工·停水等 span）/发布日/类别/地点存入时间索引（`events.db`），“最近有什么要截止的报名”“现在有什么展览/哪里在施工”按真实日期排序回答，不遗漏措辞不同但时间临近的通知；进行中事件单独标注
@@ -210,8 +211,10 @@ USTC-107-let-ai-think-of-one/
 │   │   ├── chat.py            #     SSE 流式对话
 │   │   ├── topics.py          #     话题 CRUD、历史、自动标题
 │   │   ├── search.py          #     公共通知 / 个人数据检索
-│   │   ├── personal_data.py   #     个人知识库 CRUD
+│   │   ├── personal_data.py   #     个人知识库 CRUD、文件解析导入
 │   │   ├── schedule.py        #     课表查询 / 导入
+│   │   ├── digest.py          #     今日面板摘要、事件追踪
+│   │   ├── news.py            #     校站头条聚合
 │   │   ├── settings.py        #     LLM 配置、模型切换、工具开关
 │   │   ├── sync.py            #     公共通知同步管理
 │   │   └── health.py          #     健康检查
@@ -221,6 +224,8 @@ USTC-107-let-ai-think-of-one/
 │       ├── rag_service.py     #     RAG 检索、数据入库
 │       ├── schedule_service.py #    本地课表存储（schedule.db）
 │       ├── ustc_schedule.py   #     教务课表 HTML/JSON 解析（不接触账号密码）
+│       ├── news_service.py    #     校站头条实时抓取与缓存
+│       ├── file_import.py     #     个人文件文本提取（PDF/DOCX/TXT 等，不保存原文件）
 │       └── sync_service.py    #     客户端同步逻辑
 ├── sync_server/               # 公共通知同步服务端（独立进程，端口 8001）
 │   ├── main.py                #   FastAPI 应用入口
@@ -257,6 +262,7 @@ USTC-107-let-ai-think-of-one/
 │   └── src/
 │       ├── pages/
 │       │   ├── DigestPage.tsx      #   今日面板：追踪事件 + 即将截止/进行中 + 最近发布
+│       │   ├── NewsPage.tsx        #   最新消息：五个校站首页头条聚合
 │       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染（GFM 表格）+ 停止生成
 │       │   ├── PersonalDataPage.tsx #   个人知识库管理
 │       │   ├── SchedulePage.tsx    #   结构化课表导入与离线查看
@@ -317,7 +323,9 @@ USTC-107-let-ai-think-of-one/
 |---|---|---|
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合） |
 | POST | `/api/personal-data` | 添加个人数据 |
+| POST | `/api/personal-data/parse-file` | 解析上传文件（TXT/MD/CSV/JSON/PDF/DOCX）为文本供编辑后入库 |
 | POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库 |
+| GET | `/api/news?refresh=` | 五个校站首页头条聚合（实时抓取 + 5 分钟缓存，`refresh=true` 强制刷新） |
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 
@@ -583,7 +591,7 @@ npm run build       # 生产构建
 
 * **时效性** — ✅ 第一阶段已完成。`scripts/sync_ustc_columns.py` 配置化采集 11 个官方栏目（主站服务类通知、教务处教学/信息通知、研究生院通知/新闻/政策、网络信息中心公告等，约 340 篇），带限流退避重试与按内容增量更新；语料不入 git（`.gitignore` 的 `ustc*.txt`），换机重跑脚本 + `--reindex` 即可恢复。后续可扩展栏目（校历、就业信息、社团活动）与定时增量同步
 * **数据结构化**：课表、成绩等是结构化信息，现有 txt 格式不能很好存储（课表已支持结构化导入，成绩待做）
-* **数据多模态**：图片支持较难，pdf、word 等格式应转化为 md 或 txt
+* **数据多模态**：图片支持较难；pdf、word 已支持在个人知识库上传解析为文本入库（`/api/personal-data/parse-file`），公共语料的 pdf/word 转化待做
 
 ### 推理能力强化
 
