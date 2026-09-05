@@ -158,6 +158,13 @@ pytest tests/test_campus_rag.py -v
 # 输出逐字段 P/R 与偏差明细；调整 events.py 抽取正则后重跑验证。
 python scripts/eval_events.py
 
+# 检索召回率评测：对比 query 真值（tests/retrieval_ground_truth.json）与
+# top-k 命中来源，输出 Recall@1/3/5/10 与 MRR@10 及未命中明细；
+# 默认 BM25 离线模式，--vector 走向量检索公开接口（需嵌入服务可达）。
+# 调整切块、top_k、重排序等检索参数后重跑对比。
+python scripts/eval_retrieval.py
+python scripts/eval_retrieval.py --vector
+
 # 快速冒烟（需嵌入/LLM API 可达）
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
 python -c "from campus_rag import search_notices_answer; print(search_notices_answer('今年暑假有什么活动？'))"

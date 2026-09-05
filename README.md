@@ -454,6 +454,12 @@ Agent 提供六个互补的联网工具：`web_search` 按关键词查找公开�
 # 事件抽取质量评测（零第三方依赖）：对比真值与抽取结果，输出逐字段 P/R
 python scripts/eval_events.py
 
+# 检索召回率评测：默认 BM25 离线模式，--vector 走向量检索（需嵌入服务）；
+# 输出 Recall@1/3/5/10 与 MRR@10。当前基线：BM25 R@1 88.6% / R@5 100%，
+# 向量 R@1 88.6% / R@3 100%（35 条 query，真值 tests/retrieval_ground_truth.json）
+python scripts/eval_retrieval.py
+python scripts/eval_retrieval.py --vector
+
 # 公共数据检索
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
 
@@ -602,7 +608,7 @@ npm run build       # 生产构建
 ### 工程化
 
 * 一键安装运行（降低启动步骤复杂度）
-* 系统指标（召回率、命中率）评测体系 — ✅ 事件抽取维度已建立：真值标注（`tests/events_ground_truth.json`）+ 逐字段 P/R 评测脚本（`scripts/eval_events.py`）；检索召回率评测待建
+* 系统指标（召回率、命中率）评测体系 — ✅ 已建立两个维度：事件抽取（真值 `tests/events_ground_truth.json` + 逐字段 P/R，`scripts/eval_events.py`）与检索召回（真值 `tests/retrieval_ground_truth.json` + Recall@k/MRR，`scripts/eval_retrieval.py`，支持 BM25 离线与向量两种模式）；端到端回答质量评测待建
 * 安全性强化
 
 ### 工具扩展
