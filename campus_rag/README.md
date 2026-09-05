@@ -15,7 +15,7 @@ search_notices("暑假有什么活动？")
 search_user_data("我的课表", user_id="local_user")
 ```
 
-### LLM 总结检索（向量检索 + 重排序 + LLM 生成）
+### LLM 总结检索（混合检索 + 重排序 + LLM 生成）
 
 ```python
 from campus_rag import search_notices_answer, search_user_data_answer
@@ -35,11 +35,15 @@ add_user_data("local_user", docs)
 add_user_files("local_user", "./my_data/课表.txt")
 add_user_files("local_user", "./my_data/")           # 导入整个目录
 list_user_data("local_user")
-update_user_data("local_user", "课表", "新内容")      # 先探测嵌入可用性再删旧写新
+update_user_data("local_user", "课表", "新内容")      # 新分块写入成功后替换旧分块
 delete_user_data("local_user", "课表.txt")
 ```
 
-同步服务专用（公共集合）：`add_public_documents` / `delete_public_data` / `replace_public_documents` / `reset_caches`。
+同步服务专用（公共集合）：`add_public_documents`（追加）/ `upsert_public_documents`（按来源替换）/ `delete_public_data` / `replace_public_documents`（全量替换）/ `reset_caches`。
+
+写入先完成新分块的嵌入与持久化，再删除被替换的旧 ID；新增写入失败会尝试清理本次新增 ID；移除旧 ID 失败时保留已写入的新内容供重试，异常继续上抛。公共全量同步沿用现有集合，空快照保持为空。该顺序保障嵌入/新增写入失败时旧数据仍在，但不是跨 ChromaDB 与事件库的事务：进程在写新与删旧之间崩溃可能暂留重复块，需重试同步。进程内写操作串行化，查询仍可并行。
+
+个人数据操作不再初始化公共通知索引。纯检索与回答查询复用索引对象及同一套检索器缓存；向量与关键词缓存均有容量上限。
 
 ### 高级查询引擎
 
@@ -73,7 +77,7 @@ sync_notice_events()
 get_notice_digest(days=7)
 ```
 
-返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `replace_public_documents` / `delete_public_data`、RAG 初始化（`_ensure_init`）与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
+返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `upsert_public_documents` / `replace_public_documents` / `delete_public_data` 与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
 
 抽取边界（评测可见 `scripts/eval_events.py`）：只抽日粒度；月粒度区间（“2026.9-2027.1”）、新闻式时间状语先行（“6月15日下午，…”）、网页表格转文本的跨行时间表（如选课阶段表）不在覆盖范围，由语义检索兜底。
 
@@ -94,23 +98,25 @@ list_tracked_events("local_user")
 | `config.py` | LlamaIndex 全局设置（分块参数）；`init_llm/init_embed` + `require_llm/require_embed_model` fail-fast 守卫，禁止静默降级到 Mock |
 | `llm_factory.py` | `get_llm()` / `get_embed_model()` 工厂，支持 openai / ollama 后端 |
 | `data_loader.py` | `.txt` 加载、SentenceSplitter 分块（打 `chunk_index` 序号）、源网址提取（数字 ID 前缀文件按 ID 匹配；爬虫文档回退到正文"来源："行） |
-| `index_manager.py` | `RAGSystem`：ChromaDB 集合管理、维度守卫与自愈、MD5 去重 |
+| `index_manager.py` | `RAGSystem`：ChromaDB 集合管理、维度守卫、安全替换、MD5 去重 |
 | `keyword_retriever.py` | `BM25Retriever`：rank_bm25 + jieba 分词（jieba 缺失时正则回退） |
 | `query.py` | 检索门面：单例管理、检索出口统一附来源头、入库统一入口；空结果时 jieba 关键词缩减重试一次（检索自愈）；`reset_caches` 同时失效 query_engine 的检索器/BM25 缓存 |
-| `query_engine.py` | RAG 管线：向量检索 → 空召回关键词重试 → BM25 预过滤加权 → 重排序 → LLM 生成 |
+| `query_engine.py` | RAG 管线：向量检索 → 空召回关键词重试 → BM25 候选并集排名融合 → 重排序 → LLM 生成 |
 | `events.py` | 通知事件时间索引：确定性正则抽取截止日/发生时间（span·instant）/发布日/类别/适用对象/地点，存入 `events.db`（抽取器版本 `EXTRACTOR_VERSION` 控制旧记录自动重抽），供 `get_upcoming_events` / `get_upcoming_starts` 按时间查询（不依赖 LLM，离线可用） |
 | `auth.py` | 话题 / 工具偏好 / 追踪事件 CRUD（SQLite，锚定项目根 `users.db`）。本地单用户形态，无登录函数 |
-| `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建）。统一格式：文件名 `{通知ID}_{标题}.txt`，文档头三行 `来源：<URL>` / `标题：<标题>` / 空行，之后为正文。主体由 `scripts/sync_ustc_columns.py` 采集（主站服务类通知、教务处教学/信息通知、研究生院通知、网络信息中心公告等，约 330 篇），不入 git（`.gitignore` 白名单只放行 7 个手写种子），换机后重跑脚本 + `--reindex` 即可恢复 |
+| `data/` | 校园通知 `.txt` 源数据（公共索引可从这里全量重建）。统一格式：文件名 `{通知ID}_{标题}.txt`，文档头三行 `来源：<URL>` / `标题：<标题>` / 空行，之后为正文（段间无空行，正文只含通知内容，无站点导航/页脚噪声）。主体由 `scripts/sync_ustc_columns.py` 采集（主站服务类通知、教务处教学/信息通知、研究生院通知、网络信息中心公告等）。当前共 323 篇：7 个为 git 跟踪的手写种子，其余为未跟踪文件（数据未加忽略规则，提交时自行 `git add campus_rag/data/`）。改动数据源后需重跑 `--reindex` 重建公共索引；`events.db` 会在启动时自动重抽 |
+
+> 数据治理说明（2026-09）：语料做过一轮"格式清洗 + 去重"。格式清洗剥离站点导航/面包屑/发布元信息/版权页脚/相关文章列表与 HTML 空格残留，可随时用 `python scripts/clean_data_files.py`（幂等，支持 `--dry-run`）复跑；同一轮删除了 8 个分页列表帧、3 个跨来源镜像重复（保留对应原始通知）与 1 个抓取损坏残片，校验后语料为 323 篇。改动或补充 txt 后需对公共索引重跑 `--reindex`。
 
 ## 检索管线
 
 ```
 用户问题
   ├── 向量检索 (ChromaDB: public + user_{id})
-  ├── BM25 关键词检索（对向量结果预过滤，命中节点加权；仅公共通知检索启用）
-  ├── 合并去重
-  ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点；不可用时降级为原始分数排序)
-  └── LLM 生成回答（携带来源文件名 + 源链接）
+  ├── BM25 关键词检索（读取对应公共/个人集合的当前分块）
+  ├── RRF 排名融合（保留不同来源）
+  ├── 重排序 (qwen3-reranker，API 调用 /rerank 端点；不可用时保留融合排名，60 秒后重试)
+  └── 返回带来源的片段；仅 *_answer 接口继续调用 LLM 生成回答
 ```
 
 ## 数据隔离模型
@@ -124,8 +130,8 @@ ChromaDB（项目根 chroma_db/）
 
 - 默认数据目录与向量库目录均为锚定项目根的绝对路径，不依赖启动 CWD。
 - **事件时间索引**独立存于项目根 `events.db`（SQLite，与 `schedule.db`/`users.db` 同层），与向量库解耦： ChromaDB 管“语义相似”，`events.db` 管“时间排序”，两者均由 `campus_rag/data` 与同步文档派生，删除后重启可自愈。
-- **维度守卫**：集合已存向量维度与当前嵌入模型不一致时，公共集合自动删除并从源数据重建；个人集合抛出可操作错误（避免 MockEmbedding 维度 1 永久污染）。
-- **写路径安全**：`update_user_data` / `replace_public_documents` 在删除旧数据前先探测嵌入可用性，不可用则拒绝整个操作，原数据不受影响。
+- **维度守卫**：公共或个人集合的向量维度与当前嵌入模型不一致时均保留数据并报错。查询不会因维度不匹配或缺少 URL 元数据删除集合；应恢复原嵌入模型，或备份后显式重建。
+- **写路径安全**：个人更新、公共按来源更新和全量同步都先写新再删旧，不把模型初始化缓存当作网络可用性保证。集合维度变化需要单独处理，不通过全量同步删除集合来绕过。
 
 ## 配置（`campus_rag/.env`）
 
@@ -156,9 +162,28 @@ pytest tests/test_campus_rag.py -v
 # 输出逐字段 P/R 与偏差明细；调整 events.py 抽取正则后重跑验证。
 python scripts/eval_events.py
 
+# 检索召回率评测：对比 query 真值（tests/retrieval_ground_truth.json）与
+# top-k 命中来源，输出 Recall@1/3/5/10 与 MRR@10 及未命中明细；
+# 默认 BM25 离线模式，--vector 走向量检索公开接口（需嵌入服务可达）。
+# 调整切块、top_k、重排序等检索参数后重跑对比。
+python scripts/eval_retrieval.py
+python scripts/eval_retrieval.py --vector
+
 # 快速冒烟（需嵌入/LLM API 可达）
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
 python -c "from campus_rag import search_notices_answer; print(search_notices_answer('今年暑假有什么活动？'))"
 ```
 
 嵌入或 LLM 不可用时，依赖网络的用例会自动跳过（不视为失败）。
+
+## 统一检索管线
+
+已确认的实现约定：Agent 检索工具只返回带来源的片段，由 Agent 生成最终回答；保留 `*_answer` 接口供独立调用。公共与个人检索共用向量召回、BM25 排名融合及可选重排序。
+
+BM25 从当前 ChromaDB 集合读取分块，保留节点身份、来源和链接。写入前后均使关键词缓存失效（包括失败路径）；缓存最多保留 64 个索引。跨进程修改需重置缓存或重启；与写入重叠的请求不保证事务快照。
+
+两路候选取并集，按 `sum(1 / (60 + rank))` 融合，rank 从 1 开始，避免直接比较不同尺度的分数。算法参考 [Elastic RRF 文档](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion)。空查询和无关键词匹配不会产生 BM25 噪声结果。
+
+验证关注来源保留、删除/等量替换后的缓存一致性、失败降级以及工具内部 LLM 调用次数；实际首字时间、总耗时及端到端质量需要在线模型评测。
+
+本轮对抗性回归位于 `tests/test_integrity_regressions.py`，新增代码集中在共享召回、缓存失效和重排序响应校验，以及对应的故障测试；未增加新模块。关键词缓存首次构建需要读取并分词整个集合，后续查询复用；大语料的内存与冷启动耗时仍需专项测量。纯搜索现在也可能调用已配置的重排序服务，其耗时不能等同于纯本地检索。

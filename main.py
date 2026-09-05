@@ -1,8 +1,10 @@
-import aiosqlite
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+
+import aiosqlite
 from langchain.agents import create_agent
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -14,7 +16,7 @@ from tools.search import (
     search_ustc_web,
     search_web,
 )
-from campus_rag import search_notices_answer, search_user_data_answer, add_user_data
+from campus_rag import search_notices, search_user_data, add_user_data
 from llama_index.core import Document
 import model.config as config
 
@@ -40,10 +42,10 @@ TOOL_METADATA = [
     {"name": "ustc_web_fetch", "label": "科大网页正文", "description": "读取白名单内中国科大官方网页正文"},
     {"name": "course_review_search", "label": "评课社区搜索", "description": "搜索 icourse.club 的公开课程评价和课程详情页"},
     {"name": "course_review_fetch", "label": "评课社区正文", "description": "读取 icourse.club 公开课程详情与学生点评"},
-    {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（经AI总结）"},
+    {"name": "search_campus_notices", "label": "校园通知", "description": "搜索校园官方通知、活动、比赛、讲座等信息（返回带来源的原文片段）"},
     {"name": "get_upcoming_events", "label": "即将发生事件", "description": "按真实日期查询未来 N 天内截止（报名/选课/评奖）或开始（展览/施工/班车）的校园事件"},
     {"name": "search_notices_raw", "label": "通知原文", "description": "获取校园通知原始文本片段，用于多跳推理时查看原文"},
-    {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（经AI总结）"},
+    {"name": "search_my_data", "label": "个人数据", "description": "搜索用户个人上传的课表、成绩等私有信息（返回带来源的原文片段）"},
     {"name": "search_user_data_raw", "label": "个人数据原文", "description": "获取个人数据原始文本片段，用于多跳推理时查看原文"},
     {"name": "add_personal_data", "label": "添加个人数据", "description": "将文本内容添加到个人知识库，用于后续检索"},
     {"name": "get_my_schedule", "label": "获取我的课表", "description": "读取本地已导入的结构化课表；不指定学期时按当前日期自动返回当前学期"},
@@ -80,6 +82,7 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 5. 如果检索结果为空或完全无关，直接说"未找到相关信息"
 
 ## 多跳推理指南
+同一查询不要重复调用普通检索与 raw 别名：两者使用相同管线，均返回参考片段，由你统一生成回答。
 1. 面对复杂问题时，先用 search_notices_raw 或 search_campus_notices 进行第一次检索
 2. 查看检索结果后，判断信息是否完整；如果不完整，从结果中提取关键线索（如具体活动名称、部门名称）进行第二次检索
 3. 可能需要多次检索不同关键词才能覆盖问题的所有方面
@@ -108,9 +111,9 @@ def _system_prompt_with_date() -> str:
 
 @tool
 def search_campus_notices(query: str) -> str:
-    """搜索校园官方通知，获取活动、比赛、课程、讲座、报名等公共信息（经AI总结）。"""
+    """搜索校园官方通知，获取活动、比赛、课程、讲座、报名等公共信息（返回带来源的原文片段）。"""
     try:
-        return search_notices_answer(query)
+        return search_notices(query)
     except Exception as e:
         logger.error("search_campus_notices failed: %s", e, exc_info=True)
         return f"搜索校园通知时出错: {e}"
@@ -193,7 +196,7 @@ def _make_search_my_data(username: str):
     def search_my_data(query: str) -> str:
         """搜索用户个人数据（个人上传或爬取的教务、课表等私有信息）。"""
         try:
-            return search_user_data_answer(query, username)
+            return search_user_data(query, username)
         except Exception as e:
             logger.error("search_my_data failed: %s", e, exc_info=True)
             return f"搜索个人数据时出错: {e}"
@@ -404,7 +407,8 @@ async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = N
             system_prompt=_system_prompt_with_date(),
             checkpointer=checkpointer,
         )
-    except Exception:
+    except (Exception, asyncio.CancelledError):
+        logger.warning("Agent 构建未完成，关闭 checkpoint 连接", exc_info=True)
         await conn.close()
         raise
     ctx = AgentContext(agent=agent, conn=conn, username=username, built_date=date.today())
@@ -418,6 +422,9 @@ async def close_agent(ctx: AgentContext | None = None):
     """Close an agent's checkpoint connection. Without arguments, closes the singleton."""
     global _SINGLETON_CONN
     if ctx is not None:
+        # 清掉指向同一连接的单例引用，避免之后无参 close_agent 二次关闭
+        if _SINGLETON_CONN is ctx.conn:
+            _SINGLETON_CONN = None
         await ctx.conn.close()
         return
     if _SINGLETON_CONN is not None:
@@ -427,7 +434,6 @@ async def close_agent(ctx: AgentContext | None = None):
 
 async def run_agent(content: str, thread_id: str = "default") -> str:
     """Convenience: run a single-turn agent invocation and return the final reply."""
-    global _SINGLETON_CONN
     ctx = await build_agent()
     try:
         result = await ctx.agent.ainvoke(
@@ -436,11 +442,8 @@ async def run_agent(content: str, thread_id: str = "default") -> str:
         )
         return result["messages"][-1].content
     finally:
-        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄。
-        # 注意：无参 build_agent 会同时记录为单例连接，此处一并清理引用，
-        # 避免 close_agent() 再次关闭已关连接。
-        if _SINGLETON_CONN is ctx.conn:
-            _SINGLETON_CONN = None
+        # 每次调用都会新建 checkpoint 连接，不关闭会持续泄漏 sqlite 句柄；
+        # close_agent(ctx) 内部会一并清理指向同一连接的单例引用。
         await close_agent(ctx)
 
 
@@ -485,6 +488,5 @@ async def get_history(thread_id: str, conn=None) -> list:
 
 
 if __name__ == "__main__":
-    import asyncio
     request = "今年暑假有什么活动？"
     print(asyncio.run(run_agent(request, thread_id="campus-query")))

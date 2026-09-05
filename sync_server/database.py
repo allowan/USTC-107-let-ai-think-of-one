@@ -58,31 +58,42 @@ def get_documents() -> list[dict]:
 def get_changes(since: int) -> dict:
     """Return {upsert: [...], deleted_sources: [...], version: int} for changes after `since`."""
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT source, action, content FROM change_log WHERE version > ? ORDER BY version",
-        (since,),
-    ).fetchall()
-    conn.close()
+    try:
+        conn.execute("BEGIN")
+        version = conn.execute("SELECT COALESCE(MAX(version), 0) FROM change_log").fetchone()[0]
+        rows = conn.execute(
+            "SELECT source, action, content FROM change_log WHERE version IN ("
+            "SELECT MAX(version) FROM change_log WHERE version > ? GROUP BY source) "
+            "ORDER BY version",
+            (since,),
+        ).fetchall()
+        deleted = [row[0] for row in conn.execute(
+            "SELECT DISTINCT source FROM change_log WHERE version > ? AND action = 'delete'",
+            (since,),
+        ).fetchall()]
+    finally:
+        conn.close()
 
-    upsert = []
-    deleted = []
-    for r in rows:
-        if r["action"] == "upsert":
-            upsert.append({"source": r["source"], "content": r["content"]})
-        elif r["action"] == "delete":
-            # Remove any prior upsert of same source in this batch
-            upsert = [u for u in upsert if u["source"] != r["source"]]
-            # delete 必须始终下发：客户端可能已持有本批之前同步的旧副本，
-            # 若因本批内出现过 upsert 就吞掉 delete，旧数据会永久残留。
-            # 删除幂等，客户端无此 source 时 delete_public_data 返回 0 无副作用。
-            if r["source"] not in deleted:
-                deleted.append(r["source"])
+    upsert = [{"source": row["source"], "content": row["content"]}
+              for row in rows if row["action"] == "upsert"]
 
     return {
-        "version": current_version(),
+        "version": version,
         "upsert": upsert,
         "deleted_sources": deleted,
     }
+
+
+def get_full_snapshot() -> dict:
+    """在同一读事务中取得版本和文档，避免并发更新造成永久漏同步。"""
+    conn = _get_conn()
+    try:
+        conn.execute("BEGIN")
+        version = conn.execute("SELECT COALESCE(MAX(version), 0) FROM change_log").fetchone()[0]
+        rows = conn.execute("SELECT source, content FROM documents ORDER BY source").fetchall()
+        return {"version": version, "documents": [dict(row) for row in rows]}
+    finally:
+        conn.close()
 
 
 def upsert_document(source: str, content: str) -> int:

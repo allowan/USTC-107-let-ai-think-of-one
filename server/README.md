@@ -23,6 +23,8 @@
 | `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
+| `news_service.py` | 实时抓取五个校站首页头条（主站服务通知/教务处/网络信息中心/研究生院/图书馆），5 分钟内存缓存，抓取失败回退旧缓存并标记 stale/error；并发抓取，单站超时 12 秒 |
+| `file_import.py` | 个人文件解析：上传的 TXT/Markdown/CSV/JSON/PDF/DOCX 提取为可编辑文本（不保存原文件；10 MB / 20 万字符上限；扫描版 PDF 提示先 OCR） |
 
 ## API 总览（端口 8000）
 
@@ -38,7 +40,9 @@
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content","topic_id"}`），事件：`thinking` / `tool_use` / `token` / `error` / `done`；客户端断开连接（前端“停止生成”/切页）即中止模型生成 |
 | GET | `/api/personal-data` | 列出个人数据（按来源聚合，按 `chunk_index` 还原顺序） |
 | POST | `/api/personal-data` | 添加个人数据 |
+| POST | `/api/personal-data/parse-file` | 解析上传文件（TXT/MD/CSV/JSON/PDF/DOCX）为文本供编辑后入库（仅限本地来源） |
 | POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库供检索（仅限本地来源） |
+| GET | `/api/news?refresh=` | 五个校站首页头条聚合（实时抓取，5 分钟缓存；`refresh=true` 强制刷新） |
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 | GET | `/api/schedule` | 获取本地课表（可按学期筛选） |
@@ -67,6 +71,8 @@
 - **阻塞调用进线程池**：检索/入库含嵌入 API 调用，`async` 路由中一律 `asyncio.to_thread`；同步长任务同理（见 `sync_service.sync`）。
 - **SSE 损坏自愈**：检测到 checkpoint 损坏（tool_calls 与 tool messages 不匹配）时自动删除该 thread 并重试一次。
 - **设置变更失效链**：更新配置/切换模型 → `clear_agent_cache()`（含默认 agent）；更新工具开关 → 仅失效该用户 agent。
+- **连接生命周期**：缓存失效后旧 Agent 的连接延迟到使用它的流结束再关闭；构建期间发生设置变更时，丢弃旧配置构建结果并重试。同一话题的并发生成被拒绝，避免 checkpoint 相互覆盖。
+- **同步一致性**：同一进程串行执行同步；按来源替换更新通知，成功后原子写回版本号。请求取消时等待已启动的同步任务收尾，避免后台写入与下一次同步交错。
 - **课表写入口仅限本地来源**：`/api/schedule/import*` 与 `/api/personal-data/import-schedule` 统一经 `ensure_local_origin` 校验 Origin（无 Origin 或 localhost/127.0.0.1 才放行）。
 - **追踪事件存 `users.db`**：`tracked_events` 表（username+source 主键，重复追踪即更新），CRUD 在 `campus_rag/auth.py`，与话题/工具偏好同库。
 - **事件窗口语义**：`get_notice_digest` 的 upcoming 合并两类——`deadline` 型（`event_start <= end 且 deadline >= today`）与 `start` 型（时间窗相交：`event_start <= window_end 且 COALESCE(event_end, event_start) >= today`）。后者会把“已开始未结束”的展览/施工带出来并标记 `ongoing=true`，前端据此显示“进行中”而非负数剩余天数。
@@ -77,3 +83,8 @@
 ```bash
 pytest tests/test_server_api.py -v   # 路由契约/编码往返/状态机，离线可运行（RAG 用 stub）
 ```
+
+
+### Agent 检索调用
+
+校园通知与个人数据工具统一返回混合检索后的原文片段、来源和链接，由 Agent 组织回答。保留普通工具和 raw 工具的名称以兼容已有偏好，两者使用相同检索管线，同一查询无需重复调用。工具内部不再额外调用总结 LLM；Agent 的规划、多跳查询仍可能产生多次模型调用。搜索接口同样使用该纯检索管线；SSE 协议不变。

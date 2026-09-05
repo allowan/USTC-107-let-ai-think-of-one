@@ -95,7 +95,8 @@ async def summarize_topic(
         logger.warning("Topic summarization failed for user %s, topic %s", user, topic_id, exc_info=True)
         title = "默认话题"
 
-    auth.rename_topic(user, topic_id, title)
+    if not auth.rename_topic(user, topic_id, title):
+        raise HTTPException(status_code=404, detail="话题不存在")
     return {"name": title}
 
 

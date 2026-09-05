@@ -151,7 +151,7 @@ class TestBM25Retriever(unittest.TestCase):
     def test_01_retrieve_chinese(self):
         from campus_rag.keyword_retriever import BM25Retriever
         bm25 = BM25Retriever(self.tmpdir)
-        results = bm25.retrieve("暑假有什么活动", top_k=3)
+        results = bm25.retrieve("暑期学校报名", top_k=3)
         self.assertGreater(len(results), 0, "应能检索到结果")
         self.assertIn("暑期", results[0].node.text)
 
@@ -379,9 +379,6 @@ class TestQuery(unittest.TestCase):
                 metadata={"source": source},
             )
         ])
-        query_module._public_retriever = query_module._rag.get_public_index().as_retriever(
-            similarity_top_k=10
-        )
         try:
             result = query_module.search_notices("C9暑期学校")
             self.assertIn("暑期", result, "应能搜到 C9 暑期学校相关通知")
@@ -561,8 +558,8 @@ class TestDimensionGuard(unittest.TestCase):
         col.add(ids=["r1"], embeddings=[[0.1] * _get_live_embed_dim()], documents=["real"])
         assert_collection_dim(col)  # 维度一致时不应抛异常
 
-    def test_04_public_auto_rebuild_on_mismatch(self):
-        # 污染的 public 集合应被自动删除并从 campus_rag/data 重建
+    def test_04_public_preserved_on_mismatch(self):
+        # 维度不匹配必须保留公共集合，远端专有文档未必能从本地恢复
         import chromadb
         from campus_rag import index_manager
         from campus_rag.index_manager import RAGSystem, _get_live_embed_dim, _stored_dim
@@ -577,11 +574,11 @@ class TestDimensionGuard(unittest.TestCase):
             index_manager._chroma_client = client
             index_manager._chroma_client_path = str(Path(db_dir).resolve())
             rag = RAGSystem(persist_dir=db_dir)
-            rag.get_or_create_public_index(data_dir=str(self._RAG_BASE / "data"))
-            rebuilt = client.get_collection("public")
-            self.assertGreater(rebuilt.count(), 0, "应从源数据重建公共索引")
-            self.assertEqual(_stored_dim(rebuilt), _get_live_embed_dim(),
-                             "重建后的向量维度应与当前嵌入模型一致")
+            with self.assertRaises(RuntimeError):
+                rag.get_or_create_public_index(data_dir=str(self._RAG_BASE / "data"))
+            preserved = client.get_collection("public")
+            self.assertEqual(preserved.get()["documents"], ["mock pollution"])
+            self.assertEqual(_stored_dim(preserved), 1)
         finally:
             index_manager._chroma_client = old_client
             index_manager._chroma_client_path = old_client_path
@@ -847,20 +844,6 @@ class TestRetrievalSourceHeaders(unittest.TestCase):
         self.assertIn("[来源: a.txt] [源链接: https://x/1.html]", block)
 
 
-class _FakeCollection:
-    """模拟 chroma 集合（仅 get/count 接口，迁移守卫单测用）。"""
-
-    def __init__(self, metadatas: list):
-        self._metadatas = metadatas
-
-    def count(self):
-        return len(self._metadatas)
-
-    def get(self, include=None, limit=None):
-        metas = self._metadatas[:limit] if limit else self._metadatas
-        return {"metadatas": metas}
-
-
 # ── 路径锚定：默认向量库目录不得依赖启动 CWD ─────────────────
 
 
@@ -881,26 +864,18 @@ class TestDefaultPathAnchoring(unittest.TestCase):
         self.assertEqual(index_manager._DEFAULT_DATA_DIR, expected)
 
 
-class TestUrlMigrationGuards(unittest.TestCase):
-    """旧索引缺失 url 元数据的一次性迁移守卫：仅在可从本地源目录全量恢复时重建。"""
+class TestPublicReadSafety(unittest.TestCase):
+    def test_missing_url_does_not_trigger_rebuild(self) -> None:
+        from unittest.mock import Mock
+        from campus_rag import index_manager
 
-    def test_lacks_url_metadata_detection(self):
-        from campus_rag.index_manager import _lacks_url_metadata
-        self.assertTrue(_lacks_url_metadata(_FakeCollection([{"source": "a.txt"}])))
-        self.assertFalse(_lacks_url_metadata(_FakeCollection([{"source": "a.txt", "url": "https://x"}])))
-
-    def test_sources_match_dir(self):
-        import tempfile
-        from campus_rag.index_manager import _public_sources_match_dir
-        with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "a.txt").write_text("x", encoding="utf-8")
-            self.assertTrue(_public_sources_match_dir(_FakeCollection([{"source": "a.txt"}]), tmp))
-            # 同步服务端独有的文档不在本地目录 → 不可重建，否则丢数据
-            self.assertFalse(_public_sources_match_dir(
-                _FakeCollection([{"source": "a.txt"}, {"source": "sync_only.txt"}]), tmp))
-
-
-# ── 分块序号：多分块文档按来源还原原文的顺序保证 ──────────────────────
+        rag = object.__new__(index_manager.RAGSystem)
+        rag.chroma_client = Mock()
+        with patch.object(index_manager, "assert_collection_dim"), \
+             patch.object(index_manager, "ChromaVectorStore"), \
+             patch.object(index_manager.VectorStoreIndex, "from_vector_store"):
+            rag.get_or_create_public_index()
+        rag.chroma_client.delete_collection.assert_not_called()
 
 
 class TestChunkIndexAnnotation(unittest.TestCase):
