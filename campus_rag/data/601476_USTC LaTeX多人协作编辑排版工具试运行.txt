@@ -1,0 +1,14 @@
+来源：https://ustcnet.ustc.edu.cn/2023/0506/c33496a601476/page.htm
+标题：USTC LaTeX多人协作编辑排版工具试运行
+
+为助力我校师生更高效、更便捷地进行教学科研工作，依托我校科研力量，网络信息中心联合网络空间安全学院共同开发的USTC LaTeX多人协作编辑工具现面向所有科大师生开放试运行。平台采用学校统一身份认证进行登录，网站已提供线上使用手册供用户参考。
+USTC LaTeX主页：https://latex.ustc.edu.cn
+Overleaf的LaTeX详细文档：https://cn.overleaf.com/learn
+简单的LaTeX上手指南：
+英文版：https://cn.overleaf.com/learn/LaTeX/Learn_LaTeX_in_30_minutes
+中文版：https://zhuanlan.zhihu.com/p/139156617CTEX
+中文科技排版：http://www.ctex.org
+英文LaTeX教学站点：https://latex-tutorial.com/
+使用过程如遇到问题或其他意见，欢迎发送邮件至以下邮箱咨询：
+专属邮箱：latex@ustc.edu.cn；
+网络信息中心统一服务邮箱：nic@ustc.edu.cn。
