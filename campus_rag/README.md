@@ -65,6 +65,9 @@ get_upcoming_events(days=30)
 get_upcoming_events(days=7, category="报名")
 # 显式同步种子语料（启动时由 server/lifespan.py 自动调用；纯regex，不需嵌入）
 sync_notice_events()
+# 聚合“最近新通知 + 临近截止”为一份 dict（供前端今日面板/主动推送消费）
+#   返回 {generated_on, days, upcoming:[{…,days_left}], recent:[{…,days_since}]}
+get_notice_digest(days=7)
 ```
 
 返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / url`。事件同步已挂入 `add_public_documents` / `replace_public_documents` / `delete_public_data`、RAG 初始化（`_ensure_init`）与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，`get_upcoming_events` 仍可用。无法解析的相对表述（如“开学三周内”）`deadline` 记为 `None`，该通知仍可被语义检索到。

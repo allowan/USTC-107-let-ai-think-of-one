@@ -325,6 +325,7 @@ USTC-107-let-ai-think-of-one/
 |---|---|---|
 | GET | `/api/search/notices?q=` | 搜索公共通知 |
 | GET | `/api/search/my-data?q=` | 搜索个人数据 |
+| GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止事件（基于时间索引，不依赖嵌入/LLM） |
 
 #### 设置
 

@@ -8,7 +8,7 @@
 |---|---|---|
 | 入口 | `server.py`（根目录）/ `server/main.py` | uvicorn 启动 shim，缺依赖时给出激活虚拟环境的指引 |
 | 应用工厂 | `server/__init__.py` | `create_app()`：路由注册、CORS、前端静态文件挂载（`frontend/dist` 存在时） |
-| 生命周期 | `server/lifespan.py` | 启动时初始化 ChatService（未配 LLM Key 时降级不阻断启动），关闭时收尾 agent 连接 |
+| 生命周期 | `server/lifespan.py` | 启动时先 best-effort 同步通知事件时间索引（`sync_notice_events`，纯正则不依赖嵌入），再初始化 ChatService（未配 LLM Key 时降级不阻断启动），关闭时收尾 agent 连接 |
 | 依赖注入 | `server/deps.py` | `get_user()` 恒返回 `local_user`（本地单用户，无认证） |
 | 路由 | `server/routes/` | 参数校验、调用 service、返回响应——禁止写业务逻辑 |
 | 服务 | `server/services/` | 业务编排，委托 `campus_rag` / `main.py` |
@@ -19,7 +19,7 @@
 |---|---|
 | `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
 | `auth_service.py` | 话题 CRUD（委托 `campus_rag.auth`） |
-| `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`） |
+| `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`）；`get_digest()` 聚合“最近新通知 + 临近截止”（委托 `campus_rag.get_notice_digest`，基于 `events.db` 时间索引） |
 | `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
@@ -46,6 +46,7 @@
 | POST | `/api/schedule/import-ustc` | 解析用户粘贴/导出的教务课表 HTML/JSON 并替换该学期（仅限本地来源） |
 | GET | `/api/search/notices?q=` | 搜索公共通知（纯检索，不经 LLM） |
 | GET | `/api/search/my-data?q=` | 搜索个人数据（纯检索，不经 LLM） |
+| GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止事件（基于 `events.db`，不依赖嵌入/LLM；days 0–365） |
 | GET | `/api/settings` | 获取 LLM 配置 |
 | PUT | `/api/settings` | 更新 API Key / Base URL（忽略空值，原子写回） |
 | POST | `/api/settings/model` | 按分组切换模型 |

@@ -341,29 +341,42 @@ class EventStore:
         with closing(self._connect()) as db, db:
             return db.execute("SELECT COUNT(*) FROM notice_events").fetchone()[0]
 
-    def query_upcoming(
-        self, days: int = 30, category: str | None = None, today: date | None = None
+    def _select_window(
+        self, date_col: str, start: date, end: date, category: str | None, order: str
     ) -> list[dict]:
-        """返回 [today, today+days] 内截止的事件，按截止日期升序。
-
-        日期运算在代码里完成（确定性），deadline 以 ISO 字符串存储，
-        字典序即时间序，可直接用 BETWEEN 比较。
-        """
-        start = today or date.today()
-        end = start + timedelta(days=max(0, days))
+        """按指定日期列取 [start, end] 窗口内的事件。date_col/order 均为内部常量
+        （非用户输入），category 走参数化绑定；日期存 ISO 串，字典序即时间序。"""
         sql = (
             "SELECT source, title, category, audience, publish_date, deadline, "
             "deadline_text, url FROM notice_events "
-            "WHERE deadline IS NOT NULL AND deadline >= ? AND deadline <= ?"
+            f"WHERE {date_col} IS NOT NULL AND {date_col} >= ? AND {date_col} <= ?"
         )
         params: list = [start.isoformat(), end.isoformat()]
         if category:
             sql += " AND category = ?"
             params.append(category)
-        sql += " ORDER BY deadline ASC, source ASC"
+        sql += f" ORDER BY {order}"
         with closing(self._connect()) as db, db:
             db.row_factory = sqlite3.Row
             return [dict(r) for r in db.execute(sql, params).fetchall()]
+
+    def query_upcoming(
+        self, days: int = 30, category: str | None = None, today: date | None = None
+    ) -> list[dict]:
+        """返回 [today, today+days] 内截止的事件，按截止日期升序。日期运算在代码里完成。"""
+        start = today or date.today()
+        end = start + timedelta(days=max(0, days))
+        return self._select_window("deadline", start, end, category, "deadline ASC, source ASC")
+
+    def query_recent(
+        self, days: int = 30, category: str | None = None, today: date | None = None
+    ) -> list[dict]:
+        """返回 [today-days, today] 内发布的新通知，按发布日降序。"""
+        end = today or date.today()
+        start = end - timedelta(days=max(0, days))
+        return self._select_window(
+            "publish_date", start, end, category, "publish_date DESC, source ASC"
+        )
 
 
 # ── 门面（单例 + 抽取编排）─────────────────────────────────────────
@@ -481,3 +494,32 @@ def get_upcoming_events(
     except Exception:
         logger.warning("查询即将截止事件失败", exc_info=True)
         return []
+
+
+def get_notice_digest(days: int = 7, today: date | None = None) -> dict:
+    """聚合“最近新通知 + 临近截止事件”两份数据（供前端今日面板/主动推送消费）。
+
+    days_left / days_since 等日期差在代码里算好（以服务端本地日期为基准），
+    前端与 LLM 不再做日期运算。best-effort：事件库不可用时返回空列表。
+    """
+    today = today or date.today()
+    upcoming: list[dict] = []
+    recent: list[dict] = []
+    try:
+        store = get_event_store()
+        upcoming = store.query_upcoming(days=days, today=today)
+        recent = store.query_recent(days=days, today=today)
+    except Exception:
+        logger.warning("生成通知摘要失败", exc_info=True)
+    for e in upcoming:
+        if e.get("deadline"):
+            e["days_left"] = (date.fromisoformat(e["deadline"]) - today).days
+    for e in recent:
+        if e.get("publish_date"):
+            e["days_since"] = (today - date.fromisoformat(e["publish_date"])).days
+    return {
+        "generated_on": today.isoformat(),
+        "days": days,
+        "upcoming": upcoming,
+        "recent": recent,
+    }

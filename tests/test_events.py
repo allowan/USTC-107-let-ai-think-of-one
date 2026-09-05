@@ -19,14 +19,14 @@ from campus_rag import events
 
 def _mk_event(source: str, deadline: str | None, category: str = "报名",
               title: str | None = None, deadline_text: str | None = None,
-              url: str | None = None) -> dict:
+              url: str | None = None, publish_date: str | None = None) -> dict:
     return {
         "source": source,
         "source_hash": f"hash-{source}-{deadline}",
         "title": title or f"通知-{source}",
         "category": category,
         "audience": None,
-        "publish_date": None,
+        "publish_date": publish_date,
         "deadline": deadline,
         "deadline_text": deadline_text,
         "url": url,
@@ -176,6 +176,16 @@ class EventStoreTest(unittest.TestCase):
         rows = self.store.query_upcoming(days=30, category="竞赛", today=date(2026, 9, 1))
         self.assertEqual([r["source"] for r in rows], ["b.txt"])
 
+    def test_query_recent_window_desc_order(self):
+        self.store.upsert_events([
+            _mk_event("old.txt", None, publish_date="2026-08-01"),    # 窗口外
+            _mk_event("edge.txt", None, publish_date="2026-08-29"),   # today-7 边界，含
+            _mk_event("new.txt", None, publish_date="2026-09-05"),    # 今天，降序首位
+            _mk_event("mid.txt", None, publish_date="2026-09-02"),
+        ])
+        rows = self.store.query_recent(days=7, today=date(2026, 9, 5))
+        self.assertEqual([r["source"] for r in rows], ["new.txt", "mid.txt", "edge.txt"])
+
 
 class SyncFacadeTest(unittest.TestCase):
     def setUp(self):
@@ -294,6 +304,63 @@ class ToolWrapperTest(unittest.TestCase):
             out = main.get_upcoming_events.invoke({"days": 60, "category": "选课"})
         self.assertIn("秋季选课", out)
         self.assertNotIn("夏令营报名", out)
+
+
+class DigestFacadeTest(unittest.TestCase):
+    """get_notice_digest 聚合与日期差计算。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._patcher = patch.object(events, "_store", events.EventStore(Path(self.tmp.name) / "events.db"))
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        self.tmp.cleanup()
+
+    def test_digest_computes_days_left_and_since(self):
+        events.get_event_store().upsert_events([
+            _mk_event("a.txt", "2026-09-10", title="报名通知",
+                      deadline_text="报名截止 2026年9月10日", publish_date="2026-09-01"),
+        ])
+        d = events.get_notice_digest(days=10, today=date(2026, 9, 5))
+        self.assertEqual(d["generated_on"], "2026-09-05")
+        self.assertEqual(d["days"], 10)
+        self.assertEqual(len(d["upcoming"]), 1)
+        self.assertEqual(len(d["recent"]), 1)
+        self.assertEqual(d["upcoming"][0]["days_left"], 5)
+        self.assertEqual(d["recent"][0]["days_since"], 4)
+        self.assertEqual(d["upcoming"][0]["title"], "报名通知")
+
+    def test_digest_empty_store_returns_empty_lists(self):
+        d = events.get_notice_digest(days=7, today=date(2026, 9, 5))
+        self.assertEqual(d["upcoming"], [])
+        self.assertEqual(d["recent"], [])
+
+
+class DigestRouteTest(unittest.TestCase):
+    """/api/digest 路由：参数透传与响应结构（stub 服务，不碰真实库）。"""
+
+    def test_digest_route_shape_and_days(self):
+        import server
+        from fastapi.testclient import TestClient
+        from server.services.rag_service import get_rag_service
+
+        class _StubRAG:
+            def get_digest(self, days=7):
+                return {"generated_on": "2026-09-05", "days": days, "upcoming": [], "recent": []}
+
+        server.app.dependency_overrides[get_rag_service] = lambda: _StubRAG()
+        try:
+            client = TestClient(server.app)
+            resp = client.get("/api/digest?days=3")
+        finally:
+            server.app.dependency_overrides.clear()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["days"], 3)
+        self.assertIn("upcoming", body)
+        self.assertIn("recent", body)
 
 
 class RealCorpusRegressionTest(unittest.TestCase):
