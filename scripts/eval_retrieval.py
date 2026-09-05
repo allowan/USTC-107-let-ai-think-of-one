@@ -69,6 +69,9 @@ def main() -> int:
         def ranked_sources(query: str) -> list[str]:
             return _vector_ranked_sources(query)
     else:
+        if not corpus:
+            print("语料为空：campus_rag/data 下没有 .txt 文件，无法评测")
+            return 1
         print(f"模式：BM25（离线，语料 {len(corpus)} 篇）")
         # 语料只建一次索引：先一次性完成分词与 BM25 构建。
         # 不用 keyword_retriever.BM25Retriever：其检索结果丢弃来源元数据，
