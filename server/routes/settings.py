@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from server.deps import get_user
@@ -12,6 +14,7 @@ from server.services.chat_service import ChatService, get_chat_service
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 _SETTINGS_PATH = Path(__file__).resolve().parent.parent.parent / "settings.json"
 _SETTINGS_EXAMPLE_PATH = Path(__file__).resolve().parent.parent.parent / "settings.example.json"
+_API_TYPES = {"chat-completions", "responses"}
 
 
 def _load_default_settings() -> dict:
@@ -52,9 +55,94 @@ def _save_settings(data: dict) -> None:
     os.replace(tmp, _SETTINGS_PATH)
 
 
+def _normalize_model_group(body: dict) -> dict:
+    """校验并规范化一个供应商分组，避免无效配置写入 settings.json。"""
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="供应商分组必须是对象")
+    group_name = str(body.get("group_name") or "").strip()
+    if not group_name:
+        raise HTTPException(status_code=400, detail="供应商名称不能为空")
+
+    base_url = str(body.get("base_url") or "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Base URL 不能为空")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Base URL 必须以 http:// 或 https:// 开头")
+
+    api_key = str(body.get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key 不能为空")
+
+    raw_models = body.get("models")
+    if not isinstance(raw_models, list) or not raw_models:
+        raise HTTPException(status_code=400, detail="每个供应商至少需要配置一个模型")
+    models = []
+    seen_ids = set()
+    for raw_model in raw_models:
+        if not isinstance(raw_model, dict):
+            raise HTTPException(status_code=400, detail="模型配置必须是对象")
+        request_id = str(raw_model.get("request_id") or "").strip()
+        show_id = str(raw_model.get("show_id") or request_id).strip()
+        if not request_id:
+            raise HTTPException(status_code=400, detail="模型 ID 不能为空")
+        identity = request_id.casefold()
+        if identity in seen_ids:
+            raise HTTPException(status_code=400, detail=f"模型 ID 重复: {request_id}")
+        seen_ids.add(identity)
+        models.append({
+            "request_id": request_id,
+            "show_id": show_id or request_id,
+            "toolCalling": bool(raw_model.get("toolCalling", True)),
+            "vision": bool(raw_model.get("vision", False)),
+        })
+
+    api_type = str(body.get("api_type") or "chat-completions").strip() or "chat-completions"
+    if api_type not in _API_TYPES:
+        raise HTTPException(status_code=400, detail="API Type 必须是 chat-completions 或 responses")
+
+    return {
+        "group_name": group_name,
+        "vendor": str(body.get("vendor") or "customendpoint").strip() or "customendpoint",
+        "api_key": api_key,
+        "api_type": api_type,
+        "base_url": base_url,
+        "models": models,
+    }
+
+
+def _find_group_index(groups: list, group_name: str) -> int | None:
+    target = group_name.casefold()
+    return next(
+        (index for index, group in enumerate(groups)
+         if str(group.get("group_name") or "").casefold() == target),
+        None,
+    )
+
+
+def _apply_active_group_connection(data: dict, group: dict) -> None:
+    """活动模型属于该分组时，立即应用分组连接参数。"""
+    env = data.setdefault("env", {})
+    active_model = str(env.get("model") or "").strip()
+    group_model_ids = {
+        str(model.get("request_id") or "").strip()
+        for model in group.get("models", []) if isinstance(model, dict)
+    }
+    if active_model and active_model in group_model_ids:
+        for key in ("api_key", "base_url", "api_type"):
+            env[key] = group[key]
+
+
 @router.get("")
 async def get_settings(user: str = Depends(get_user)):
-    return _load_settings()
+    data = _load_settings()
+    file_model = str(data.get("env", {}).get("model") or "")
+    env_model = os.environ.get("LLM_MODEL", "").strip()
+    data["runtime"] = {
+        "effective_model": env_model or file_model,
+        "model_source": "environment" if env_model else "settings",
+        "model_locked": bool(env_model),
+    }
+    return data
 
 
 @router.put("")
@@ -82,18 +170,147 @@ async def switch_model(
     user: str = Depends(get_user),
     chat: ChatService = Depends(get_chat_service),
 ):
-    from model.config import change_model as config_change_model
+    from model.config import select_model
 
     group = (body.get("group") or "").strip()
     model = (body.get("model") or "").strip()
     if not group or not model:
         raise HTTPException(status_code=400, detail="分组和模型不能为空")
+    if os.environ.get("LLM_MODEL", "").strip():
+        raise HTTPException(
+            status_code=409,
+            detail="当前模型由环境变量 LLM_MODEL 固定，请移除该变量后再从设置中切换",
+        )
     try:
-        config_change_model(group, model)
+        data = _load_settings()
+        selected = select_model(data, group, model)
+        _save_settings(data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     chat.clear_agent_cache()
-    return {"message": "模型已切换", "model": model}
+    return {"message": "模型已切换", **selected}
+
+
+@router.post("/available-models")
+async def get_available_models(
+    body: dict,
+    user: str = Depends(get_user),
+):
+    """通过 OpenAI 兼容接口的 /models 端点获取可用模型。"""
+    data = _load_settings()
+    env = data.get("env", {})
+    base_url = str(body.get("base_url") or env.get("base_url") or "").strip()
+    api_key = str(body.get("api_key") or env.get("api_key") or "").strip()
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="请填写有效的 HTTP(S) Base URL")
+
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"模型列表请求失败（上游 HTTP {exc.response.status_code}）",
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"无法获取模型列表: {exc}") from exc
+
+    raw_models = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_models, list):
+        raise HTTPException(status_code=502, detail="模型列表响应缺少 data 数组")
+    model_ids = sorted({
+        str(item.get("id") or "").strip()
+        for item in raw_models if isinstance(item, dict) and item.get("id")
+    }, key=str.casefold)
+    return {"models": model_ids, "url": url}
+
+
+@router.post("/groups", status_code=201)
+async def add_model_group(
+    body: dict,
+    user: str = Depends(get_user),
+    chat: ChatService = Depends(get_chat_service),
+):
+    group = _normalize_model_group(body)
+    data = _load_settings()
+    groups = data.setdefault("groups", [])
+    if _find_group_index(groups, group["group_name"]) is not None:
+        raise HTTPException(status_code=409, detail=f"供应商分组已存在: {group['group_name']}")
+    groups.append(group)
+    _apply_active_group_connection(data, group)
+    _save_settings(data)
+    chat.clear_agent_cache()
+    return {"message": "供应商分组已添加", "group": group}
+
+
+@router.put("/groups/{group_name}")
+async def update_model_group(
+    group_name: str,
+    body: dict,
+    user: str = Depends(get_user),
+    chat: ChatService = Depends(get_chat_service),
+):
+    group = _normalize_model_group(body)
+    data = _load_settings()
+    groups = data.setdefault("groups", [])
+    index = _find_group_index(groups, group_name)
+    if index is None:
+        raise HTTPException(status_code=404, detail=f"未找到供应商分组: {group_name}")
+    duplicate = _find_group_index(groups, group["group_name"])
+    if duplicate is not None and duplicate != index:
+        raise HTTPException(status_code=409, detail=f"供应商分组已存在: {group['group_name']}")
+
+    active_model = str(data.get("env", {}).get("model") or "")
+    new_model_ids = {model["request_id"] for model in group["models"]}
+    other_model_ids = {
+        model.get("request_id")
+        for group_index, item in enumerate(groups) if group_index != index
+        for model in item.get("models", [])
+    }
+    if active_model and active_model not in new_model_ids and active_model not in other_model_ids:
+        raise HTTPException(status_code=409, detail="不能从供应商分组中移除当前正在使用的模型")
+
+    groups[index] = group
+    _apply_active_group_connection(data, group)
+    _save_settings(data)
+    chat.clear_agent_cache()
+    return {"message": "供应商分组已更新", "group": group}
+
+
+@router.delete("/groups/{group_name}")
+async def delete_model_group(
+    group_name: str,
+    user: str = Depends(get_user),
+    chat: ChatService = Depends(get_chat_service),
+):
+    data = _load_settings()
+    groups = data.setdefault("groups", [])
+    index = _find_group_index(groups, group_name)
+    if index is None:
+        raise HTTPException(status_code=404, detail=f"未找到供应商分组: {group_name}")
+    if len(groups) == 1:
+        raise HTTPException(status_code=409, detail="至少需要保留一个供应商分组")
+
+    active_model = str(data.get("env", {}).get("model") or "")
+    remaining_model_ids = {
+        model.get("request_id")
+        for group_index, item in enumerate(groups) if group_index != index
+        for model in item.get("models", [])
+    }
+    if active_model and active_model not in remaining_model_ids:
+        raise HTTPException(status_code=409, detail="不能删除包含当前使用模型的供应商分组")
+
+    removed = groups.pop(index)
+    _save_settings(data)
+    chat.clear_agent_cache()
+    return {"message": "供应商分组已删除", "group_name": removed["group_name"]}
 
 
 @router.get("/tools")

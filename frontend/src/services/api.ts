@@ -36,7 +36,24 @@ export const settingsApi = {
     api.put<{ message: string }>('/settings', data),
 
   switchModel: (group: string, model: string) =>
-    api.post<{ message: string; model: string }>('/settings/model', { group, model }),
+    api.post<{ message: string; group: string; model: string; show_id: string }>('/settings/model', { group, model }),
+
+  getAvailableModels: (data: { base_url?: string; api_key?: string }) =>
+    api.post<{ models: string[]; url: string }>('/settings/available-models', data),
+
+  addGroup: (group: import('@/types').ModelGroup) =>
+    api.post<{ message: string; group: import('@/types').ModelGroup }>('/settings/groups', group),
+
+  updateGroup: (originalName: string, group: import('@/types').ModelGroup) =>
+    api.put<{ message: string; group: import('@/types').ModelGroup }>(
+      `/settings/groups/${encodeURIComponent(originalName)}`,
+      group,
+    ),
+
+  deleteGroup: (groupName: string) =>
+    api.delete<{ message: string; group_name: string }>(
+      `/settings/groups/${encodeURIComponent(groupName)}`,
+    ),
 
   getTools: () =>
     api.get<{ tools: import('@/types').ToolSetting[] }>('/settings/tools'),

@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -18,7 +19,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 # 确保项目根目录在 sys.path 中
 _project_root = Path(__file__).resolve().parent.parent
@@ -381,10 +384,278 @@ class TestSettingsRoutes(unittest.TestCase):
         data = r.json()
         self.assertIn("env", data)
         self.assertIn("groups", data)
+        self.assertIn("runtime", data)
+        self.assertIn("effective_model", data["runtime"])
 
     def test_switch_model_requires_fields(self):
         r = self.client.post("/api/settings/model", json={"group": "", "model": ""})
         self.assertEqual(r.status_code, 400)
+
+    def test_switch_model_preserves_global_connection(self):
+        import server
+        from server.routes import settings as settings_routes
+        from server.services.chat_service import get_chat_service
+
+        class _ChatStub:
+            cleared = 0
+
+            def clear_agent_cache(self):
+                self.cleared += 1
+
+        payload = {
+            "env": {
+                "api_key": "existing-key",
+                "base_url": "https://api.example.test",
+                "model": "model-a",
+                "api_type": "chat-completions",
+            },
+            "groups": [{
+                "group_name": "Example",
+                "api_key": "",
+                "base_url": "",
+                "api_type": "",
+                "models": [
+                    {"request_id": "model-a", "show_id": "Model A"},
+                    {"request_id": "model-b", "show_id": "Model B"},
+                ],
+            }],
+        }
+        chat = _ChatStub()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            server.app.dependency_overrides[get_chat_service] = lambda: chat
+            try:
+                with patch.object(settings_routes, "_SETTINGS_PATH", path), \
+                     patch.dict(os.environ, {"LLM_MODEL": ""}):
+                    r = self.client.post(
+                        "/api/settings/model",
+                        json={"group": "Example", "model": "model-b"},
+                    )
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            finally:
+                server.app.dependency_overrides[get_chat_service] = lambda: object()
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["model"], "model-b")
+        self.assertEqual(saved["env"]["model"], "model-b")
+        self.assertEqual(saved["env"]["api_key"], "existing-key")
+        self.assertEqual(saved["env"]["base_url"], "https://api.example.test")
+        self.assertEqual(chat.cleared, 1)
+
+    def test_switch_model_rejects_environment_override(self):
+        with patch.dict(os.environ, {"LLM_MODEL": "forced-model"}):
+            r = self.client.post(
+                "/api/settings/model",
+                json={"group": "DeepSeek", "model": "deepseek-v4-pro"},
+            )
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("LLM_MODEL", r.json()["detail"])
+
+    def test_model_group_crud_and_validation(self):
+        import server
+        from server.routes import settings as settings_routes
+        from server.services.chat_service import get_chat_service
+
+        class _ChatStub:
+            def clear_agent_cache(self):
+                pass
+
+        payload = {
+            "env": {"model": "model-a", "api_key": "", "base_url": "https://global.test"},
+            "groups": [{
+                "group_name": "Default",
+                "vendor": "customendpoint",
+                "api_key": "",
+                "api_type": "chat-completions",
+                "base_url": "",
+                "models": [{"request_id": "model-a", "show_id": "Model A"}],
+            }],
+        }
+        new_group = {
+            "group_name": "Campus Gateway",
+            "vendor": "customendpoint",
+            "api_key": "test-key",
+            "api_type": "chat-completions",
+            "base_url": "https://gateway.example.test/v1",
+            "models": [{"request_id": "model-x", "show_id": "Model X"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            server.app.dependency_overrides[get_chat_service] = lambda: _ChatStub()
+            try:
+                with patch.object(settings_routes, "_SETTINGS_PATH", path):
+                    created = self.client.post("/api/settings/groups", json=new_group)
+                    duplicate = self.client.post("/api/settings/groups", json=new_group)
+                    updated_group = {
+                        **new_group,
+                        "group_name": "Campus Models",
+                        "models": [
+                            {"request_id": "model-x", "show_id": "Model X"},
+                            {"request_id": "model-y", "show_id": "Model Y", "vision": True},
+                        ],
+                    }
+                    updated = self.client.put(
+                        "/api/settings/groups/Campus%20Gateway",
+                        json=updated_group,
+                    )
+                    deleted = self.client.delete("/api/settings/groups/Campus%20Models")
+                    active_delete = self.client.delete("/api/settings/groups/Default")
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            finally:
+                server.app.dependency_overrides[get_chat_service] = lambda: object()
+
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["group"]["models"][1]["request_id"], "model-y")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(active_delete.status_code, 409)
+        self.assertEqual([group["group_name"] for group in saved["groups"]], ["Default"])
+
+    def test_model_group_requires_unique_model_ids(self):
+        group = {
+            "group_name": "Duplicate Models",
+            "api_key": "test-key",
+            "base_url": "https://gateway.example.test/v1",
+            "models": [
+                {"request_id": "same", "show_id": "One"},
+                {"request_id": "SAME", "show_id": "Two"},
+            ],
+        }
+        r = self.client.post("/api/settings/groups", json=group)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("模型 ID 重复", r.json()["detail"])
+
+    def test_available_models_uses_compatible_models_endpoint(self):
+        from server.routes import settings as settings_routes
+
+        response = httpx.Response(
+            200,
+            json={"data": [{"id": "model-b"}, {"id": "model-a"}, {"id": "model-a"}]},
+            request=httpx.Request("GET", "https://gateway.test/v1/models"),
+        )
+        with patch.object(httpx.AsyncClient, "get", new_callable=AsyncMock, return_value=response) as get:
+            r = self.client.post(
+                "/api/settings/available-models",
+                json={"base_url": "https://gateway.test/v1", "api_key": "secret"},
+            )
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["models"], ["model-a", "model-b"])
+        _, kwargs = get.call_args
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
+
+    def test_available_models_rejects_invalid_base_url(self):
+        r = self.client.post(
+            "/api/settings/available-models",
+            json={"base_url": "file:///etc/passwd"},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_model_group_rejects_unknown_api_type(self):
+        r = self.client.post("/api/settings/groups", json={
+            "group_name": "Bad API Type",
+            "api_key": "test-key",
+            "base_url": "https://gateway.example.test/v1",
+            "api_type": "legacy-completions",
+            "models": [{"request_id": "model-a"}],
+        })
+        self.assertEqual(r.status_code, 400)
+
+    def test_model_group_requires_base_url_and_api_key(self):
+        common = {
+            "group_name": "Missing Connection",
+            "models": [{"request_id": "model-a"}],
+        }
+        missing_both = self.client.post("/api/settings/groups", json=common)
+        missing_key = self.client.post("/api/settings/groups", json={
+            **common,
+            "base_url": "https://gateway.example.test/v1",
+        })
+
+        self.assertEqual(missing_both.status_code, 400)
+        self.assertIn("Base URL", missing_both.json()["detail"])
+        self.assertEqual(missing_key.status_code, 400)
+        self.assertIn("API Key", missing_key.json()["detail"])
+
+    def test_updating_active_model_group_applies_its_connection(self):
+        import server
+        from server.routes import settings as settings_routes
+        from server.services.chat_service import get_chat_service
+
+        class _ChatStub:
+            def clear_agent_cache(self):
+                pass
+
+        payload = {
+            "env": {
+                "model": "active-model",
+                "api_key": "",
+                "base_url": "https://old.example.test/v1",
+                "api_type": "chat-completions",
+            },
+            "groups": [{
+                "group_name": "Active",
+                "vendor": "customendpoint",
+                "api_key": "old-key",
+                "base_url": "https://old.example.test/v1",
+                "api_type": "chat-completions",
+                "models": [{"request_id": "active-model", "show_id": "Active Model"}],
+            }],
+        }
+        updated_group = {
+            **payload["groups"][0],
+            "api_key": "new-key",
+            "base_url": "https://new.example.test/v1",
+            "api_type": "responses",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            server.app.dependency_overrides[get_chat_service] = lambda: _ChatStub()
+            try:
+                with patch.object(settings_routes, "_SETTINGS_PATH", path):
+                    response = self.client.put("/api/settings/groups/Active", json=updated_group)
+                saved = json.loads(path.read_text(encoding="utf-8"))
+            finally:
+                server.app.dependency_overrides[get_chat_service] = lambda: object()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(saved["env"]["api_key"], "new-key")
+        self.assertEqual(saved["env"]["base_url"], "https://new.example.test/v1")
+        self.assertEqual(saved["env"]["api_type"], "responses")
+
+    def test_runtime_config_uses_active_group_credentials(self):
+        from model import config as model_config
+
+        payload = {
+            "env": {
+                "model": "active-model",
+                "api_key": "",
+                "base_url": "https://global.example.test/v1",
+                "api_type": "chat-completions",
+            },
+            "groups": [{
+                "group_name": "Active",
+                "api_key": "group-key",
+                "base_url": "https://group.example.test/v1",
+                "api_type": "responses",
+                "models": [{"request_id": "active-model"}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.object(model_config, "_SETTINGS_PATH", path):
+                effective = model_config.read_json()
+
+        self.assertEqual(effective["api_key"], "group-key")
+        self.assertEqual(effective["base_url"], "https://group.example.test/v1")
+        self.assertEqual(effective["api_type"], "responses")
 
     def test_get_tools_shape(self):
         r = self.client.get("/api/settings/tools")

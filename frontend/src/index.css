@@ -121,6 +121,73 @@ html, body, #root {
 .stream-status .anticon {
   font-size: 16px;
 }
+
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.chat-composer-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-model-switcher {
+  flex: none;
+  min-height: 32px;
+}
+
+.chat-model-icon {
+  color: #1677ff;
+}
+
+.chat-model-select {
+  width: 180px;
+  max-width: 34vw;
+}
+
+.settings-modal .ant-modal-body,
+.provider-editor-modal .ant-modal-body {
+  scrollbar-width: thin;
+  scrollbar-color: #b8c2cc transparent;
+}
+
+.settings-modal .ant-modal-body::-webkit-scrollbar,
+.provider-editor-modal .ant-modal-body::-webkit-scrollbar {
+  width: 7px;
+}
+
+.settings-modal .ant-modal-body::-webkit-scrollbar-thumb,
+.provider-editor-modal .ant-modal-body::-webkit-scrollbar-thumb {
+  border-radius: 8px;
+  background: #b8c2cc;
+}
+
+.settings-modal .ant-modal-body::-webkit-scrollbar-track,
+.provider-editor-modal .ant-modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (max-width: 640px) {
+  .chat-composer-row {
+    flex-wrap: wrap;
+  }
+
+  .chat-composer-input {
+    flex-basis: 100%;
+  }
+
+  .chat-model-switcher {
+    margin-right: auto;
+  }
+
+  .chat-model-select {
+    width: 160px;
+    max-width: 58vw;
+  }
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
