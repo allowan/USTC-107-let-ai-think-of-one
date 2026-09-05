@@ -11,6 +11,7 @@ import {
   DeleteOutlined,
   CommentOutlined,
   CalendarOutlined,
+  BellOutlined,
 } from '@ant-design/icons';
 import { useTopicStore } from '@/stores/topicStore';
 import SettingsModal from './SettingsModal';
@@ -38,6 +39,7 @@ export default function AppLayout() {
   }, []);
 
   const menuItems = [
+    { key: '/today', icon: <BellOutlined />, label: '今日' },
     { key: '/chat', icon: <MessageOutlined />, label: '对话' },
     { key: '/personal-data', icon: <DatabaseOutlined />, label: '个人数据' },
     { key: '/schedule', icon: <CalendarOutlined />, label: '我的课表' },
@@ -99,19 +101,9 @@ export default function AppLayout() {
         style={{ background: '#fff', height: '100vh', position: 'sticky', top: 0, overflow: 'hidden' }}
       >
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-        <div
-          style={{
-            height: 64,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontWeight: 700,
-            fontSize: 18,
-            borderBottom: '1px solid #f0f0f0',
-            flexShrink: 0,
-          }}
-        >
-          USTC AI
+        <div className="sidebar-brand">
+          <div className="sidebar-brand-logo">USTC AI</div>
+          <div className="sidebar-brand-sub">校园信息助手</div>
         </div>
         <Menu
           mode="inline"

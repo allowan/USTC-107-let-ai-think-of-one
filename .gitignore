@@ -1,11 +1,10 @@
 *.log
-data/
-!campus_rag/data/
-!campus_rag/data/*.txt
+/data/
 chroma_db/
 campus_rag/chroma_db/
 node_modules/
 .claude/
+.workbuddy/
 
 # Secrets & local state
 settings.json
@@ -15,6 +14,7 @@ sync_server/data/*.db-journal
 campus_rag/.env
 users.db
 schedule.db
+events.db
 workspace/
 output/
 
@@ -256,3 +256,13 @@ __marimo__/
 # Markdown standard files
 AGENTS.md
 CLAUDE.md
+# 语料目录：仅 7 个手写种子文件入库（精确白名单，防止同 ID 爬取件被误放行）；
+# 其余为爬虫生成语料，可随时用 scripts/sync_ustc_columns.py 重新生成
+campus_rag/data/*
+!campus_rag/data/20161_关于2025秋开题的“大学生研究计划”项目中期检查的通知.txt
+!campus_rag/data/20406_关于2026年秋季学期本科课程助教岗位发布及申请的通知.txt
+!campus_rag/data/20412_关于中国科大“一〇七杯”算力与智能体开发大赛补报名的通知.txt
+!campus_rag/data/20425_2026年秋季学期本科生选课通知.txt
+!campus_rag/data/20455_关于进一步规范2026年度本科生实习管理的通知.txt
+!campus_rag/data/3384_2026-2027学年第一学期研究生课程助教申报通知.txt
+!campus_rag/data/95379_校党委书记舒歌群院士为2026届毕业生讲授毕业思政课.txt

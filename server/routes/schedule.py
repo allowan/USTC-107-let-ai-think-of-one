@@ -1,5 +1,7 @@
 """Structured personal schedule routes."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -57,7 +59,8 @@ async def list_schedule(
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
 ):
-    return service.list(user, semester)
+    # SQLite 同步阻塞，与项目其他路由一致丢线程池（AGENTS.md 3.4）
+    return await asyncio.to_thread(service.list, user, semester)
 
 
 @router.post("/import")
@@ -70,7 +73,10 @@ async def import_schedule(
     ensure_local_origin(request)
     if not payload.courses:
         raise HTTPException(status_code=400, detail="未读取到课程")
-    count = service.replace(user, payload.semester, [course.model_dump() for course in payload.courses])
+    count = await asyncio.to_thread(
+        service.replace, user, payload.semester,
+        [course.model_dump() for course in payload.courses],
+    )
     return {"message": "课表同步成功", "semester": payload.semester, "meeting_count": count}
 
 
@@ -85,10 +91,10 @@ async def import_ustc_schedule(
 
     ensure_local_origin(request)
     try:
-        parsed = parse_ustc_schedule(payload.content, payload.filename)
+        parsed = await asyncio.to_thread(parse_ustc_schedule, payload.content, payload.filename)
     except UstcScheduleParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    count = service.replace(user, parsed["semester"], parsed["courses"])
+    count = await asyncio.to_thread(service.replace, user, parsed["semester"], parsed["courses"])
     return {
         "message": "教务课表解析并同步成功",
         "semester": parsed["semester"],

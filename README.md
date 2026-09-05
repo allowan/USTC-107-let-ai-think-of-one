@@ -6,12 +6,14 @@
 
 ## 功能特性
 
-- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染和“停止生成”打断
+- **多轮对话** — SSE 流式输出 + LangGraph 检查点持久化，支持 Markdown 渲染（含 GFM 表格）和“停止生成”打断
 - **话题管理** — 多话题隔离，每个话题独立的对话历史，自动生成标题
-- **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据
+- **今日面板** — 打开即见“我追踪的事件 + 即将截止/进行中与即将开始 + 最近发布”，数据全部来自本地时间索引，不依赖 LLM；事件可一键追踪置顶，临近 3 天高亮
+- **RAG 检索** — 向量检索 + BM25 关键词检索 + 重排序，精准匹配校园通知和个人数据；检索为空时自动用 jieba 关键词缩减重试一次（检索自愈）
 - **个人知识库** — 私有数据的增删改查，支持按来源聚合展示
 - **公共通知同步** — Sync Server 架构，支持增量/全量同步，客户端自动拉取最新通知
 - **多跳推理** — Agent 面对复杂问题自动进行多轮检索：先初次检索，从结果中提取关键线索发起二次检索，反复直到信息完整，综合所有结果回答
+- **时间感知** — 从通知中确定性抽取截止日/发生时间（展览·施工·停水等 span）/发布日/类别/地点存入时间索引（`events.db`），“最近有什么要截止的报名”“现在有什么展览/哪里在施工”按真实日期排序回答，不遗漏措辞不同但时间临近的通知；进行中事件单独标注
 - **联网搜索** — Agent 内置联网搜索（Tavily / DuckDuckGo）与网页抓取工具，弥补本地知识库时效性缺口，回答自动附来源链接
 - **评课参考** — 接入评课社区（icourse.club）公开课程评价搜索与正文读取，选课建议时区分官方信息与学生主观评价
 - **可溯源** — 检索结果与回答均携带「来源文件名 + 源链接」，联网搜索结果附网页链接
@@ -33,10 +35,11 @@
 用户提问
   → Agent（main.py）决定调用哪些工具
      ├── search_campus_notices / search_notices_raw   → campus_rag 公共通知检索
+     ├── get_upcoming_events(kind=deadline|start)     → 时间索引：即将截止的事件 / 即将开始或进行中的事件（events.db）
      ├── search_my_data / search_user_data_raw        → campus_rag 个人数据检索
      ├── web_search / web_fetch / ustc_web_search / ustc_web_fetch → 联网搜索与网页抓取（tools/）
      ├── course_review_search / course_review_fetch → 评课社区课程评价（tools/）
-     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取与教务课表导入
+     ├── get_my_schedule / import_ustc_schedule   → 本地课表读取（默认按日期自动取当前学期）与教务课表导入
      └── add_personal_data                            → 个人知识库入库
   → SSE 流式回传前端（thinking / tool_use / token / done 事件）
 ```
@@ -253,7 +256,8 @@ USTC-107-let-ai-think-of-one/
 ├── frontend/                  # React 18 前端
 │   └── src/
 │       ├── pages/
-│       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染
+│       │   ├── DigestPage.tsx      #   今日面板：追踪事件 + 即将截止/进行中 + 最近发布
+│       │   ├── ChatPage.tsx        #   SSE 流式对话 + Markdown 渲染（GFM 表格）+ 停止生成
 │       │   ├── PersonalDataPage.tsx #   个人知识库管理
 │       │   ├── SchedulePage.tsx    #   结构化课表导入与离线查看
 │       │   └── SyncPage.tsx        #   公共通知同步
@@ -267,14 +271,12 @@ USTC-107-let-ai-think-of-one/
 │       ├── services/
 │       │   └── api.ts              #   API 调用封装
 │       ├── stores/
-│       │   ├── userStore.ts         #   用户状态
 │       │   └── topicStore.ts        #   话题状态
 │       └── types/
 │           └── index.ts            #   TypeScript 类型定义
-├── tests/                     # 单元测试（`pytest tests/ -v`）
-├── scripts/                   # 网页源同步与通知栏目采集（详见 campus_rag/README.md）
+├── tests/                     # 单元测试（`pytest tests/ -v`）+ events_ground_truth.json 事件抽取真值
+├── scripts/                   # 网页源同步、通知栏目采集与事件抽取评测（详见 campus_rag/README.md）
 ├── data/                      # 运行时数据（checkpoint DB，gitignore）
-├── workspace/                 # 用户文件存储（gitignore）
 ├── chroma_db/                 # ChromaDB 向量数据库（gitignore）
 └── settings.example.json      # LLM 配置模板
 ```
@@ -325,6 +327,10 @@ USTC-107-let-ai-think-of-one/
 |---|---|---|
 | GET | `/api/search/notices?q=` | 搜索公共通知 |
 | GET | `/api/search/my-data?q=` | 搜索个人数据 |
+| GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止/进行中与即将开始事件（基于时间索引，不依赖嵌入/LLM） |
+| GET | `/api/digest/tracked` | 列出追踪的事件（今日面板置顶） |
+| POST | `/api/digest/tracked` | 追踪一条事件 |
+| DELETE | `/api/digest/tracked/{source}` | 取消追踪 |
 
 #### 设置
 
@@ -393,16 +399,21 @@ python scripts/sync_web_sources.py
 python scripts/sync_web_sources.py --reindex
 ```
 
-通知栏目批量采集配置在 `campus_rag/ustc_columns.json`。默认同步中国科大主页
-“服务类通知”最近一页中的 10 条文章，并将每篇公开正文保存成独立 TXT：
+通知栏目批量采集配置在 `campus_rag/ustc_columns.json`。默认同步四个栏目的最近一页：
+中国科大主页“服务类通知”（10 条）、教务处教学通知（10 条）、教务处信息通知（10 条）、
+研究生院通知公告（15 条）。支持的站点文章链接格式：主站 `/info/<栏目>/<文章>.htm`、
+研究生院 `/article/<id>`、教务处 `<栏目>/<子栏目>/<id>.html`：
 
 ```bash
 python scripts/sync_ustc_columns.py
 python scripts/sync_ustc_columns.py --reindex
 ```
 
-`max_pages` 控制追溯页数，`max_articles` 控制单次文章上限。旧版通知若跳转到
-统一身份认证，将记为 `skipped`，不会尝试绕过登录。
+`max_pages` 控制追溯页数（分页命名仅适配主站 Visual SiteBuilder，教务处/研究生院请保持 1），
+`max_articles` 控制单次文章上限。旧版通知若跳转到
+统一身份认证，将记为 `skipped`，不会尝试绕过登录。教务处/研究生院栏目与本地手动种子文件
+（`20425_…` / `3384_…` 等）内容相同但文件名不同：首次跑采集后可删除手动种子文件，
+避免公共索引里同文双份（或用 `delete_public_data(source)` 精确清理旧 source）。
 
 Agent 提供六个互补的联网工具：`web_search` 按关键词查找公开网页，
 `web_fetch` 在已知 URL 时提取网页可见正文；`ustc_web_search` 只搜索配置中的
@@ -432,6 +443,9 @@ Agent 提供六个互补的联网工具：`web_search` 按关键词查找公开�
 ### RAG 模块测试
 
 ```bash
+# 事件抽取质量评测（零第三方依赖）：对比真值与抽取结果，输出逐字段 P/R
+python scripts/eval_events.py
+
 # 公共数据检索
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
 
@@ -567,26 +581,26 @@ npm run build       # 生产构建
 
 ### 增加数据覆盖的广度和深度
 
-* **时效性**：使用爬虫爬取相关网站和系统（教务处公告、研究生院通知、课程表、考试成绩、就业信息、社团活动、校车时刻、校历、政策文件等）保证时效性
-* **数据结构化**：课表、成绩等是结构化信息，现有 txt 格式不能很好存储
+* **时效性** — ✅ 第一阶段已完成。`scripts/sync_ustc_columns.py` 配置化采集 11 个官方栏目（主站服务类通知、教务处教学/信息通知、研究生院通知/新闻/政策、网络信息中心公告等，约 340 篇），带限流退避重试与按内容增量更新；语料不入 git（`.gitignore` 的 `ustc*.txt`），换机重跑脚本 + `--reindex` 即可恢复。后续可扩展栏目（校历、就业信息、社团活动）与定时增量同步
+* **数据结构化**：课表、成绩等是结构化信息，现有 txt 格式不能很好存储（课表已支持结构化导入，成绩待做）
 * **数据多模态**：图片支持较难，pdf、word 等格式应转化为 md 或 txt
 
 ### 推理能力强化
 
 * **多跳推理** — ✅ 已实现。Agent system prompt 内嵌多跳推理指南，自动多轮检索并综合回答
 * **个性化**：建立个人档案，检索时根据个人特征加权，如网安专业对网安相关通知更重视
-* **可溯源** — ✅ 已实现。入库时按文件名通知 ID 提取源网址存入元数据，检索结果与回答均携带来源链接
+* **可溯源** — ✅ 已实现。入库时提取源网址存入元数据（数字 ID 前缀文件按 ID 匹配官方链接；爬虫文档回退解析正文"来源："行），检索结果与回答均携带来源链接
 
 ### 工程化
 
 * 一键安装运行（降低启动步骤复杂度）
-* 系统指标（召回率、命中率）评测体系
+* 系统指标（召回率、命中率）评测体系 — ✅ 事件抽取维度已建立：真值标注（`tests/events_ground_truth.json`）+ 逐字段 P/R 评测脚本（`scripts/eval_events.py`）；检索召回率评测待建
 * 安全性强化
 
 ### 工具扩展
 
 - [x] **联网搜索工具** — Tavily 主 + DuckDuckGo 兜底查找公开网页，`web_fetch`/`ustc_web_fetch` 工具提取正文；支持配置化网页增量更新和公共索引重建
 - [ ] **知识图谱工具** — 基于 Neo4j 或 NetworkX 构建课程依赖、教师关系等结构化知识
-- [ ] **邮件/通知推送工具** — Agent 代用户订阅关键词，匹配新通知时推送提醒
-- [ ] **日程解析工具** — 从通知中提取时间、地点、事件，自动生成日历事件
+- [x] **主动推送（今日面板）** — 前端 `/today` 面板消费 `/api/digest`，打开即见临近截止/进行中/即将开始事件与最近新通知；事件可追踪置顶，临近 3 天高亮；固定时间聚合推送/桌面通知为后续阶段
+- [x] **日程解析工具（第一阶段）** — 从通知中确定性抽取截止日/发生时间（展览·施工·停水等 span）/发布日/类别/适用对象/地点，`get_upcoming_events(kind=deadline|start)` 按真实日期查询，进行中事件单独标注；自动生成日历事件为后续阶段
 - [ ] **图片/多模态支持** — 结合多模态 LLM 解析通知中的海报图片

@@ -23,6 +23,18 @@ SECTION_TIME_RANGES = {
 }
 
 
+def current_semester(today: datetime | None = None) -> str:
+    """按今天日期推断当前学期名（中科大三学期制）。"""
+
+    now = today or datetime.now()
+    if 2 <= now.month <= 6:
+        return f"{now.year}年春季学期"
+    if now.month in (7, 8):
+        return f"{now.year}年夏季学期"
+    # 秋季学期跨年：1 月仍属于上一年秋季
+    return f"{now.year - 1 if now.month == 1 else now.year}年秋季学期"
+
+
 class ScheduleService:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = Path(db_path)
@@ -107,15 +119,25 @@ class ScheduleService:
         return len(rows)
 
     def list(self, username: str, semester: str | None = None) -> dict:
+        """查询课表。semester 为 None 时返回该用户所有学期的课程。"""
         query = "SELECT * FROM schedule_courses WHERE username = ?"
         params: list = [username]
         if semester:
             query += " AND semester = ?"
             params.append(semester)
         query += " ORDER BY semester DESC, weekday, start_section, name"
+        # 学期列表是数据集的属性，必须独立于 semester 过滤条件查询；
+        # 否则按学期过滤后下拉框只剩当前学期，前端无法切回其他学期。
         with closing(self._connect()) as db, db:
             db.row_factory = sqlite3.Row
             rows = [dict(row) for row in db.execute(query, params).fetchall()]
+            semesters = [
+                row["semester"]
+                for row in db.execute(
+                    "SELECT DISTINCT semester FROM schedule_courses WHERE username = ? ORDER BY semester DESC",
+                    (username,),
+                ).fetchall()
+            ]
         for row in rows:
             row["teachers"] = json.loads(row["teachers"])
             row["weeks"] = json.loads(row["weeks"])
@@ -124,7 +146,6 @@ class ScheduleService:
                     (row["start_section"], row["end_section"]), (None, None)
                 )
                 row["start_time"], row["end_time"] = start, end
-        semesters = list(dict.fromkeys(row["semester"] for row in rows))
         return {"semester": semester or (semesters[0] if semesters else None), "semesters": semesters, "courses": rows}
 
 

@@ -129,7 +129,13 @@ async def import_schedule_to_personal_data(
 
     parsed = schedule_data_to_payload(stored)
     source = f"课表-{parsed['semester']}"
-    rag.update_user_data(user, source, format_schedule_for_personal_data(parsed))
+    # 入库含嵌入 API 调用，同步阻塞会卡住事件循环（可能数秒）
+    try:
+        await asyncio.to_thread(
+            rag.update_user_data, user, source, format_schedule_for_personal_data(parsed)
+        )
+    except RuntimeError as e:
+        _embed_unavailable_to_503(e)
     return {
         "message": "已有课表已同步到个人数据",
         "semester": parsed["semester"],

@@ -114,4 +114,24 @@ export const scheduleApi = {
     }>('/schedule/import-ustc', { content, filename: filename || '' }),
 };
 
+export const digestApi = {
+  get: (days = 7) =>
+    api.get<import('@/types').DigestData>('/digest', { params: { days } }),
+};
+
+export const trackApi = {
+  list: () =>
+    api.get<{ items: import('@/types').TrackedEvent[] }>('/digest/tracked'),
+  add: (event: {
+    source: string;
+    title?: string | null;
+    category?: string | null;
+    date_kind: 'deadline' | 'start';
+    date_value?: string | null;
+    url?: string | null;
+  }) => api.post<import('@/types').TrackedEvent>('/digest/tracked', event),
+  remove: (source: string) =>
+    api.delete<{ message: string }>(`/digest/tracked/${encodeURIComponent(source)}`),
+};
+
 export default api;

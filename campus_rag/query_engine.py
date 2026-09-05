@@ -63,6 +63,18 @@ _retriever_cache: dict[tuple, VectorIndexRetriever] = {}
 _bm25_cache: dict[str, object] = {}
 
 
+def reset_caches() -> None:
+    """清空检索器/BM25 缓存。
+
+    底层向量集合被删除重建（全量同步、--reindex）后，缓存的 retriever
+    仍指向旧集合对象，查询会报错或返回旧数据，必须随 query.reset_caches
+    一并失效。
+    """
+    global _retriever_cache, _bm25_cache
+    _retriever_cache = {}
+    _bm25_cache = {}
+
+
 def _get_reranker():
     """按 .env 的 RERANK_* 配置构建 API reranker；未配置或失败时返回 None。"""
     global _reranker, _reranker_available
@@ -85,37 +97,32 @@ def _get_reranker():
     return _reranker
 
 
+def _data_dir_mtime(data_dir: str) -> float:
+    """返回数据目录下 .txt 文件的最新 mtime（目录不存在时为 0）。"""
+    mtime = 0.0
+    if os.path.isdir(data_dir):
+        for fname in os.listdir(data_dir):
+            if fname.endswith(".txt"):
+                try:
+                    mtime = max(mtime, os.path.getmtime(os.path.join(data_dir, fname)))
+                except OSError:
+                    pass
+    return mtime
+
+
 def _get_bm25_cached(data_dir: str):
     """返回按 data_dir 缓存的 BM25 检索器（与向量索引同粒度的分块文档）。
 
-    该函数本身只是「带缓存 + 按 txt 文件 mtime 失效」的 BM25 检索器工厂，不绑定
-    具体用途：既可用于 get_rag_response 中对向量结果的预过滤，也可用于
-    get_rag_response_hybrid 中作为独立检索源并入候选集。缓存键为 data_dir。
+    缓存以数据目录下 .txt 的最新 mtime 为失效依据：文件变动后重建，
+    避免每次检索都重新分块与分词。缓存键为 data_dir。
     """
-    import os
+    mtime = _data_dir_mtime(data_dir)
     if data_dir in _bm25_cache:
         cached_mtime, cached_bm25 = _bm25_cache[data_dir]
-        current_mtime = 0.0
-        if os.path.isdir(data_dir):
-            for fname in os.listdir(data_dir):
-                if fname.endswith(".txt"):
-                    try:
-                        current_mtime = max(current_mtime, os.path.getmtime(os.path.join(data_dir, fname)))
-                    except OSError:
-                        pass
-        if current_mtime == cached_mtime:
+        if mtime == cached_mtime:
             return cached_bm25
     from .keyword_retriever import BM25Retriever
     bm25 = BM25Retriever(data_dir)
-    import os as _os
-    mtime = 0.0
-    if _os.path.isdir(data_dir):
-        for fname in _os.listdir(data_dir):
-            if fname.endswith(".txt"):
-                try:
-                    mtime = max(mtime, _os.path.getmtime(_os.path.join(data_dir, fname)))
-                except OSError:
-                    pass
     _bm25_cache[data_dir] = (mtime, bm25)
     return bm25
 
@@ -199,6 +206,15 @@ def get_rag_response(
         retriever = _get_cached_retriever(user_index, top_k)
         all_nodes.extend(retriever.retrieve(query))
 
+    # 检索自愈：首次召回为空时用 jieba 关键词缩减重试一次
+    if not all_nodes:
+        from .keyword_retriever import extract_keywords
+        retry = extract_keywords(query)
+        if retry and retry != query.strip():
+            for idx in (public_index, user_index):
+                if idx is not None:
+                    all_nodes.extend(_get_cached_retriever(idx, top_k).retrieve(retry))
+
     if not all_nodes:
         return "未找到相关信息。"
 
@@ -229,44 +245,8 @@ def get_rag_response(
 
     context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    if not config.init_llm():
-        raise RuntimeError("LLM 未配置或初始化失败")
-    llm = config.Settings.llm
-    from llama_index.core.llms import ChatMessage
-    response = llm.chat([ChatMessage(role="user", content=prompt)])
-    return str(response.message.content or "")
-
-
-def get_rag_response_hybrid(
-    query: str,
-    public_index: VectorStoreIndex,
-    data_dir: str,
-    top_k: int = 20,
-) -> str:
-    """向量检索 + BM25关键词检索 + 重排序 + LLM 生成回答。"""
-    all_nodes: List[NodeWithScore] = []
-
-    retriever = _get_cached_retriever(public_index, top_k)
-    all_nodes.extend(retriever.retrieve(query))
-
-    # 作为独立检索源，将 BM25 结果并入候选集
-    bm25 = _get_bm25_cached(data_dir)
-    all_nodes.extend(bm25.retrieve(query, top_k=top_k))
-
-    if not all_nodes:
-        return "未找到相关信息。"
-
-    unique_nodes = _dedup_nodes(all_nodes)
-    if len(unique_nodes) > 1:
-        final_nodes = rerank_nodes(query, unique_nodes, top_n=10)
-    else:
-        final_nodes = sorted(unique_nodes, key=lambda n: n.score or 0, reverse=True)[:10]
-
-    context = "\n\n".join([_node_context_block(node) for node in final_nodes])
-    prompt = QA_PROMPT.format(context_str=context, query_str=query)
-    if not config.init_llm():
-        raise RuntimeError("LLM 未配置或初始化失败")
-    llm = config.Settings.llm
+    # 统一走 require_llm 守卫：不可用时抛出可操作的错误，禁止静默降级到 MockLLM
+    llm = config.require_llm()
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
     return str(response.message.content or "")

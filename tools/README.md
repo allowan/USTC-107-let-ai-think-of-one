@@ -16,7 +16,13 @@ LangChain 工具定义，注册于根目录 `main.py`（`TOOL_METADATA` 与 `_sh
 校站白名单配置在 `campus_rag/ustc_sites.json`，评课社区配置在 `campus_rag/course_review_sites.json`；联网搜索配置变量（`WEBSEARCH_PROVIDER` / `TAVILY_API_KEY`）位于 `campus_rag/.env`（与嵌入/重排序同处），环境变量已存在时不覆盖。
 `ustc.edu.cn` 与 `icourse.club` 域名允许本地代理的 Fake-IP DNS 映射（见 `TRUSTED_PROXY_HOST_SUFFIXES`）。
 
-`tools/ustc_crawler.py` 提供通知栏目采集辅助函数，供 `scripts/sync_ustc_columns.py` 使用，不注册为 Agent 工具。
+`tools/ustc_crawler.py` 提供通知栏目采集辅助函数，供 `scripts/sync_ustc_columns.py` 使用，不注册为 Agent 工具。要点：
+
+- 支持的栏目文章链接模式：主站 `/info/<栏目>/<文章>.htm`、研究生院 `/article/<文章>`、教务处 `<栏目>/<文章>.html`、网络信息中心等 PageWeb 站点 `/<年>/<月日>/c<栏目>a<文章>/page.htm`。
+- 分页：从页脚 `1/N` 页码元素解析总页数（正则限定"数字/数字必须是某元素的完整文本"，避免把模板资源路径里的数字误读成上万页）。
+- 限流：教务处等站点对短时高频抓取返回 403，列表页与文章页均做退避重试（3 次，1.5~2s 递增），文章请求固定 0.3s 间隔、并发降为 2。
+- 落盘格式与手动种子文件完全一致：文件名 `{通知ID}_{标题}.txt`（通知 ID 取 URL 文章号；哈希兜底时加 `x` 前缀，防止被误当通知 ID），文档头 `来源：<URL>` / `标题：<标题>` / 空行 / 正文。内容与上次一致即跳过（增量）；标题或正文变化时按新文件名重写。
+- 语料不入库：`.gitignore` 对 `campus_rag/data/` 按白名单只放行 7 个手写种子文件，全部爬取语料可随时用脚本重新生成。
 
 ## 约定
 

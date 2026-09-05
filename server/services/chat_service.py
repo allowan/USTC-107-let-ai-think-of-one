@@ -25,6 +25,15 @@ def _llm_credentials_configured() -> bool:
     return bool(os.environ.get("LLM_API_KEY") or read_json().get("api_key"))
 
 
+def _agent_date_is_stale(ctx) -> bool:
+    """Agent prompt 中的“当前日期”生成于构建当日；跨天缓存必须重建，
+    否则模型会拿着过期日期解析“这学期”等相对时间（开学日前后尤其致命）。"""
+
+    from datetime import date
+
+    return getattr(ctx, "built_date", None) != date.today()
+
+
 class ChatService:
     """Manages agent instances and provides streaming chat."""
 
@@ -66,14 +75,24 @@ class ChatService:
             raise RuntimeError(self._initialization_error)
 
         if username:
-            if username in self._user_agents:
-                return self._user_agents[username]
+            cached = self._user_agents.get(username)
+            if cached is not None:
+                if not _agent_date_is_stale(cached):
+                    return cached
+                self.invalidate_user_agent(username)
             from campus_rag import get_user_tool_prefs
             from main import build_agent
             prefs = get_user_tool_prefs(username)
             ctx = await build_agent(username=username, tool_prefs=prefs)
             self._user_agents[username] = ctx
             return ctx
+        if self._default_agent is not None and _agent_date_is_stale(self._default_agent):
+            # 跨天重建：旧 checkpoint 连接异步关闭，避免句柄泄漏
+            old = self._default_agent
+            self._default_agent = None
+            task = asyncio.create_task(self._close_conn(old.conn))
+            self._pending_closes.add(task)
+            task.add_done_callback(self._pending_closes.discard)
         if self._default_agent is None:
             from main import build_agent
             try:

@@ -23,6 +23,12 @@ class RAGService:
         return search_user_data(query, username)
 
     @staticmethod
+    def get_digest(days: int = 7) -> dict:
+        # 聚合同样基于 events 时间索引（纯本地 SQLite，无嵌入），委托 campus_rag 门面。
+        from campus_rag import get_notice_digest
+        return get_notice_digest(days=days)
+
+    @staticmethod
     def list_user_data(username: str) -> dict:
         from campus_rag import list_user_data
         return list_user_data(username)

@@ -5,6 +5,7 @@ from llama_index.core import Document
 _base = Path(__file__).resolve().parent
 
 from . import config
+from . import events
 from .index_manager import RAGSystem
 
 logger = logging.getLogger("campus_rag.query")
@@ -20,22 +21,22 @@ def reset_caches() -> None:
     _rag = None
     _public_retriever = None
     _user_retrievers = {}
-
-
-def _init():
-    global _rag, _public_retriever
-    if _rag is None:
-        _rag = RAGSystem()
-        index = _rag.get_or_create_public_index(str(_base / "data"))
-        _public_retriever = index.as_retriever(similarity_top_k=10)
-    return True
+    # query_engine 缓存的检索器绑定具体索引对象，集合重建后必须一并失效
+    from .query_engine import reset_caches as _reset_engine_caches
+    _reset_engine_caches()
 
 
 def _ensure_init():
-    """确保 RAG 已初始化。ChromaDB 恢复由 get_public_index 内部处理。"""
+    """确保 RAG 已初始化。ChromaDB 恢复由 get_or_create_public_index 内部处理。"""
     global _rag, _public_retriever
     if _rag is None:
-        return _init()
+        _rag = RAGSystem()
+        data_dir = str(_base / "data")
+        index = _rag.get_or_create_public_index(data_dir)
+        _public_retriever = index.as_retriever(similarity_top_k=10)
+        # 种子语料的事件时间索引：确定性正则抽取，毫秒级且幂等（按内容哈希
+        # 跳过已抽取项）。失败不影响检索，故 sync 内部已吞异常并留痕。
+        events.sync_notice_events()
     return True
 
 
@@ -59,19 +60,28 @@ def _format_nodes(nodes, empty_message: str) -> str:
     return "\n\n".join(contexts)
 
 
+def _retrieve_with_fallback(retriever, query: str, empty_message: str) -> str:
+    """检索自愈：首次为空时用 jieba 关键词缩减重试一次，仍空再返回未找到。"""
+    nodes = retriever.retrieve(query)
+    if not nodes:
+        from .keyword_retriever import extract_keywords
+        retry = extract_keywords(query)
+        if retry and retry != query.strip():
+            nodes = retriever.retrieve(retry)
+    return _format_nodes(nodes, empty_message)
+
+
 def search_notices(query: str) -> str:
     """只在官方通知（公共数据）中搜索。"""
     _ensure_init()
-    return _format_nodes(_public_retriever.retrieve(query),
-                         "未在通知中找到相关信息。")
+    return _retrieve_with_fallback(_public_retriever, query, "未在通知中找到相关信息。")
 
 
 def search_user_data(query: str, user_id: str) -> str:
     """只在用户个人数据中搜索。"""
     _ensure_init()
     retriever = _get_user_retriever(user_id)
-    return _format_nodes(retriever.retrieve(query),
-                         "未在个人数据中找到相关信息。")
+    return _retrieve_with_fallback(retriever, query, "未在个人数据中找到相关信息。")
 
 
 def search_notices_answer(query: str) -> str:
@@ -92,10 +102,12 @@ def search_user_data_answer(query: str, user_id: str) -> str:
 
 def _enrich_url_metadata(documents: list) -> None:
     """为缺失源链接的公共文档补全 url 元数据（同步与本地文件共用入口）。"""
-    from .data_loader import extract_source_url
+    from .data_loader import extract_source_url, extract_source_url_from_text
     for doc in documents:
         if not doc.metadata.get("url"):
-            url = extract_source_url(doc.metadata.get("source", ""), doc.text)
+            source = doc.metadata.get("source", "")
+            # 数字 ID 前缀文件按 ID 匹配；爬虫文档（ustc_* 前缀）回退到正文"来源："行
+            url = extract_source_url(source, doc.text) or extract_source_url_from_text(doc.text)
             if url:
                 doc.metadata["url"] = url
 
@@ -107,6 +119,8 @@ def add_public_documents(documents: list) -> None:
     _rag.add_documents_to_public(documents)
     global _public_retriever
     _public_retriever = None
+    # 同步新通知的事件时间索引（best-effort，内部吞异常）。
+    events.sync_events_from_documents(documents)
 
 
 def delete_public_data(source: str) -> int:
@@ -115,6 +129,8 @@ def delete_public_data(source: str) -> int:
     count = _rag.delete_public_documents_by_source(source)
     global _public_retriever
     _public_retriever = None
+    # 通知被删除时同步移除其事件，避免时间索引残留已下线通知。
+    events.delete_events_by_source(source)
     return count
 
 
@@ -136,6 +152,9 @@ def replace_public_documents(documents: list) -> None:
     if documents:
         _enrich_url_metadata(documents)
         _rag.create_public_index_via_docs(documents)
+    # 全量替换：事件时间索引同步重建，以 documents 为权威集合（清空后重抽）。
+    events.clear_events()
+    events.sync_events_from_documents(documents)
     reset_caches()
 
 

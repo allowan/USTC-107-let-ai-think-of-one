@@ -282,25 +282,6 @@ class RAGSystem:
                            user_id, source, e)
             return 0
 
-    def list_public_documents(self) -> dict:
-        """列出公共集合中所有文档，返回 {ids, metadatas, documents, previews}。"""
-        try:
-            collection = self.chroma_client.get_collection("public")
-            result = collection.get(include=["metadatas", "documents"])
-        except Exception:
-            return {"ids": [], "metadatas": [], "documents": [], "previews": []}
-        docs = result.get("documents") or []
-        result["previews"] = [d[:200] + "..." if len(d) > 200 else d for d in docs]
-        return result
-
-    def delete_public_document(self, doc_id: str) -> bool:
-        """按 ChromaDB ID 删除公共集合中的单条文档。"""
-        try:
-            self.chroma_client.get_collection("public").delete(ids=[doc_id])
-            return True
-        except Exception:
-            return False
-
     def delete_public_documents_by_source(self, source: str) -> int:
         """删除指定来源（文件名）的所有文档块，返回删除数量。"""
         try:
@@ -315,39 +296,6 @@ class RAGSystem:
             logger.warning("delete_public_documents_by_source(%s) 失败: %s", source, e)
             return 0
 
-    def get_public_documents_by_source(self, source: str) -> dict:
-        """按 source 获取公共集合中的文档，返回 {ids, metadatas, documents}。"""
-        try:
-            collection = self.chroma_client.get_collection("public")
-            result = collection.get(
-                where={"source": source},
-                include=["metadatas", "documents"],
-            )
-            return result
-        except Exception:
-            return {"ids": [], "metadatas": [], "documents": []}
-
-    def get_collection_stats(self) -> dict:
-        """返回各集合的文档计数。"""
-        stats = {}
-        try:
-            stats["public"] = self.chroma_client.get_collection("public").count()
-        except Exception:
-            stats["public"] = 0
-        user_count = 0
-        for c in self.chroma_client.list_collections():
-            if c.name.startswith("user_"):
-                user_count += 1
-        stats["user_collections_count"] = user_count
-        return stats
-
-    def get_user_collection_size(self, username: str) -> int:
-        """返回用户私有集合中的文档数量。"""
-        try:
-            return self.chroma_client.get_collection(f"user_{username}").count()
-        except Exception:
-            return 0
-
     def _get_existing_hashes(self, collection_name: str) -> set:
         """获取集合中已有文档的 MD5 哈希集合，用于去重。"""
         try:
@@ -359,14 +307,3 @@ class RAGSystem:
             # 返回空集合会退化为"不去重"而非报错，静默时难以察觉重复入库
             logger.debug("_get_existing_hashes(%s) 失败: %s", collection_name, e)
             return set()
-
-    def get_combined_query_engine(self, user_id: str):
-        """返回 (public_index, user_index) 元组，user_index 可能为 None。"""
-        pub_idx = self.get_public_index()
-        user_idx = None
-        try:
-            user_idx = self.get_user_index(user_id)
-        except Exception as e:
-            # 个人索引不可用（含维度不匹配）时降级为仅公共检索，但必须留痕
-            logger.warning("用户 %s 的个人索引不可用: %s", user_id, e)
-        return pub_idx, user_idx
