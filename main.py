@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -232,9 +232,10 @@ def _make_search_user_data_raw(username: str):
 
 def _make_get_my_schedule(username: str):
     @tool
-    def get_my_schedule(semester: str = "") -> str:
+    def get_my_schedule(semester: str = "", week: int = 0) -> str:
         """读取用户已导入本地数据库的课表。学期名称格式如“2026年秋季学期”；
-        留空时按今天日期自动返回当前学期的课表，不要把其他学期的课程混入。"""
+        留空时按今天日期自动返回当前学期。week 为教学周数，0 表示按校历取当前周；
+        校历未配置时会返回全部周次并明确提示，不要自行猜测周数。"""
         try:
             from server.services.schedule_service import current_semester, get_schedule_service
 
@@ -256,8 +257,39 @@ def _make_get_my_schedule(username: str):
             courses = data.get("courses") or []
             if not courses:
                 return f"没有找到 {requested} 的课表。请在‘我的课表’中导入教务课表 HTML 或结构化 JSON。"
-            lines = [f"学期：{data.get('semester') or requested}"]
             weekday_names = ["", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            calendar = service.get_calendar(username, requested, today.date())
+            selected_week = week if week > 0 else (calendar or {}).get("current_week")
+            if calendar and selected_week and selected_week > calendar["total_weeks"]:
+                return f"{requested} 的校历只有 {calendar['total_weeks']} 周，第 {selected_week} 周不存在。"
+            if selected_week:
+                courses = [
+                    row for row in courses
+                    if not row.get("weeks") or selected_week in row.get("weeks", [])
+                ]
+            lines = [f"学期：{data.get('semester') or requested}"]
+            if calendar:
+                if selected_week:
+                    week_start = date.fromisoformat(calendar["start_date"]) + timedelta(
+                        days=(selected_week - 1) * 7
+                    )
+                    lines.append(
+                        f"教学周：第{selected_week}周"
+                        f"（{week_start.isoformat()} 至 {(week_start + timedelta(days=6)).isoformat()}）"
+                    )
+                elif calendar["status"] == "not_started":
+                    lines.append(f"校历提醒：学期尚未开始，第一周始于 {calendar['start_date']}。")
+                else:
+                    lines.append("校历提醒：该学期教学周已经结束。")
+                for item in calendar.get("today_special_dates") or []:
+                    weekday_hint = item.get("course_weekday")
+                    suffix = f"，按星期{weekday_names[weekday_hint][-1]}课程安排" if weekday_hint else ""
+                    lines.append(f"今日校历提醒：{item['label']}{suffix}")
+            else:
+                lines.append("校历尚未配置，以下为全部周次课程，无法可靠判断今天或本周安排。")
+            if selected_week and not courses:
+                lines.append(f"第{selected_week}周没有课程安排。")
+                return "\n".join(lines)
             for row in courses:
                 teachers = "、".join(row.get("teachers") or []) or "教师待定"
                 code = f"{row.get('course_code')} " if row.get("course_code") else ""

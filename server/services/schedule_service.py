@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -74,6 +74,19 @@ class ScheduleService:
                 db.execute("ALTER TABLE schedule_courses ADD COLUMN start_time TEXT")
             if "end_time" not in columns:
                 db.execute("ALTER TABLE schedule_courses ADD COLUMN end_time TEXT")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS academic_calendars (
+                    username TEXT NOT NULL,
+                    semester TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    total_weeks INTEGER NOT NULL,
+                    special_dates TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (username, semester)
+                )
+                """
+            )
 
     def replace(self, username: str, semester: str, courses: list[dict]) -> int:
         now = datetime.now(timezone.utc).isoformat()
@@ -141,12 +154,148 @@ class ScheduleService:
         for row in rows:
             row["teachers"] = json.loads(row["teachers"])
             row["weeks"] = json.loads(row["weeks"])
+            # 旧版本曾截断多段周次；读取时按原始安排重新推导，避免用户必须手工改库。
+            if row.get("raw_schedule"):
+                from server.services.ustc_schedule import parse_schedule_entries
+
+                candidates = parse_schedule_entries(row["raw_schedule"])
+                for candidate in candidates:
+                    if candidate["weekday"] != row.get("weekday"):
+                        continue
+                    if candidate["sections"] and tuple(candidate["sections"]) != tuple(
+                        range(row.get("start_section") or 0, (row.get("end_section") or 0) + 1)
+                    ):
+                        continue
+                    if candidate["start_time"] and row.get("start_time") and candidate["start_time"] != row.get("start_time"):
+                        continue
+                    row["weeks"] = candidate["weeks"]
+                    break
             if not row.get("start_time") and row.get("start_section") and row.get("end_section"):
                 start, end = SECTION_TIME_RANGES.get(
                     (row["start_section"], row["end_section"]), (None, None)
                 )
                 row["start_time"], row["end_time"] = start, end
         return {"semester": semester or (semesters[0] if semesters else None), "semesters": semesters, "courses": rows}
+
+    def save_calendar(
+        self,
+        username: str,
+        semester: str,
+        start_date: date,
+        total_weeks: int,
+        special_dates: list[dict],
+    ) -> dict:
+        """保存学期校历；重复保存同一学期时原子覆盖配置。"""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as db, db:
+            db.execute(
+                """
+                INSERT INTO academic_calendars (
+                    username, semester, start_date, total_weeks, special_dates, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username, semester) DO UPDATE SET
+                    start_date = excluded.start_date,
+                    total_weeks = excluded.total_weeks,
+                    special_dates = excluded.special_dates,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    username,
+                    semester,
+                    start_date.isoformat(),
+                    total_weeks,
+                    json.dumps(special_dates, ensure_ascii=False),
+                    now,
+                ),
+            )
+        return self.get_calendar(username, semester) or {}
+
+    def get_calendar(
+        self,
+        username: str,
+        semester: str,
+        on_date: date | None = None,
+    ) -> dict | None:
+        """读取校历，并计算指定日期所在的教学周。"""
+
+        with closing(self._connect()) as db, db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT * FROM academic_calendars WHERE username = ? AND semester = ?",
+                (username, semester),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["special_dates"] = json.loads(result["special_dates"])
+        first_day = date.fromisoformat(result["start_date"])
+        target = on_date or date.today()
+        offset = (target - first_day).days
+        week_number = offset // 7 + 1
+        if offset < 0:
+            status = "not_started"
+            current_week = None
+        elif week_number > result["total_weeks"]:
+            status = "ended"
+            current_week = None
+        else:
+            status = "active"
+            current_week = week_number
+        result.update(
+            {
+                "status": status,
+                "current_week": current_week,
+                "week_start": (
+                    first_day + timedelta(days=(week_number - 1) * 7)
+                ).isoformat() if current_week else None,
+                "week_end": (
+                    first_day + timedelta(days=(week_number - 1) * 7 + 6)
+                ).isoformat() if current_week else None,
+                "today_special_dates": [
+                    item for item in result["special_dates"] if item.get("date") == target.isoformat()
+                ],
+            }
+        )
+        return result
+
+    def get_course_reminders(self, username: str, on_date: date | None = None) -> dict:
+        """按当前学期校历生成今天和明天的实际课程提醒。"""
+
+        target = on_date or date.today()
+        semester = current_semester(datetime(target.year, target.month, target.day))
+        courses = self.list(username, semester)["courses"]
+
+        def reminder_for(day: date) -> dict:
+            calendar = self.get_calendar(username, semester, day)
+            if calendar is None:
+                return {"date": day.isoformat(), "week": None, "courses": [], "special_dates": []}
+            specials = calendar["today_special_dates"]
+            week = calendar["current_week"]
+            suspended = any(item.get("kind") in {"holiday", "no_class"} for item in specials)
+            makeup = next(
+                (item for item in specials if item.get("kind") == "makeup" and item.get("course_weekday")),
+                None,
+            )
+            weekday = makeup["course_weekday"] if makeup else day.weekday() + 1
+            day_courses = [] if not week or suspended else [
+                row for row in courses
+                if row.get("weekday") == weekday
+                and (not row.get("weeks") or week in row["weeks"])
+            ]
+            return {
+                "date": day.isoformat(),
+                "week": week,
+                "courses": day_courses,
+                "special_dates": specials,
+            }
+
+        return {
+            "semester": semester,
+            "calendar_configured": self.get_calendar(username, semester, target) is not None,
+            "today": reminder_for(target),
+            "tomorrow": reminder_for(target + timedelta(days=1)),
+        }
 
 
 _service: ScheduleService | None = None

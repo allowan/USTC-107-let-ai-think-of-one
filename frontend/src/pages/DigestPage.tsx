@@ -10,8 +10,8 @@ import {
   ReloadOutlined,
   EnvironmentOutlined,
 } from '@ant-design/icons';
-import { digestApi, trackApi } from '@/services/api';
-import type { DigestData, DigestEvent, TrackedEvent } from '@/types';
+import { digestApi, scheduleApi, trackApi } from '@/services/api';
+import type { CourseReminderData, CourseReminderDay, DigestData, DigestEvent, TrackedEvent } from '@/types';
 
 const { Text, Link } = Typography;
 
@@ -155,16 +155,19 @@ export default function DigestPage() {
   const [days, setDays] = useState(7);
   const [digest, setDigest] = useState<DigestData | null>(null);
   const [tracked, setTracked] = useState<TrackedEvent[]>([]);
+  const [courseReminders, setCourseReminders] = useState<CourseReminderData | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [{ data: d }, { data: t }] = await Promise.all([
+      const [{ data: d }, { data: t }, { data: courses }] = await Promise.all([
         digestApi.get(days),
         trackApi.list(),
+        scheduleApi.getReminders(),
       ]);
       setDigest(d);
       setTracked(t.items || []);
+      setCourseReminders(courses);
     } catch {
       message.error('加载今日面板失败');
     } finally {
@@ -236,6 +239,25 @@ export default function DigestPage() {
   const recent = digest?.recent || [];
   const today = new Date();
 
+  const reminderRows = (label: string, day: CourseReminderDay) => (
+    <div style={{ marginBottom: 10 }}>
+      <Text strong>{label}{day.week ? ` · 第 ${day.week} 周` : ''}</Text>
+      {day.special_dates.map(item => <Tag color="orange" key={`${day.date}-${item.label}`} style={{ marginLeft: 8 }}>{item.label}</Tag>)}
+      {day.courses.length ? day.courses.map(course => (
+        <div className="digest-event" key={`${label}-${course.id}`}>
+          <div className="digest-date-badge badge-start">
+            <div className="digest-badge-date">{course.start_time || `第${course.start_section || '?'}节`}</div>
+            <div className="digest-badge-left">{course.end_time || ''}</div>
+          </div>
+          <div className="digest-event-body">
+            <div className="digest-event-title"><span>{course.name}</span></div>
+            <div className="digest-event-meta"><span>{course.location || '地点待定'} · {course.teachers.join('、') || '教师待定'}</span></div>
+          </div>
+        </div>
+      )) : <div><Text type="secondary">暂无课程安排</Text></div>}
+    </div>
+  );
+
   return (
     <div className="digest-page">
       <div className="digest-header">
@@ -263,6 +285,12 @@ export default function DigestPage() {
         <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
       ) : (
         <>
+          {courseReminders?.calendar_configured && (
+            <Card size="small" className="digest-card" title={<Space><BellOutlined style={{ color: '#1677ff' }} /><span>课程提醒 · {courseReminders.semester}</span></Space>}>
+              {reminderRows('今天', courseReminders.today)}
+              {reminderRows('明天', courseReminders.tomorrow)}
+            </Card>
+          )}
           {trackedAsEvents.length > 0 && (
             <EventSection
               title={`我追踪的事件（${trackedAsEvents.length}）`}

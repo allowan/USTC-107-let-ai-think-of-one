@@ -1,12 +1,27 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, App, Button, Empty, Select, Space, Spin, Tag, Typography } from 'antd';
-import { CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Empty, List, Select, Space, Spin, Tag, Typography } from 'antd';
+import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
+import axios from 'axios';
 import { scheduleApi } from '@/services/api';
-import type { ScheduleData, ScheduleImportPayload } from '@/types';
+import type { AcademicCalendar, ScheduleData, ScheduleImportPayload } from '@/types';
+import AcademicCalendarModal from '@/components/Schedule/AcademicCalendarModal';
 import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
 
 const { Text, Title } = Typography;
 const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+
+function addDays(value: string, days: number): Date {
+  const result = new Date(`${value}T00:00:00`);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function localDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 function parseCsv(text: string): ScheduleImportPayload {
   const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -54,13 +69,33 @@ export default function SchedulePage() {
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [ustcImportVisible, setUstcImportVisible] = useState(false);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [calendar, setCalendar] = useState<AcademicCalendar | null>(null);
+  const [selectedWeek, setSelectedWeek] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (semester?: string) => {
     setLoading(true);
     try {
       const response = await scheduleApi.list(semester);
-      setData(response.data);
+      setData({ ...response.data, courses: response.data.courses.filter(course => course.semester === response.data.semester) });
+      const selectedSemester = response.data.semester;
+      if (selectedSemester) {
+        try {
+          const calendarResponse = await scheduleApi.getCalendar(selectedSemester);
+          setCalendar(calendarResponse.data);
+          setSelectedWeek(calendarResponse.data.current_week || 1);
+        } catch (error) {
+          setCalendar(null);
+          setSelectedWeek(null);
+          if (!axios.isAxiosError(error) || error.response?.status !== 404) {
+            message.error('读取校历失败，暂时显示全部周次课程');
+          }
+        }
+      } else {
+        setCalendar(null);
+        setSelectedWeek(null);
+      }
     } catch {
       message.error('读取本地课表失败');
     } finally {
@@ -92,6 +127,48 @@ export default function SchedulePage() {
     13,
     ...data.courses.map(course => course.end_section || course.start_section || 0),
   ), [data.courses]);
+  const visibleCourses = useMemo(
+    () => selectedWeek === null
+      ? data.courses
+      : data.courses.filter(course => course.weeks.length === 0 || course.weeks.includes(selectedWeek)),
+    [data.courses, selectedWeek],
+  );
+  const selectedWeekStart = calendar && selectedWeek
+    ? addDays(calendar.start_date, (selectedWeek - 1) * 7)
+    : null;
+  const selectedWeekEnd = selectedWeekStart ? addDays(localDate(selectedWeekStart), 6) : null;
+  const weekSpecialDates = calendar && selectedWeekStart && selectedWeekEnd
+    ? calendar.special_dates.filter(item => item.date >= localDate(selectedWeekStart) && item.date <= localDate(selectedWeekEnd))
+    : [];
+  const today = new Date();
+  const todayWeekday = today.getDay() === 0 ? 7 : today.getDay();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const tomorrowWeekday = tomorrow.getDay() === 0 ? 7 : tomorrow.getDay();
+  const tomorrowWeek = calendar?.current_week
+    ? calendar.current_week + (todayWeekday === 7 ? 1 : 0)
+    : null;
+  const todaySpecial = calendar?.special_dates.filter(item => item.date === localDate(today)) || [];
+  const tomorrowSpecial = calendar?.special_dates.filter(item => item.date === localDate(tomorrow)) || [];
+  const coursesForDate = (weekday: number, week: number | null, specials: typeof todaySpecial) => {
+    if (!week || specials.some(item => item.kind === 'holiday' || item.kind === 'no_class')) return [];
+    const makeup = specials.find(item => item.kind === 'makeup' && item.course_weekday);
+    const courseWeekday = makeup?.course_weekday || weekday;
+    return data.courses.filter(course =>
+      (course.weeks.length === 0 || course.weeks.includes(week)) && course.weekday === courseWeekday);
+  };
+  const todayCourses = coursesForDate(todayWeekday, calendar?.current_week || null, todaySpecial);
+  const tomorrowCourses = tomorrowWeek && tomorrowWeek <= (calendar?.total_weeks || 0)
+    ? coursesForDate(tomorrowWeekday, tomorrowWeek, tomorrowSpecial)
+    : [];
+  const currentReminder = calendar?.current_week === selectedWeek
+    ? [
+      `今天${todayCourses.length ? `有 ${todayCourses.length} 个上课安排：${todayCourses.map(course => course.name).join('、')}` : '没有课程安排'}`,
+      ...todaySpecial.map(item => `今日提醒：${item.label}`),
+      `明天${tomorrowCourses.length ? `有 ${tomorrowCourses.length} 个上课安排：${tomorrowCourses.map(course => course.name).join('、')}` : '没有课程安排'}`,
+      ...tomorrowSpecial.map(item => `明日提醒：${item.label}`),
+    ].join('；')
+    : '本周没有特殊校历提醒。';
   const sectionGroups = [
     { label: '上午', start: 1, end: 5 },
     { label: '下午', start: 6, end: 10 },
@@ -113,6 +190,11 @@ export default function SchedulePage() {
               onChange={value => void load(value)}
               style={{ minWidth: 180 }}
             />
+          )}
+          {data.semester && (
+            <Button icon={<CalendarOutlined />} onClick={() => setCalendarVisible(true)}>
+              配置校历
+            </Button>
           )}
           <Button icon={<ReloadOutlined />} loading={loading} onClick={() => void load(data.semester || undefined)}>
             刷新本地课表
@@ -144,7 +226,41 @@ export default function SchedulePage() {
           <div className="schedule-summary">
             <Tag color="blue">{data.semester}</Tag>
             <Text type="secondary">共 {courseCount} 门课程 · {data.courses.length} 个上课安排</Text>
+            {calendar && (
+              <Select
+                value={selectedWeek || undefined}
+                placeholder="选择周次"
+                options={Array.from({ length: calendar.total_weeks }, (_, index) => ({ value: index + 1, label: `第 ${index + 1} 周` }))}
+                onChange={setSelectedWeek}
+                style={{ width: 110 }}
+              />
+            )}
+            <Button type={selectedWeek === null ? 'primary' : 'default'} onClick={() => setSelectedWeek(null)}>全部周次</Button>
           </div>
+          {!calendar && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="尚未配置校历，当前显示全部周次课程" description="导入校历 iCalendar 后，可自动定位教学周并获得按周提醒。" />}
+          {calendar?.status !== 'active' && calendar && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={calendar.status === 'not_started' ? '学期尚未开始' : '本学期教学周已经结束'}
+              description={calendar.status === 'not_started' ? `第一周从 ${calendar.start_date} 开始。` : '仍可手动选择周次查看历史课表。'}
+            />
+          )}
+          {calendar && selectedWeekStart && selectedWeekEnd && (
+            <Alert
+              type={weekSpecialDates.length ? 'warning' : 'info'}
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`第 ${selectedWeek} 周 · ${localDate(selectedWeekStart)} 至 ${localDate(selectedWeekEnd)}`}
+              description={[
+                calendar.current_week === selectedWeek ? currentReminder : '',
+                ...weekSpecialDates
+                  .filter(item => item.date !== localDate(today) && item.date !== localDate(tomorrow))
+                  .map(item => `${item.date}：${item.label}${item.course_weekday ? `（按${weekdays[item.course_weekday - 1]}课程安排）` : ''}`),
+              ].filter(Boolean).join('；') || '本周没有特殊校历提醒。'}
+            />
+          )}
           <div className="schedule-scroll">
             <div
               className="schedule-grid"
@@ -180,7 +296,7 @@ export default function SchedulePage() {
                   />
                 )),
               )}
-              {data.courses.filter(course => course.weekday && course.start_section).map(course => {
+              {visibleCourses.filter(course => course.weekday && course.start_section).map(course => {
                 const start = course.start_section || 1;
                 const span = Math.max(1, (course.end_section || start) - start + 1);
                 const time = course.start_time && course.end_time ? `${course.start_time}-${course.end_time}` : '';
@@ -194,12 +310,20 @@ export default function SchedulePage() {
                     <div className="schedule-course-name">{course.name}</div>
                     <div className="schedule-course-meta">{course.teachers.join('、')}</div>
                     <div className="schedule-course-meta">{course.location || '地点待定'}</div>
-                    {course.weeks.length > 0 && <div className="schedule-course-meta">第 {Math.min(...course.weeks)}-{Math.max(...course.weeks)} 周</div>}
+                    {selectedWeek === null && course.weeks.length > 0 && <div className="schedule-course-meta">第 {course.weeks.join('、')} 周</div>}
                   </div>
                 );
               })}
             </div>
           </div>
+          {visibleCourses.some(course => !course.weekday || !course.start_section) && (
+            <List
+              size="small"
+              header="节次或星期待定的安排"
+              dataSource={visibleCourses.filter(course => !course.weekday || !course.start_section)}
+              renderItem={course => <List.Item key={course.id}>{course.name} · {course.location || '地点待定'} · {course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}</List.Item>}
+            />
+          )}
         </>
       )}
       <UstcScheduleImportModal
@@ -207,6 +331,18 @@ export default function SchedulePage() {
         onCancel={() => setUstcImportVisible(false)}
         onImported={(result) => void load(result.semester)}
       />
+      {data.semester && (
+        <AcademicCalendarModal
+          open={calendarVisible}
+          semester={data.semester}
+          calendar={calendar}
+          onCancel={() => setCalendarVisible(false)}
+          onSaved={(value) => {
+            setCalendar(value);
+            setSelectedWeek(value.current_week || 1);
+          }}
+        />
+      )}
     </div>
   );
 }

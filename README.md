@@ -532,6 +532,13 @@ JSON 格式示例：
 CSV 至少包含 `name,weekday,sections,weeks,location,start_time,end_time` 列。
 课表卡片会同时显示具体时间和节次；未提供具体时间时，系统会对常见节次使用默认时间段。
 
+导入课表后可点击“配置校历”，选择自己下载的 iCalendar（`.ics`/`.ical`）文件，无需固定路径。
+系统只提取当前课表学期的教学周和特殊日期，多年日历不会被全部导入。第一周周一和教学周数
+仍可选填校正，留空沿用原值。重复导入不会覆盖已有校历。格式支持范围详见后端 README。
+配置完成后页面默认定位当前教学周，只展示该周实际开设的课程，并给出今天、明天以及
+节假日、停课、调课/补课等提醒；也可手动切换周次。未配置校历时保持兼容，显示全部周次课程。
+校历与课表均存于本机 `schedule.db`，按用户和学期隔离。调课/补课项需要指定按星期几的课程安排。
+
 课表接口：
 
 | Method | Path | 说明 |
@@ -539,6 +546,10 @@ CSV 至少包含 `name,weekday,sections,weeks,location,start_time,end_time` 列�
 | GET | `/api/schedule` | 获取当前用户的本地课表 |
 | POST | `/api/schedule/import` | 用结构化课程数据替换指定学期课表 |
 | POST | `/api/schedule/import-ustc` | 解析用户提供的 USTC 课表 HTML/JSON 并更新课表 |
+| GET | `/api/schedule/calendar` | 获取学期校历及指定日期的教学周状态 |
+| PUT | `/api/schedule/calendar` | 新建或覆盖指定学期校历 |
+| POST | `/api/schedule/calendar/import-ics` | 上传 iCalendar 文件并指定学期（最大 10 MB） |
+| GET | `/api/schedule/reminders` | 合并当前校历和课表，返回今天、明天的实际课程提醒 |
 | POST | `/api/personal-data/import-schedule` | 读取已保存课表并同步到个人数据 |
 
 ### 后端测试
@@ -553,6 +564,10 @@ curl "http://localhost:8000/api/search/notices?q=讲座"
 curl "http://localhost:8000/api/personal-data"
 curl "http://localhost:8000/api/sync/status"
 ```
+
+修改或新增后端 API 后，需要停止并重新运行 `python server.py`。默认启动配置为
+`reload=False`，旧进程不会自动注册新路由；若前端调用新接口返回 `405 Method Not Allowed`，
+请先重启后端，再刷新页面。开发时也可使用 `uvicorn server:app --reload --port 8000`。
 
 ### 前端测试
 
@@ -592,6 +607,8 @@ npm run build       # 生产构建
 - **DeepSeek `/beta` 端点**：DeepSeek V4 系列模型（`deepseek-v4-flash` / `deepseek-v4-pro`）需通过 `/beta` 路径访问。`llm_factory.py` 会在检测到 `api.deepseek.com` 且 `base_url` 未含 `/beta` 时自动补齐后缀，`settings.json` 中写 `https://api.deepseek.com` 即可，无需手动加 `/beta`
 
 ## 未来规划
+
+课表支持按教学周筛选及“全部周次”总览。教务课表导入会保留多段周次、单双周和具体钟点；升级解析器后请重新导入旧学期课表，以修复历史解析结果。
 
 ### 增加数据覆盖的广度和深度
 

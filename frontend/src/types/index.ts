@@ -96,6 +96,50 @@ export interface ScheduleData {
   courses: ScheduleCourse[];
 }
 
+export type AcademicCalendarStatus = 'not_started' | 'active' | 'ended';
+export type SpecialDateKind = 'holiday' | 'no_class' | 'makeup' | 'note';
+
+export interface AcademicCalendarSpecialDate {
+  date: string;
+  kind: SpecialDateKind;
+  label: string;
+  course_weekday: number | null;
+}
+
+export interface AcademicCalendar {
+  semester: string;
+  start_date: string;
+  total_weeks: number;
+  special_dates: AcademicCalendarSpecialDate[];
+  status: AcademicCalendarStatus;
+  current_week: number | null;
+  week_start: string | null;
+  week_end: string | null;
+  today_special_dates: AcademicCalendarSpecialDate[];
+  updated_at: string;
+}
+
+export interface AcademicCalendarUpdate {
+  semester: string;
+  start_date?: string;
+  total_weeks?: number;
+  special_dates: AcademicCalendarSpecialDate[];
+}
+
+export interface CourseReminderDay {
+  date: string;
+  week: number | null;
+  courses: ScheduleCourse[];
+  special_dates: AcademicCalendarSpecialDate[];
+}
+
+export interface CourseReminderData {
+  semester: string;
+  calendar_configured: boolean;
+  today: CourseReminderDay;
+  tomorrow: CourseReminderDay;
+}
+
 export interface ScheduleMeetingInput {
   weekday?: number | null;
   sections?: number[];
