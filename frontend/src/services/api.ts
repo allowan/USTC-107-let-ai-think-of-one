@@ -103,6 +103,8 @@ export const personalDataApi = {
 export const scheduleApi = {
   list: (semester?: string) =>
     api.get<import('@/types').ScheduleData>('/schedule', { params: semester ? { semester } : {} }),
+  getReminders: () =>
+    api.get<import('@/types').CourseReminderData>('/schedule/reminders'),
   import: (payload: import('@/types').ScheduleImportPayload) =>
     api.post<{ message: string; semester: string; meeting_count: number }>('/schedule/import', payload),
   importUstc: (content: string, filename?: string) =>
@@ -112,6 +114,20 @@ export const scheduleApi = {
       course_count: number;
       meeting_count: number;
     }>('/schedule/import-ustc', { content, filename: filename || '' }),
+  getCalendar: (semester: string, onDate?: string) =>
+    api.get<import('@/types').AcademicCalendar>('/schedule/calendar', {
+      params: { semester, ...(onDate ? { on_date: onDate } : {}) },
+    }),
+  saveCalendar: (payload: import('@/types').AcademicCalendarUpdate) =>
+    api.put<{ message: string; calendar: import('@/types').AcademicCalendar }>('/schedule/calendar', payload),
+  importCalendarIcs: (file: File, semester: string) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('semester', semester);
+    return api.post<{ message: string; already_exists: boolean; calendars: Array<import('@/types').AcademicCalendar & { warnings?: string[] }> }>(
+      '/schedule/calendar/import-ics', form, { timeout: 60000 },
+    );
+  },
 };
 
 export const digestApi = {

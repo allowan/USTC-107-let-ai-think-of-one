@@ -1,5 +1,7 @@
 # server — FastAPI 后端
 
+校历仅支持上传 UTF-8 iCalendar（`.ics`/`.ical`）。当前支持全天、非重复事件，教学周标题如“秋季学期第一周”或“春季学期第2教学周”；不支持的定时、重复规则与 DURATION 事件明确报错。展开折行、按排他 DTEND 展开多日休假，周日起点转换为周一；同日备注合并，停课与补课冲突时拒绝导入。仅选择提交的 semester，跨年秋季按首周年份命名。
+
 主服务（端口 8000）：路由/服务分层架构，SSE 流式对话，本地单用户（无 JWT）。
 
 ## 架构分层
@@ -20,7 +22,8 @@
 | `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
 | `auth_service.py` | 话题 CRUD（委托 `campus_rag.auth`） |
 | `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`）；`get_digest()` 聚合“最近新通知 + 临近/进行中事件”（委托 `campus_rag.get_notice_digest`，基于 `events.db` 时间索引） |
-| `schedule_service.py` | 本地结构化课表存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
+| `schedule_service.py` | 本地结构化课表与校历存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；计算当前教学周、周日期范围和当日特殊安排；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
+| `academic_calendar.py` | 解析上传的 iCalendar 教学周、休假和补课安排，校验所选学期周次连续性 |
 | `ustc_schedule.py` | 解析用户提供的教务课表 HTML/结构化 JSON（不接触账号密码与 Cookie） |
 | `sync_service.py` | 从 Sync Server 拉取公共通知（增量优先、全量兜底），版本号持久化于 `data/sync_state.json` |
 | `news_service.py` | 实时抓取五个校站首页头条（主站服务通知/教务处/网络信息中心/研究生院/图书馆），5 分钟内存缓存，抓取失败回退旧缓存并标记 stale/error；并发抓取，单站超时 12 秒 |
@@ -48,6 +51,10 @@
 | GET | `/api/schedule` | 获取本地课表（可按学期筛选） |
 | POST | `/api/schedule/import` | 用结构化数据替换指定学期课表（仅限本地来源） |
 | POST | `/api/schedule/import-ustc` | 解析用户粘贴/导出的教务课表 HTML/JSON 并替换该学期（仅限本地来源） |
+| GET | `/api/schedule/calendar?semester=&on_date=` | 获取校历；`on_date` 可选，返回教学周状态、周范围和当日特殊安排 |
+| PUT | `/api/schedule/calendar` | 保存校历（第一周周一、1–30 周、最多 100 个特殊日期；仅限本地来源） |
+| POST | `/api/schedule/calendar/import-ics` | multipart：file 为 iCalendar 文件，semester 为目标学期；10 MB 上限，仅限本地来源 |
+| GET | `/api/schedule/reminders` | 按当前校历周次合并课表，返回今日/明日课程及特殊安排 |
 | GET | `/api/search/notices?q=` | 搜索公共通知（纯检索，不经 LLM） |
 | GET | `/api/search/my-data?q=` | 搜索个人数据（纯检索，不经 LLM） |
 | GET | `/api/digest?days=7` | 校园信息摘要：最近新通知 + 临近截止/进行中与即将开始事件（基于 `events.db`，不依赖嵌入/LLM；days 0–365） |
@@ -64,6 +71,10 @@
 
 交互式文档：`http://localhost:8000/api/docs`。
 
+> `python server.py` 默认关闭热重载。新增或修改路由后必须重启后端；否则旧进程的路由表不会变化，
+> 前端请求新路径可能返回 `405 Method Not Allowed`。开发期间可改用
+> `uvicorn server:app --reload --port 8000`。
+
 ## 关键约定
 
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
@@ -73,12 +84,17 @@
 - **设置变更失效链**：更新配置/切换模型 → `clear_agent_cache()`（含默认 agent）；更新工具开关 → 仅失效该用户 agent。
 - **连接生命周期**：缓存失效后旧 Agent 的连接延迟到使用它的流结束再关闭；构建期间发生设置变更时，丢弃旧配置构建结果并重试。同一话题的并发生成被拒绝，避免 checkpoint 相互覆盖。
 - **同步一致性**：同一进程串行执行同步；按来源替换更新通知，成功后原子写回版本号。请求取消时等待已启动的同步任务收尾，避免后台写入与下一次同步交错。
-- **课表写入口仅限本地来源**：`/api/schedule/import*` 与 `/api/personal-data/import-schedule` 统一经 `ensure_local_origin` 校验 Origin（无 Origin 或 localhost/127.0.0.1 才放行）。
+- **课表写入口仅限本地来源**：`/api/schedule/import*`、`PUT /api/schedule/calendar` 与 `/api/personal-data/import-schedule` 统一经 `ensure_local_origin` 校验 Origin（无 Origin 或 localhost/127.0.0.1 才放行）。
+- **校历边界**：第一周必须从周一开始；特殊日期必须落在教学周范围内，同一天仅允许一项；调课/补课必须指定所依据的课程星期。未配置校历时课表查询明确降级为全部周次，不推测当前周。
+- **iCalendar 导入**：原始文件不落盘，不执行文件中的链接或附件；重复导入保留已保存学期。校正接口中首周日期和周数可省略，沿用已保存值。
+- **课程提醒合并规则**：先按日期定位教学周，再按课程 `weeks` 和星期筛选；节假日/停课清空当日课程，调课/补课改用指定星期课程。今日页面读取该结果，不重复实现日期算法。
 - **追踪事件存 `users.db`**：`tracked_events` 表（username+source 主键，重复追踪即更新），CRUD 在 `campus_rag/auth.py`，与话题/工具偏好同库。
 - **事件窗口语义**：`get_notice_digest` 的 upcoming 合并两类——`deadline` 型（`event_start <= end 且 deadline >= today`）与 `start` 型（时间窗相交：`event_start <= window_end 且 COALESCE(event_end, event_start) >= today`）。后者会把“已开始未结束”的展览/施工带出来并标记 `ongoing=true`，前端据此显示“进行中”而非负数剩余天数。
-- **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（春季≈2-6 月、夏季≈7-8 月、秋季≈9 月-次年1月）；`get_my_schedule` 工具不指定学期时按 `current_semester()` 确定性推断，未导入当前学期时明确报告已导入学期列表，不返回其他学期课表。
+- **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（春季≈2-6 月、夏季≈7-8 月、秋季≈9 月-次年1月）；`get_my_schedule` 工具不指定学期时按 `current_semester()` 确定性推断，再按校历筛选当前/指定教学周并附带特殊日期提醒；未导入当前学期时明确报告已导入学期列表，不返回其他学期课表。
 
 ## 测试
+
+教务课表导入支持多段周次（如 `1~7,9~11周`）、分段单双周（如 `5~7(单),16周`），钟点范围保留为准确时间而非节次。旧版已存错误记录须重新导入原课表，不自动迁移用户数据库。
 
 ```bash
 pytest tests/test_server_api.py -v   # 路由契约/编码往返/状态机，离线可运行（RAG 用 stub）

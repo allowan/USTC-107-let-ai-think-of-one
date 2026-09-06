@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from server.services.schedule_service import ScheduleService
-from server.services.ustc_schedule import parse_ustc_schedule
+from server.services.ustc_schedule import _parse_schedule_entries, parse_ustc_schedule
 
 
 USTC_COURSE_TABLE_HTML = """
@@ -35,6 +35,16 @@ USTC_COURSE_TABLE_HTML = """
 
 
 class UstcScheduleParserTest(unittest.TestCase):
+    def test_parse_disjoint_parity_weeks_and_clock_time(self):
+        meetings = _parse_schedule_entries(
+            "1~7,9~11周 GH-412 :2(3,4) 教师\n"
+            "5~7(单),16周 机房 :2(18:30~21:30) 教师"
+        )
+        self.assertEqual(meetings[0]["weeks"], [1, 2, 3, 4, 5, 6, 7, 9, 10, 11])
+        self.assertEqual(meetings[1]["weeks"], [5, 7, 16])
+        self.assertEqual(meetings[1]["sections"], [])
+        self.assertEqual((meetings[1]["start_time"], meetings[1]["end_time"]), ("18:30", "21:30"))
+
     def test_parse_real_eams_lessons_and_timetable_shape(self):
         payload = parse_ustc_schedule(USTC_COURSE_TABLE_HTML, "course-table.html")
 

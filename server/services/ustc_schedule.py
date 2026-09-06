@@ -20,9 +20,8 @@ from server.services.schedule_service import SECTION_TIME_RANGES
 
 MAX_IMPORT_SIZE = 5_000_000
 _SEMESTER_RE = re.compile(r"\d{4}年(?:春|夏|秋|冬)季学期")
-_WEEK_TOKEN_RE = re.compile(
-    r"(?:\d+\s*(?:[~～—-]\s*\d+)?(?:\s*[,，、]\s*\d+)*|[单双全])\s*周"
-)
+_WEEK_PART = r"\d+\s*(?:[~～—-]\s*\d+)?\s*(?:[(（][单双][)）])?"
+_WEEK_TOKEN_RE = re.compile(rf"(?:{_WEEK_PART}(?:\s*[,，、]\s*{_WEEK_PART})*|[单双全])\s*周")
 _SCHEDULE_BODY_RE = re.compile(
     r"^(?P<location>.*?)\s*[:：]\s*(?P<weekday>[1-7])\s*"
     r"\((?P<sections>[^)]*)\)\s*(?P<teacher>.*)$",
@@ -134,7 +133,9 @@ def _parse_teachers(value: str) -> list[str]:
 
 def _parse_week_values(value: str) -> list[int]:
     value = value.replace("周", "").replace(" ", "")
-    if not value or value in {"单", "双", "全"}:
+    if value in {"单", "双"}:
+        raise UstcScheduleParseError("单双周缺少起止周数，请提供完整的教务课表明细")
+    if not value or value == "全":
         return []
     weeks: list[int] = []
     for part in re.split(r"[,，、]", value):
@@ -142,15 +143,22 @@ def _parse_week_values(value: str) -> list[int]:
         if len(numbers) >= 2 and re.search(r"[~～—-]", part):
             start, end = numbers[0], numbers[1]
             if start <= end:
-                weeks.extend(range(start, end + 1))
+                values = list(range(start, end + 1))
             else:
-                weeks.extend(range(end, start + 1))
+                values = list(range(end, start + 1))
         else:
-            weeks.extend(numbers)
-    return list(dict.fromkeys(weeks))
+            values = numbers
+        weeks.extend(number for number in values if
+                     ("单" not in part or number % 2 == 1) and
+                     ("双" not in part or number % 2 == 0))
+    if not weeks or min(weeks) < 1:
+        raise UstcScheduleParseError("课表周次范围无效")
+    return sorted(set(weeks))
 
 
 def _parse_sections(value: str) -> list[int]:
+    if ":" in value or "：" in value:
+        return []
     return list(dict.fromkeys(int(number) for number in re.findall(r"\d+", value)))
 
 
@@ -165,8 +173,17 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
         if not parsed:
             continue
         sections = _parse_sections(parsed.group("sections"))
+        time_range = re.fullmatch(
+            r"\s*([0-2]?\d[:：][0-5]\d)\s*[~～—-]\s*([0-2]?\d[:：][0-5]\d)\s*",
+            parsed.group("sections"),
+        )
+        start_time = end_time = None
+        if time_range:
+            start_time, end_time = (value.replace("：", ":").zfill(5) for value in time_range.groups())
+            if not (start_time < end_time < "24:00"):
+                raise UstcScheduleParseError("课表上课时间范围无效")
         weekday = int(parsed.group("weekday"))
-        if not sections:
+        if not sections and not time_range:
             continue
         meetings.append(
             {
@@ -174,8 +191,8 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
                 "sections": sections,
                 "weeks": _parse_week_values(match.group(0)),
                 "location": _clean_text(parsed.group("location")),
-                "start_time": None,
-                "end_time": None,
+                "start_time": start_time,
+                "end_time": end_time,
             }
         )
 
@@ -211,11 +228,19 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
             tuple(meeting["sections"]),
             tuple(meeting["weeks"]),
             meeting["location"],
+            meeting["start_time"],
+            meeting["end_time"],
         )
         if key not in seen:
             seen.add(key)
             unique.append(meeting)
     return unique
+
+
+def parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
+    """解析一段教务课表安排，供存储层校正历史记录使用。"""
+
+    return _parse_schedule_entries(raw)
 
 
 def _section_times(root: _Node) -> dict[int, tuple[str, str]]:
