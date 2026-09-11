@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { Alert, App, Button, Input, Modal, Space, Typography } from 'antd';
 import { ExportOutlined, FileTextOutlined } from '@ant-design/icons';
-import axios from 'axios';
+import { scheduleImportError } from '@/utils/scheduleImport';
 import { scheduleApi } from '@/services/api';
 
 const { Text, Paragraph } = Typography;
@@ -18,14 +18,6 @@ interface Props {
   open: boolean;
   onCancel: () => void;
   onImported: (result: UstcScheduleImportResult) => void;
-}
-
-function getErrorMessage(error: unknown, fallback: string): string {
-  if (axios.isAxiosError(error)) {
-    const detail = error.response?.data?.detail;
-    if (typeof detail === 'string' && detail) return detail;
-  }
-  return error instanceof Error ? error.message : fallback;
 }
 
 export default function UstcScheduleImportModal({ open, onCancel, onImported }: Props) {
@@ -68,7 +60,7 @@ export default function UstcScheduleImportModal({ open, onCancel, onImported }: 
       reset();
       onCancel();
     } catch (error) {
-      message.error(getErrorMessage(error, '教务课表解析失败'));
+      message.error(scheduleImportError(error, '教务课表解析失败'));
     } finally {
       setLoading(false);
     }

@@ -3,7 +3,8 @@ import { Alert, App, Button, Empty, List, Select, Space, Spin, Tag, Typography }
 import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { scheduleApi } from '@/services/api';
-import type { AcademicCalendar, ScheduleCourse, ScheduleData, ScheduleImportPayload } from '@/types';
+import { readScheduleFile, scheduleImportError } from '@/utils/scheduleImport';
+import type { AcademicCalendar, ScheduleCourse, ScheduleData } from '@/types';
 import AcademicCalendarModal from '@/components/Schedule/AcademicCalendarModal';
 import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
 
@@ -31,46 +32,6 @@ function localDate(value: Date): string {
   const month = String(value.getMonth() + 1).padStart(2, '0');
   const day = String(value.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
-}
-
-function parseCsv(text: string): ScheduleImportPayload {
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (lines.length < 2) throw new Error('CSV 至少需要表头和一行课程');
-  const headers = lines[0].split(',').map(value => value.trim());
-  const index = (name: string) => headers.indexOf(name);
-  const value = (cells: string[], name: string) => {
-    const position = index(name);
-    return position >= 0 ? cells[position]?.trim() || '' : '';
-  };
-  const courses = lines.slice(1).map(line => {
-    const cells = line.split(',').map(value => value.trim());
-    const sections = value(cells, 'sections').split(/[-~]/).map(Number).filter(Number.isFinite);
-    const weeks = value(cells, 'weeks').split(/[;，,]/).map(Number).filter(Number.isFinite);
-    return {
-      course_code: value(cells, 'course_code'),
-      name: value(cells, 'name'),
-      teachers: value(cells, 'teachers').split(/[;，]/).map(item => item.trim()).filter(Boolean),
-      credits: Number(value(cells, 'credits')) || null,
-      raw_schedule: value(cells, 'raw_schedule'),
-      meetings: [{
-        weekday: Number(value(cells, 'weekday')) || null,
-        sections,
-        weeks,
-        location: value(cells, 'location'),
-        start_time: value(cells, 'start_time') || null,
-        end_time: value(cells, 'end_time') || null,
-      }],
-    };
-  }).filter(course => course.name);
-  return { semester: '导入课表', courses };
-}
-
-async function readScheduleFile(file: File): Promise<ScheduleImportPayload> {
-  const content = await file.text();
-  if (file.name.toLowerCase().endsWith('.csv')) return parseCsv(content);
-  const payload = JSON.parse(content) as ScheduleImportPayload;
-  if (!payload.semester || !Array.isArray(payload.courses)) throw new Error('JSON 需要包含 semester 和 courses');
-  return payload;
 }
 
 export default function SchedulePage() {
@@ -127,7 +88,7 @@ export default function SchedulePage() {
       message.success(`已导入 ${payload.courses.length} 门课程`);
       await load(payload.semester);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '课表文件导入失败');
+      message.error(scheduleImportError(error, '课表文件导入失败'));
     } finally {
       setImporting(false);
     }
