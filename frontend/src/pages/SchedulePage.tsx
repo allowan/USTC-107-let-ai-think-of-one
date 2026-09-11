@@ -3,12 +3,22 @@ import { Alert, App, Button, Empty, List, Select, Space, Spin, Tag, Typography }
 import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { scheduleApi } from '@/services/api';
-import type { AcademicCalendar, ScheduleData, ScheduleImportPayload } from '@/types';
+import type { AcademicCalendar, ScheduleCourse, ScheduleData, ScheduleImportPayload } from '@/types';
 import AcademicCalendarModal from '@/components/Schedule/AcademicCalendarModal';
 import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
 
 const { Text, Title } = Typography;
 const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+const sectionCount = 13;
+
+function hasValidGridPosition(course: ScheduleCourse): boolean {
+  const { weekday, start_section: start } = course;
+  const end = course.end_section ?? start;
+  // 异常导入数据不能通过 CSS Grid 隐式行列扩展课表。
+  return weekday !== null && Number.isInteger(weekday) && weekday >= 1 && weekday <= 7
+    && start !== null && Number.isInteger(start) && start >= 1
+    && end !== null && Number.isInteger(end) && end >= start && end <= sectionCount;
+}
 
 function addDays(value: string, days: number): Date {
   const result = new Date(`${value}T00:00:00`);
@@ -123,16 +133,13 @@ export default function SchedulePage() {
     }
   };
 
-  const sectionCount = useMemo(() => Math.max(
-    13,
-    ...data.courses.map(course => course.end_section || course.start_section || 0),
-  ), [data.courses]);
   const visibleCourses = useMemo(
     () => selectedWeek === null
       ? data.courses
       : data.courses.filter(course => course.weeks.length === 0 || course.weeks.includes(selectedWeek)),
     [data.courses, selectedWeek],
   );
+  const unplacedCourses = visibleCourses.filter(course => !hasValidGridPosition(course));
   const selectedWeekStart = calendar && selectedWeek
     ? addDays(calendar.start_date, (selectedWeek - 1) * 7)
     : null;
@@ -173,7 +180,7 @@ export default function SchedulePage() {
     { label: '上午', start: 1, end: 5 },
     { label: '下午', start: 6, end: 10 },
     { label: '晚上', start: 11, end: sectionCount },
-  ].filter(group => group.start <= sectionCount);
+  ];
   const courseCount = new Set(data.courses.map(course => course.course_code || course.name)).size;
 
   return (
@@ -296,7 +303,7 @@ export default function SchedulePage() {
                   />
                 )),
               )}
-              {visibleCourses.filter(course => course.weekday && course.start_section).map(course => {
+              {visibleCourses.filter(hasValidGridPosition).map(course => {
                 const start = course.start_section || 1;
                 const span = Math.max(1, (course.end_section || start) - start + 1);
                 const time = course.start_time && course.end_time ? `${course.start_time}-${course.end_time}` : '';
@@ -316,12 +323,19 @@ export default function SchedulePage() {
               })}
             </div>
           </div>
-          {visibleCourses.some(course => !course.weekday || !course.start_section) && (
+          {unplacedCourses.length > 0 && (
             <List
               size="small"
-              header="节次或星期待定的安排"
-              dataSource={visibleCourses.filter(course => !course.weekday || !course.start_section)}
-              renderItem={course => <List.Item key={course.id}>{course.name} · {course.location || '地点待定'} · {course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}</List.Item>}
+              header="节次或星期待核对的安排（每天仅支持第 1–13 节）"
+              dataSource={unplacedCourses}
+              renderItem={course => (
+                <List.Item key={course.id}>
+                  {course.name} · {course.location || '地点待定'} · {course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}
+                  {course.start_section !== null && ` · 原节次：${course.start_section}–${course.end_section ?? course.start_section}`}
+                  {course.start_time && course.end_time && ` · ${course.start_time}–${course.end_time}`}
+                  {course.raw_schedule && ` · 原始安排：${course.raw_schedule}`}
+                </List.Item>
+              )}
             />
           )}
         </>
