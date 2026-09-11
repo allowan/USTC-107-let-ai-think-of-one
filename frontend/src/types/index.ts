@@ -163,6 +163,15 @@ export interface ScheduleImportPayload {
   courses: ScheduleCourseInput[];
 }
 
+export interface ScheduleImportPreview {
+  payload: ScheduleImportPayload;
+  course_count: number;
+  meeting_count: number;
+  existing_meeting_count: number;
+  errors: string[];
+  warnings: string[];
+}
+
 export interface DigestEvent {
   source: string;
   title: string | null;

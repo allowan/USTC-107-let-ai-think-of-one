@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sqlite3
+from copy import deepcopy
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -166,6 +167,72 @@ class ScheduleService:
                 """
             )
 
+    def preview_import(self, username: str, semester: str, courses: list[dict]) -> dict:
+        """只读预览导入的错误、提醒、覆盖范围和可供确认的规范化课表。"""
+        errors = validate_schedule_import(semester, courses)
+        with closing(self._connect()) as db:
+            existing_count = db.execute(
+                "SELECT COUNT(*) FROM schedule_courses WHERE username = ? AND semester = ?",
+                (username, semester if isinstance(semester, str) else ""),
+            ).fetchone()[0]
+        payload = {"semester": semester if isinstance(semester, str) else str(semester), "courses": deepcopy(courses)}
+        warnings: list[str] = []
+        meeting_count = sum(
+            max(len(course.get("meetings", [])), 1)
+            for course in courses
+            if isinstance(course, dict) and isinstance(course.get("meetings", []), list)
+        ) if isinstance(courses, list) else 0
+        if not errors:
+            seen: set[str] = set()
+            normalized_courses = []
+            for course_index, course in enumerate(courses, 1):
+                normalized = {
+                    "course_code": str(course.get("course_code", "")),
+                    "name": course["name"],
+                    "teachers": course.get("teachers", []),
+                    "credits": course.get("credits"),
+                    "raw_schedule": str(course.get("raw_schedule", "")),
+                    "meetings": [],
+                }
+                for meeting_index, meeting in enumerate(course.get("meetings") or [{}], 1):
+                    sections = [int(value) for value in meeting.get("sections", [])]
+                    entry = {
+                        "weekday": int(meeting["weekday"]) if meeting.get("weekday") is not None else None,
+                        "sections": list(range(sections[0], sections[-1] + 1)) if sections else [],
+                        "weeks": sorted({int(value) for value in meeting.get("weeks", [])}),
+                        "location": str(meeting.get("location", "")),
+                        "start_time": meeting.get("start_time"),
+                        "end_time": meeting.get("end_time"),
+                    }
+                    normalized["meetings"].append(entry)
+                    prefix = f"第{course_index}门课程（{course['name']}）第{meeting_index}项安排"
+                    if entry["start_time"] is None and sections:
+                        fallback = SECTION_TIME_RANGES.get((sections[0], sections[-1]))
+                        if fallback:
+                            entry["start_time"], entry["end_time"] = fallback
+                            warnings.append(f"{prefix}：时间来自内置默认表，请核对是否符合实际安排")
+                    if entry["weekday"] is None or not entry["sections"]:
+                        warnings.append(f"{prefix}：缺少星期或节次，导入后显示在待核对列表")
+                    if not entry["weeks"]:
+                        warnings.append(f"{prefix}：未提供周次，将按全部周次展示")
+                    signature = json.dumps([
+                        normalized["course_code"] or normalized["name"],
+                        sorted(normalized["teachers"]), entry,
+                    ], ensure_ascii=False, sort_keys=True)
+                    if signature in seen:
+                        warnings.append(f"{prefix}：存在相同课程安排，将保留重复记录")
+                    seen.add(signature)
+                normalized_courses.append(normalized)
+            payload["courses"] = normalized_courses
+        return {
+            "payload": payload,
+            "course_count": len(courses) if isinstance(courses, list) else 0,
+            "meeting_count": meeting_count,
+            "existing_meeting_count": existing_count,
+            "errors": errors,
+            "warnings": warnings,
+        }
+
     def replace(self, username: str, semester: str, courses: list[dict]) -> int:
         """完整校验后原子替换指定用户学期课表；校验失败保留全部原数据。"""
         errors = validate_schedule_import(semester, courses)
@@ -237,22 +304,6 @@ class ScheduleService:
         for row in rows:
             row["teachers"] = json.loads(row["teachers"])
             row["weeks"] = json.loads(row["weeks"])
-            # 旧版本曾截断多段周次；读取时按原始安排重新推导，避免用户必须手工改库。
-            if row.get("raw_schedule"):
-                from server.services.ustc_schedule import parse_schedule_entries
-
-                candidates = parse_schedule_entries(row["raw_schedule"])
-                for candidate in candidates:
-                    if candidate["weekday"] != row.get("weekday"):
-                        continue
-                    if candidate["sections"] and tuple(candidate["sections"]) != tuple(
-                        range(row.get("start_section") or 0, (row.get("end_section") or 0) + 1)
-                    ):
-                        continue
-                    if candidate["start_time"] and row.get("start_time") and candidate["start_time"] != row.get("start_time"):
-                        continue
-                    row["weeks"] = candidate["weeks"]
-                    break
             if not row.get("start_time") and row.get("start_section") and row.get("end_section"):
                 start, end = SECTION_TIME_RANGES.get(
                     (row["start_section"], row["end_section"]), (None, None)

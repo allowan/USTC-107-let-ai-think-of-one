@@ -254,16 +254,6 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
     return unique
 
 
-def parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
-    """解析一段教务课表安排，供存储层校正历史记录使用。"""
-    try:
-        return _parse_schedule_entries(raw)
-    except UstcScheduleParseError:
-        # 旧记录可能包含已不允许导入的错误；读取仍保留它们供界面核对。
-        logger.warning("历史课表安排无法重新解析，保留已存储记录")
-        return []
-
-
 def _section_times(root: _Node) -> dict[int, tuple[str, str]]:
     timetable = _find_timetable(root)
     result: dict[int, tuple[str, str]] = {}

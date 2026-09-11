@@ -208,20 +208,54 @@ async def import_academic_calendar_ics(
     }
 
 
+@router.post("/preview")
+async def preview_schedule(
+    payload: ScheduleImport,
+    request: Request,
+    user: str = Depends(get_user),
+    service: ScheduleService = Depends(get_schedule_service),
+) -> dict:
+    """只读预览结构化课表，不替换已有记录。"""
+    ensure_local_origin(request)
+    return await asyncio.to_thread(
+        service.preview_import, user, payload.semester,
+        [course.model_dump() for course in payload.courses],
+    )
+
+
+@router.post("/preview-ustc")
+async def preview_ustc_schedule(
+    payload: UstcScheduleImport,
+    request: Request,
+    user: str = Depends(get_user),
+    service: ScheduleService = Depends(get_schedule_service),
+) -> dict:
+    """解析用户提供的教务 HTML/JSON 并只读预览。"""
+    ensure_local_origin(request)
+    try:
+        parsed = await asyncio.to_thread(parse_ustc_schedule, payload.content, payload.filename)
+    except UstcScheduleParseError as exc:
+        logger.warning("教务课表预览解析失败：%s", type(exc).__name__)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await asyncio.to_thread(service.preview_import, user, parsed["semester"], parsed["courses"])
+
+
 @router.post("/import")
 async def import_schedule(
     payload: ScheduleImport,
     request: Request,
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
-):
+) -> dict:
+    """完整校验结构化课表后替换目标学期。"""
     ensure_local_origin(request)
+    courses = [course.model_dump() for course in payload.courses]
     if not payload.courses:
         raise HTTPException(status_code=400, detail="未读取到课程")
     try:
         count = await asyncio.to_thread(
             service.replace, user, payload.semester,
-            [course.model_dump() for course in payload.courses],
+            courses,
         )
     except ScheduleImportValidationError as exc:
         logger.warning("结构化课表导入被拒绝：%d 项校验问题", len(exc.errors))
@@ -237,7 +271,7 @@ async def import_ustc_schedule(
     request: Request,
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
-):
+) -> dict:
     """Parse an exported USTC course-table page and replace that semester."""
 
     ensure_local_origin(request)

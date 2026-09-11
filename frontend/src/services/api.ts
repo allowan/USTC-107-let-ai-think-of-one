@@ -107,6 +107,10 @@ export const scheduleApi = {
     api.get<import('@/types').CourseReminderData>('/schedule/reminders'),
   import: (payload: import('@/types').ScheduleImportPayload) =>
     api.post<{ message: string; semester: string; meeting_count: number }>('/schedule/import', payload),
+  preview: (payload: import('@/types').ScheduleImportPayload) =>
+    api.post<import('@/types').ScheduleImportPreview>('/schedule/preview', payload),
+  previewUstc: (content: string, filename?: string) =>
+    api.post<import('@/types').ScheduleImportPreview>('/schedule/preview-ustc', { content, filename: filename || '' }),
   importUstc: (content: string, filename?: string) =>
     api.post<{
       message: string;

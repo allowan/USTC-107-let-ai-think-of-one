@@ -94,6 +94,9 @@ export async function readScheduleFile(file: File): Promise<ScheduleImportPayloa
 
 export function scheduleImportError(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
+    if (error.response?.status === 404 || error.response?.status === 405) {
+      return '课表接口不可用，请重启后端并刷新页面后重试';
+    }
     const detail = error.response?.data?.detail;
     if (typeof detail === 'string' && detail) return detail;
     if (detail && Array.isArray(detail.errors)) return [detail.message, ...detail.errors].filter(Boolean).join('；');

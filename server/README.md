@@ -49,6 +49,8 @@
 | PUT | `/api/personal-data/{source}` | 编辑个人数据 |
 | DELETE | `/api/personal-data/{source}` | 删除个人数据 |
 | GET | `/api/schedule` | 获取本地课表（可按学期筛选） |
+| POST | `/api/schedule/preview` | 只读校验并预览结构化课表、覆盖范围与提醒（仅限本地来源） |
+| POST | `/api/schedule/preview-ustc` | 只读解析并预览教务 HTML/JSON（仅限本地来源） |
 | POST | `/api/schedule/import` | 用结构化数据替换指定学期课表（仅限本地来源） |
 | POST | `/api/schedule/import-ustc` | 解析用户粘贴/导出的教务课表 HTML/JSON 并替换该学期（仅限本地来源） |
 | GET | `/api/schedule/calendar?semester=&on_date=` | 获取校历；`on_date` 可选，返回教学周状态、周范围和当日特殊安排 |
@@ -97,6 +99,12 @@
 所有课表替换（结构化 API、教务 HTML/JSON、Agent 工具）在服务层完整校验后才进入写入事务；任何一项失败都保留指定用户、学期的原课表。校验要求学期和课程名非空、星期为 1–7 整数、节次为 1–13 整数并严格升序且不重复、周次为正整数；兼容纯数字字符串，拒绝布尔值、小数和非法字符。钟点时间必须成对提供，使用 HH:MM 且结束晚于开始。空节次、无安排课程和只有钟点时间的安排仍可导入。
 
 `validate_schedule_import()` 返回带课程序号、名称及安排序号的全部问题，不修改输入或写库。校验失败的导入 API 返回 HTTP 400，`detail.message` 提示原有课表未修改，`detail.errors` 提供错误列表；请求结构错误仍由参数层返回 422。JSON 解析保留原始安排值，不再静默过滤错误节次、周次或星期。旧异常记录不自动迁移，仍可查看并重新导入修正。
+
+独立预览接口 `POST /api/schedule/preview` 和 `POST /api/schedule/preview-ustc` 只解析、校验并查询覆盖范围，不修改课表或校历；原导入接口继续只负责保存。旧后端不识别新增预览路径时返回 404/405，不会误执行写入。预览成功返回 `{payload: {semester, courses}, course_count, meeting_count, existing_meeting_count, errors, warnings}`。服务校验问题通过 HTTP 200 的 `errors` 展示，无法解析或请求结构错误仍返回 400/422；预览也必须符合本地来源限制。
+
+无错误的预览 payload 可直接提交 `/api/schedule/import` 确认保存，保存时重新校验。数字字符串转为整数，节次端点展开为与存储一致的连续范围，周次去重排序；不修复非法值。预览提示缺少星期/节次、缺少周次及重复课程安排，重复识别包含教师，重复记录仍保留。`meeting_count` 为预计存储记录数（无安排课程计一条待定记录），`existing_meeting_count` 只统计当前用户目标学期即将被替换的记录。
+
+已保存的结构化 `weeks` 是查询与展示的权威来源，`raw_schedule` 仅作追溯，不在读取时重解析覆盖周次；旧错误记录需要重新导入修复，不自动修改数据库。未提供钟点时间但节次命中现有内置默认表时，预览明确显示该默认时间并提示核对，确认保存后与课表查询一致。
 
 ## 测试
 

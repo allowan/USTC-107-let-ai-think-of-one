@@ -4,9 +4,10 @@ import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutline
 import axios from 'axios';
 import { scheduleApi } from '@/services/api';
 import { readScheduleFile, scheduleImportError } from '@/utils/scheduleImport';
-import type { AcademicCalendar, ScheduleCourse, ScheduleData } from '@/types';
+import type { AcademicCalendar, ScheduleCourse, ScheduleData, ScheduleImportPreview } from '@/types';
 import AcademicCalendarModal from '@/components/Schedule/AcademicCalendarModal';
 import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
+import ScheduleImportPreviewModal from '@/components/Schedule/ScheduleImportPreviewModal';
 
 const { Text, Title } = Typography;
 const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
@@ -39,6 +40,8 @@ export default function SchedulePage() {
   const [data, setData] = useState<ScheduleData>({ semester: null, semesters: [], courses: [] });
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [ustcImportVisible, setUstcImportVisible] = useState(false);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [calendar, setCalendar] = useState<AcademicCalendar | null>(null);
@@ -84,11 +87,27 @@ export default function SchedulePage() {
     try {
       const payload = await readScheduleFile(file);
       if (!payload.courses.length) throw new Error('文件中没有课程');
-      await scheduleApi.import(payload);
-      message.success(`已导入 ${payload.courses.length} 门课程`);
-      await load(payload.semester);
+      const response = await scheduleApi.preview(payload);
+      setImportError(null);
+      setImportPreview(response.data);
     } catch (error) {
       message.error(scheduleImportError(error, '课表文件导入失败'));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!importPreview || importPreview.errors.length || importing) return;
+    setImporting(true);
+    setImportError(null);
+    try {
+      await scheduleApi.import(importPreview.payload);
+      message.success(`已导入 ${importPreview.course_count} 门课程`);
+      setImportPreview(null);
+      await load(importPreview.payload.semester);
+    } catch (error) {
+      setImportError(scheduleImportError(error, '课表保存失败，请重试'));
     } finally {
       setImporting(false);
     }
@@ -170,7 +189,7 @@ export default function SchedulePage() {
           <Button icon={<CloudDownloadOutlined />} onClick={() => setUstcImportVisible(true)}>
             获取课表
           </Button>
-          <Button type="primary" icon={<FileAddOutlined />} loading={importing} onClick={() => fileInput.current?.click()}>
+          <Button type="primary" icon={<FileAddOutlined />} loading={importing} disabled={importPreview !== null} onClick={() => fileInput.current?.click()}>
             导入课表文件
           </Button>
           <input ref={fileInput} type="file" accept=".json,.csv,application/json,text/csv" hidden onChange={importFile} />
@@ -301,6 +320,13 @@ export default function SchedulePage() {
           )}
         </>
       )}
+      <ScheduleImportPreviewModal
+        preview={importPreview}
+        saving={importing}
+        error={importError}
+        onConfirm={() => void confirmImport()}
+        onCancel={() => setImportPreview(null)}
+      />
       <UstcScheduleImportModal
         open={ustcImportVisible}
         onCancel={() => setUstcImportVisible(false)}

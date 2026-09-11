@@ -14,7 +14,8 @@ React 18 + Vite 6 + TypeScript 5 + Ant Design + Zustand 的单页应用，通过
 | `pages/PersonalDataPage.tsx` | 个人知识库管理（按来源聚合、增删改、将已导入课表同步进个人数据） |
 | `pages/SchedulePage.tsx` | 校历驱动的本地课表周视图：默认当前教学周、手动周次切换、今日/明日课程和特殊日期提醒；未配置校历时显示全部周次 |
 | `pages/SyncPage.tsx` | 公共通知同步状态与手动触发 |
-| `components/Schedule/UstcScheduleImportModal.tsx` | 粘贴/上传教务课表 HTML、JSON、CSV 并导入 |
+| `components/Schedule/UstcScheduleImportModal.tsx` | 粘贴/上传教务课表 HTML、JSON 并导入 |
+| `components/Schedule/ScheduleImportPreviewModal.tsx` | 两个导入入口共用：课程预览、校验问题、缺失信息提示与同学期覆盖确认 |
 | `components/Schedule/AcademicCalendarModal.tsx` | iCalendar 文件导入；已有校历不覆盖；首周日期、教学周数和特殊安排校正 |
 | `components/Schedule/ImportExistingScheduleModal.tsx` | 从已导入的学期中选择并同步到个人知识库 |
 | `components/Layout/AppLayout.tsx` | 侧边栏（菜单 + 话题列表：重命名/删除）+ 顶栏；后端离线时错误提示可点击重试 |
@@ -49,6 +50,7 @@ npm run build      # 生产构建到 dist/（后端检测到 dist/ 会静态挂�
 
 ## 注意事项
 
+- 两个课表导入入口均先请求独立的只读预览接口（`/api/schedule/preview`、`/api/schedule/preview-ustc`），再由用户确认保存；升级后须重启后端。预览显示学期、课程安排及将被替换的已有安排数量；校验错误禁止确认，缺失信息和重复安排给出提醒。返回修改或取消预览不会改动数据；教务导入保留输入内容供修正，文件导入可重新选择文件。保存失败保留预览供重试，保存时服务端再次完整校验。
 - 课表文件导入会展示后端返回的课程和安排序号校验错误。CSV 支持引号、字段内逗号/换行、节次和周次范围（如 `1-3;5`），空值保持待定；非法数字、缺少课程名、列数不符和混合学期会明确拒绝，不静默丢弃。可选 `semester` 列指定学期，缺省沿用“导入课表”。文件大小上限为 5 MB。
 - 课表导入前端回归检查：`npm run test:schedule`，覆盖 CSV 解析和导入错误展示，无需模型或后端服务。
 - 课表每天固定 13 节：上午 1–5 节、下午 6–10 节、晚上 11–13 节。缺失或异常的星期、节次（越界、非整数、结束早于开始）不进入网格，保留在下方待核对列表并展示已有原始安排，避免异常数据撑大课表。

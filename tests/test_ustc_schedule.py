@@ -36,6 +36,41 @@ USTC_COURSE_TABLE_HTML = """
 
 
 class UstcScheduleParserTest(unittest.TestCase):
+    def test_ustc_preview_is_read_only_and_confirms_via_structured_import(self) -> None:
+        from fastapi.testclient import TestClient
+        from server import create_app
+        from server.services.schedule_service import get_schedule_service
+
+        with tempfile.TemporaryDirectory() as folder:
+            service = ScheduleService(Path(folder) / "schedule.db")
+            service.replace("local_user", "2026年秋季学期", [{"name": "原课程"}])
+            before = service.db_path.read_bytes()
+            app = create_app()
+            app.dependency_overrides[get_schedule_service] = lambda: service
+            client = TestClient(app)
+            try:
+                body = {"content": USTC_COURSE_TABLE_HTML}
+                response = client.post("/api/schedule/preview-ustc", json=body)
+                self.assertEqual(response.status_code, 200)
+                preview = response.json()
+                self.assertEqual(preview["errors"], [])
+                self.assertEqual(preview["existing_meeting_count"], 1)
+                self.assertEqual(service.db_path.read_bytes(), before)
+                invalid = client.post("/api/schedule/preview-ustc", json={
+                    "content": USTC_COURSE_TABLE_HTML.replace(":5(8,9)", ":5(18,30)")})
+                self.assertEqual(invalid.status_code, 200)
+                self.assertTrue(invalid.json()["errors"])
+                blocked = client.post("/api/schedule/preview-ustc", json=body,
+                                      headers={"Origin": "https://untrusted.example"})
+                self.assertEqual(blocked.status_code, 403)
+                self.assertEqual(service.db_path.read_bytes(), before)
+                saved = client.post("/api/schedule/import", json=preview["payload"])
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(saved.json()["meeting_count"], preview["meeting_count"])
+                self.assertEqual(service.list("local_user")["courses"][0]["name"], "深度学习实践")
+            finally:
+                client.close()
+
     def test_import_rejects_invalid_json_and_html_without_replacing(self) -> None:
         from fastapi.testclient import TestClient
         from server import create_app
