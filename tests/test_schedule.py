@@ -15,6 +15,65 @@ class ScheduleServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_invalid_import_preserves_all_existing_rows(self) -> None:
+        from server.services.schedule_service import ScheduleImportValidationError
+
+        self.service.replace("student-a", "秋季", [{"name": "原课程"}])
+        self.service.replace("student-a", "春季", [{"name": "其他学期"}])
+        before = self.service.list("student-a")
+        invalid_meetings = [
+            {"sections": [0, 55]}, {"sections": [13, 12]}, {"sections": [1, 1]},
+            {"sections": [True]}, {"sections": [1.0]}, {"sections": ["2a"]},
+            {"weekday": 8}, {"weekday": False}, {"weekday": 1.5},
+            {"weeks": [0]}, {"weeks": [1.5]}, {"weeks": ["bad"]},
+            {"start_time": "18:30"}, {"start_time": "24:00", "end_time": "25:00"},
+            {"start_time": "19:00", "end_time": "18:00"},
+        ]
+        for meeting in invalid_meetings:
+            with self.subTest(meeting=meeting):
+                with self.assertRaises(ScheduleImportValidationError) as caught:
+                    self.service.replace("student-a", "秋季", [{"name": "异常课", "meetings": [meeting]}])
+                self.assertIn("第1门课程（异常课）第1项安排", caught.exception.errors[0])
+                self.assertEqual(self.service.list("student-a"), before)
+
+    def test_import_validation_collects_errors_and_preserves_compatible_data(self) -> None:
+        from server.services.schedule_service import validate_schedule_import
+
+        errors = validate_schedule_import(" ", [{"name": " ", "meetings": [
+            {"weekday": 0, "sections": [14], "weeks": [-1], "start_time": "wrong"},
+        ]}])
+        self.assertEqual(len(errors), 6)
+        courses = [
+            {"name": "全日课程", "meetings": [{"weekday": "7", "sections": [str(x) for x in range(1, 14)], "weeks": ["99"]}]},
+            {"name": "钟点课", "meetings": [{"weekday": 1, "start_time": "18:30", "end_time": "21:30"}]},
+            {"name": "待安排", "meetings": []},
+            {"name": "空节次", "meetings": [{"weekday": 2, "sections": []}]},
+        ]
+        self.assertEqual(validate_schedule_import("秋季", courses), [])
+        self.assertEqual(self.service.replace("student-a", "秋季", courses), 4)
+        rows = self.service.list("student-a")["courses"]
+        full = next(row for row in rows if row["name"] == "全日课程")
+        self.assertEqual((full["start_section"], full["end_section"], full["weekday"], full["weeks"]), (1, 13, 7, [99]))
+
+    def test_api_rejects_invalid_numbers_without_coercion(self) -> None:
+        from fastapi.testclient import TestClient
+        from server import create_app
+        from server.services.schedule_service import get_schedule_service
+
+        self.service.replace("local_user", "秋季", [{"name": "原课程"}])
+        before = self.service.list("local_user")
+        app = create_app()
+        app.dependency_overrides[get_schedule_service] = lambda: self.service
+        client = TestClient(app)
+        try:
+            for meeting in [{"sections": [True]}, {"sections": [1.0]}, {"weeks": [False]}, {"weekday": 1.5}]:
+                response = client.post("/api/schedule/import", json={"semester": "秋季", "courses": [{"name": "异常课", "meetings": [meeting]}]})
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.json()["detail"]["errors"])
+                self.assertEqual(self.service.list("local_user"), before)
+        finally:
+            client.close()
+
     def test_replace_and_list_schedule(self):
         count = self.service.replace(
             "student-a",

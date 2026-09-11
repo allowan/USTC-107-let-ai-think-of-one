@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
@@ -10,6 +12,7 @@ from pathlib import Path
 
 
 DB_PATH = Path(__file__).resolve().parents[2] / "schedule.db"
+logger = logging.getLogger(__name__)
 
 # USTC's standard period ranges. Imported files can provide exact times; these
 # ranges keep older section-only records useful in the local UI as well.
@@ -21,6 +24,81 @@ SECTION_TIME_RANGES = {
     (11, 12): ("19:00", "20:35"),
     (13, 14): ("20:40", "22:15"),
 }
+
+
+class ScheduleImportValidationError(ValueError):
+    """课表未通过完整校验，errors 包含各项可定位的问题。"""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("；".join(errors))
+
+
+def _integer(value: object) -> int | None:
+    # 保留数字字符串兼容，但禁止 bool、小数以及部分可解析的字符串。
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        try:
+            return int(value)
+        except ValueError:
+            logger.warning("课表整数值超过可解析范围")
+            return None
+    return None
+
+
+def validate_schedule_import(semester: str, courses: list[dict]) -> list[str]:
+    """校验完整课表并返回所有问题；不写库，也不修改传入数据。"""
+    errors: list[str] = []
+    if not isinstance(semester, str) or not semester.strip():
+        errors.append("学期名称不能为空")
+    if not isinstance(courses, list) or not courses:
+        errors.append("课程必须是非空数组")
+        return errors
+    for course_index, course in enumerate(courses, 1):
+        prefix = f"第{course_index}门课程"
+        if not isinstance(course, dict):
+            errors.append(f"{prefix}：必须是课程对象")
+            continue
+        name = course.get("name")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"{prefix}：课程名称不能为空")
+        else:
+            prefix += f"（{name.strip()}）"
+        meetings = course.get("meetings", [])
+        if not isinstance(meetings, list):
+            errors.append(f"{prefix}：安排必须是数组")
+            continue
+        for meeting_index, meeting in enumerate(meetings, 1):
+            position = f"{prefix}第{meeting_index}项安排"
+            if not isinstance(meeting, dict):
+                errors.append(f"{position}：必须是安排对象")
+                continue
+            weekday = meeting.get("weekday")
+            day = _integer(weekday)
+            if weekday is not None and (day is None or not 1 <= day <= 7):
+                errors.append(f"{position}：星期必须是1–7的整数")
+            for field, label in (("sections", "节次"), ("weeks", "周次")):
+                values = meeting.get(field, [])
+                if not isinstance(values, list):
+                    errors.append(f"{position}：{label}必须是数组")
+                    continue
+                numbers = [_integer(value) for value in values]
+                if any(number is None or number < 1 or (field == "sections" and number > 13)
+                       for number in numbers):
+                    constraint = "1–13的整数" if field == "sections" else "正整数"
+                    errors.append(f"{position}：{label}必须全部为{constraint}")
+                elif field == "sections" and any(left >= right for left, right in zip(numbers, numbers[1:])):
+                    errors.append(f"{position}：节次必须升序排列且不能重复")
+            start, end = meeting.get("start_time"), meeting.get("end_time")
+            if start is not None or end is not None:
+                valid_times = all(isinstance(value, str) and re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value)
+                                  for value in (start, end))
+                if not valid_times:
+                    errors.append(f"{position}：开始和结束时间必须成对提供，格式为HH:MM")
+                elif start >= end:
+                    errors.append(f"{position}：结束时间必须晚于开始时间")
+    return errors
 
 
 def current_semester(today: datetime | None = None) -> str:
@@ -89,12 +167,17 @@ class ScheduleService:
             )
 
     def replace(self, username: str, semester: str, courses: list[dict]) -> int:
+        """完整校验后原子替换指定用户学期课表；校验失败保留全部原数据。"""
+        errors = validate_schedule_import(semester, courses)
+        if errors:
+            logger.warning("课表导入校验失败，共 %d 项问题", len(errors))
+            raise ScheduleImportValidationError(errors)
         now = datetime.now(timezone.utc).isoformat()
         rows = []
         for course in courses:
             meetings = course.get("meetings") or [{}]
             for meeting in meetings:
-                sections = [int(x) for x in meeting.get("sections", []) if str(x).isdigit()]
+                sections = [int(x) for x in meeting.get("sections", [])]
                 rows.append(
                     (
                         username,
@@ -102,10 +185,10 @@ class ScheduleService:
                         str(course.get("course_code", "")),
                         str(course.get("name", "")),
                         json.dumps(course.get("teachers", []), ensure_ascii=False),
-                        meeting.get("weekday"),
+                        int(meeting["weekday"]) if meeting.get("weekday") is not None else None,
                         min(sections) if sections else None,
                         max(sections) if sections else None,
-                        json.dumps(meeting.get("weeks", []), ensure_ascii=False),
+                        json.dumps([int(x) for x in meeting.get("weeks", [])], ensure_ascii=False),
                         str(meeting.get("location", "")),
                         course.get("credits"),
                         meeting.get("start_time"),

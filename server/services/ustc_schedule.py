@@ -11,6 +11,7 @@ the real EAMS page.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from html.parser import HTMLParser
 from typing import Any, Iterable
@@ -19,11 +20,12 @@ from server.services.schedule_service import SECTION_TIME_RANGES
 
 
 MAX_IMPORT_SIZE = 5_000_000
+logger = logging.getLogger(__name__)
 _SEMESTER_RE = re.compile(r"\d{4}年(?:春|夏|秋|冬)季学期")
 _WEEK_PART = r"\d+\s*(?:[~～—-]\s*\d+)?\s*(?:[(（][单双][)）])?"
 _WEEK_TOKEN_RE = re.compile(rf"(?:{_WEEK_PART}(?:\s*[,，、]\s*{_WEEK_PART})*|[单双全])\s*周")
 _SCHEDULE_BODY_RE = re.compile(
-    r"^(?P<location>.*?)\s*[:：]\s*(?P<weekday>[1-7])\s*"
+    r"^(?P<location>.*?)\s*[:：]\s*(?P<weekday>[^\s(]+)\s*"
     r"\((?P<sections>[^)]*)\)\s*(?P<teacher>.*)$",
     re.DOTALL,
 )
@@ -137,6 +139,8 @@ def _parse_week_values(value: str) -> list[int]:
         raise UstcScheduleParseError("单双周缺少起止周数，请提供完整的教务课表明细")
     if not value or value == "全":
         return []
+    if not re.fullmatch(rf"{_WEEK_PART}(?:[,，、]{_WEEK_PART})*", value):
+        raise UstcScheduleParseError("课表周次包含非法字符")
     weeks: list[int] = []
     for part in re.split(r"[,，、]", value):
         numbers = [int(number) for number in re.findall(r"\d+", part)]
@@ -145,7 +149,7 @@ def _parse_week_values(value: str) -> list[int]:
             if start <= end:
                 values = list(range(start, end + 1))
             else:
-                values = list(range(end, start + 1))
+                raise UstcScheduleParseError("课表周次范围不能倒序")
         else:
             values = numbers
         weeks.extend(number for number in values if
@@ -159,7 +163,13 @@ def _parse_week_values(value: str) -> list[int]:
 def _parse_sections(value: str) -> list[int]:
     if ":" in value or "：" in value:
         return []
-    return list(dict.fromkeys(int(number) for number in re.findall(r"\d+", value)))
+    value = value.strip()
+    if not value:
+        return []
+    if not re.fullmatch(r"[0-9]+(?:\s*[,，、~～—-]\s*[0-9]+)*", value):
+        raise UstcScheduleParseError("节次包含非法字符，必须填写1–13的整数")
+    # 保留输入顺序和重复项，让统一校验报告倒序或重复节次。
+    return [int(number) for number in re.findall(r"[0-9]+", value)]
 
 
 def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
@@ -167,11 +177,13 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
     matches = list(_WEEK_TOKEN_RE.finditer(raw))
     meetings: list[dict[str, Any]] = []
     for index, match in enumerate(matches):
+        if match.start() and re.match(r"[0-9A-Za-z.+~～—,，、-]", raw[match.start() - 1]):
+            raise UstcScheduleParseError("课表周次包含非法字符")
         body_end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
         body = raw[match.end():body_end].strip(" \t\n")
         parsed = _SCHEDULE_BODY_RE.match(body)
         if not parsed:
-            continue
+            raise UstcScheduleParseError("无法识别日期时间地点安排，请核对原课表")
         sections = _parse_sections(parsed.group("sections"))
         time_range = re.fullmatch(
             r"\s*([0-2]?\d[:：][0-5]\d)\s*[~～—-]\s*([0-2]?\d[:：][0-5]\d)\s*",
@@ -182,9 +194,12 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
             start_time, end_time = (value.replace("：", ":").zfill(5) for value in time_range.groups())
             if not (start_time < end_time < "24:00"):
                 raise UstcScheduleParseError("课表上课时间范围无效")
-        weekday = int(parsed.group("weekday"))
-        if not sections and not time_range:
-            continue
+        weekday_text = parsed.group("weekday")
+        if not re.fullmatch(r"[1-7]", weekday_text):
+            raise UstcScheduleParseError("星期必须是1–7的整数")
+        weekday = int(weekday_text)
+        if (":" in parsed.group("sections") or "：" in parsed.group("sections")) and not time_range:
+            raise UstcScheduleParseError("课表钟点时间格式无效")
         meetings.append(
             {
                 "weekday": weekday,
@@ -220,6 +235,8 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
                     }
                 )
 
+    if not meetings and "周" in raw and "(" in raw:
+        raise UstcScheduleParseError("无法识别日期时间地点安排，请核对原课表")
     unique: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for meeting in meetings:
@@ -239,8 +256,12 @@ def _parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
 
 def parse_schedule_entries(raw: str) -> list[dict[str, Any]]:
     """解析一段教务课表安排，供存储层校正历史记录使用。"""
-
-    return _parse_schedule_entries(raw)
+    try:
+        return _parse_schedule_entries(raw)
+    except UstcScheduleParseError:
+        # 旧记录可能包含已不允许导入的错误；读取仍保留它们供界面核对。
+        logger.warning("历史课表安排无法重新解析，保留已存储记录")
+        return []
 
 
 def _section_times(root: _Node) -> dict[int, tuple[str, str]]:
@@ -282,29 +303,8 @@ def _normalise_course(course: Any) -> dict[str, Any]:
     if not isinstance(course, dict):
         raise UstcScheduleParseError("课程数据格式错误")
     name = str(course.get("name") or course.get("course_name") or "").strip()
-    if not name:
-        raise UstcScheduleParseError("存在没有课程名称的课程")
-    meetings = []
-    for meeting in course.get("meetings") or []:
-        if not isinstance(meeting, dict):
-            continue
-        sections = [int(value) for value in meeting.get("sections", []) if str(value).isdigit()]
-        weeks = [int(value) for value in meeting.get("weeks", []) if str(value).isdigit()]
-        weekday = meeting.get("weekday")
-        try:
-            weekday = int(weekday) if weekday is not None else None
-        except (TypeError, ValueError):
-            weekday = None
-        meetings.append(
-            {
-                "weekday": weekday if weekday in range(1, 8) else None,
-                "sections": sections,
-                "weeks": list(dict.fromkeys(weeks)),
-                "location": str(meeting.get("location") or "").strip(),
-                "start_time": meeting.get("start_time") or None,
-                "end_time": meeting.get("end_time") or None,
-            }
-        )
+    # 保留原始安排值，统一由写入前校验报告问题，不能将错误值静默丢弃。
+    meetings = course.get("meetings", [])
     credits = course.get("credits")
     if credits is not None:
         try:
@@ -333,7 +333,7 @@ def _parse_structured_json(content: str) -> dict[str, Any] | None:
     courses = [_normalise_course(course) for course in payload["courses"]]
     if not courses:
         raise UstcScheduleParseError("JSON 中没有课程")
-    semester = str(payload.get("semester") or "导入课表").strip()
+    semester = payload.get("semester", "导入课表")
     return {"semester": semester, "courses": courses}
 
 
@@ -343,6 +343,7 @@ def _parse_html(content: str, filename: str = "") -> dict[str, Any]:
         parser.feed(content)
         parser.close()
     except Exception as exc:  # HTMLParser is permissive, but expose a stable error.
+        logger.warning("课表 HTML 解析失败：%s", type(exc).__name__)
         raise UstcScheduleParseError(f"课表 HTML 解析失败: {exc}") from exc
 
     lessons_table = _find_lessons_table(parser.root)
@@ -371,10 +372,12 @@ def _parse_html(content: str, filename: str = "") -> dict[str, Any]:
             continue
         course_code = values[header_index["课堂号"]]
         name = values[header_index["课程名称"]]
-        if not name:
-            continue
         raw_schedule = values[header_index["日期时间地点人员"]]
-        meetings = _parse_schedule_entries(raw_schedule)
+        try:
+            meetings = _parse_schedule_entries(raw_schedule)
+        except UstcScheduleParseError as exc:
+            logger.warning("课表课程安排解析失败")
+            raise UstcScheduleParseError(f"第{len(courses) + 1}门课程（{name}）：{exc}") from exc
         _fill_meeting_times(meetings, section_times)
         courses.append(
             {

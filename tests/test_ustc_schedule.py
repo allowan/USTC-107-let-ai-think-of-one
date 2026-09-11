@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,30 @@ USTC_COURSE_TABLE_HTML = """
 
 
 class UstcScheduleParserTest(unittest.TestCase):
+    def test_import_rejects_invalid_json_and_html_without_replacing(self) -> None:
+        from fastapi.testclient import TestClient
+        from server import create_app
+        from server.services.schedule_service import get_schedule_service
+
+        with tempfile.TemporaryDirectory() as folder:
+            service = ScheduleService(Path(folder) / "schedule.db")
+            service.replace("local_user", "2026年秋季学期", [{"name": "原课程"}])
+            before = service.list("local_user")
+            app = create_app()
+            app.dependency_overrides[get_schedule_service] = lambda: service
+            client = TestClient(app)
+            bad_json = [json.dumps({"semester": "2026年秋季学期", "courses": [{"name": "异常课", "meetings": [meeting]}]})
+                        for meeting in [{"sections": [True]}, {"sections": ["a"]}, {"weekday": 9}, {"weeks": [-1]}, {"weeks": [1.5]}]]
+            bad_html = [USTC_COURSE_TABLE_HTML.replace(":5(8,9)", value) for value in
+                        [":5(18,30)", ":5(9,8)", ":5(8,8)", ":9(8,9)", ":5(8a,9)", ":5(18:30~99:00)"]]
+            try:
+                for content in bad_json + bad_html:
+                    response = client.post("/api/schedule/import-ustc", json={"content": content})
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(service.list("local_user"), before)
+            finally:
+                client.close()
+
     def test_parse_disjoint_parity_weeks_and_clock_time(self):
         meetings = _parse_schedule_entries(
             "1~7,9~11周 GH-412 :2(3,4) 教师\n"
