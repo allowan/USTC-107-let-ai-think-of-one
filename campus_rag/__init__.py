@@ -15,6 +15,7 @@ from .query import search_notices_answer, search_user_data_answer
 from .query import update_user_data, add_public_documents, delete_public_data, replace_public_documents
 from .query import upsert_public_documents
 from .query import reset_caches
+from .query import read_user_data_for_backup
 from .auth import create_topic, list_topics, delete_topic, get_topic, rename_topic
 from .auth import get_user_tool_prefs, set_user_tool_prefs
 from .auth import track_event, untrack_event, list_tracked_events

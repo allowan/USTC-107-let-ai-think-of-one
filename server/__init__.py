@@ -24,6 +24,7 @@ from server.routes.news import router as news_router
 from server.routes.health import router as health_router
 from server.routes.schedule import router as schedule_router
 from server.routes.digest import router as digest_router
+from server.routes.backup import router as backup_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(news_router)
     app.include_router(schedule_router)
     app.include_router(digest_router)
+    app.include_router(backup_router)
 
     # Serve frontend static files (production build must exist)
     frontend_dist = ROOT / "frontend" / "dist"

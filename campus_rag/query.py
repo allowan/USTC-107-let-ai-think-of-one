@@ -8,7 +8,7 @@ _base = Path(__file__).resolve().parent
 
 from . import config
 from . import events
-from .index_manager import RAGSystem
+from .index_manager import RAGSystem, read_user_collection_for_backup
 
 logger = logging.getLogger("campus_rag.query")
 
@@ -16,6 +16,11 @@ _rag = None
 _public_index = None
 _user_indexes: dict[str, VectorStoreIndex] = {}
 _init_lock = threading.RLock()
+
+
+def read_user_data_for_backup(user_id: str) -> dict[str, list]:
+    """导出个人原始分块供备份使用，不依赖嵌入服务或 LLM。"""
+    return read_user_collection_for_backup(user_id)
 
 
 def reset_caches() -> None:

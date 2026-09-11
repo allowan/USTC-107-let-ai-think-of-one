@@ -172,6 +172,12 @@ export interface ScheduleImportPreview {
   warnings: string[];
 }
 
+export interface BackupCatalog {
+  topics: Array<{ id: string; name: string }>;
+  documents: Array<{ id: string; name: string; characters: number }>;
+  errors: string[];
+}
+
 export interface DigestEvent {
   source: string;
   title: string | null;

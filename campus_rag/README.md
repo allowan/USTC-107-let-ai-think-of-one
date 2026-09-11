@@ -47,6 +47,8 @@ delete_user_data("local_user", "课表.txt")
 
 ### 高级查询引擎
 
+个人备份读取接口 `read_user_data_for_backup(user_id)` 经 query 门面读取该用户集合的原始 `ids / metadatas / documents`，不读取向量、公共集合或配置，不初始化 RAGSystem、嵌入模型或 LLM。不存在的向量库目录或个人集合返回空列表；存储读取故障记录不含正文的日志并上抛，不能视为空资料。读取与本进程写入互斥；不承诺跨进程事务快照。返回的元数据是内部原始资料，导出服务仍须按白名单筛选，不能直接序列化整个元数据。
+
 ```python
 from campus_rag import RAGSystem, get_rag_response, rerank_nodes
 

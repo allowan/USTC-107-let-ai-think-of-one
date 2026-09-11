@@ -107,6 +107,26 @@ def _user_collection_name(user_id: str) -> str:
     return f"user_{user_id}"
 
 
+def read_user_collection_for_backup(user_id: str) -> dict[str, list]:
+    """读取个人原始分块，不创建集合，不初始化嵌入或生成模型。"""
+    empty = {"ids": [], "metadatas": [], "documents": []}
+    if not Path(_DEFAULT_PERSIST_DIR).exists():
+        return empty
+    try:
+        with _write_lock:
+            client = _get_chroma_client()
+            try:
+                collection = client.get_collection(_user_collection_name(user_id), embedding_function=None)
+            except NotFoundError:
+                logger.info("个人备份集合尚不存在，导出空资料列表")
+                return empty
+            result = collection.get(include=["metadatas", "documents"])
+            return {key: result[key] if result[key] is not None else [] for key in empty}
+    except (chromadb.errors.ChromaError, OSError, RuntimeError, ValueError, KeyError):
+        logger.error("读取个人资料备份失败，未生成不完整的资料导出")
+        raise
+
+
 class RAGSystem:
     def __init__(self, persist_dir: str | None = None):
         from .config import init_embed

@@ -155,3 +155,10 @@ export const trackApi = {
 };
 
 export default api;
+
+export const backupApi = {
+  catalog: () => api.get<import('@/types').BackupCatalog>('/backup/catalog', { timeout: 60000 }),
+  export: (topicIds: string[], documentIds: string[]) => api.post<Blob>('/backup/export', {
+    topic_ids: topicIds, document_ids: documentIds,
+  }, { responseType: 'blob', timeout: 60000 }),
+};

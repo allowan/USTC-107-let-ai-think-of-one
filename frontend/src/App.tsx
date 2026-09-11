@@ -6,6 +6,7 @@ import NewsPage from '@/pages/NewsPage';
 import SyncPage from '@/pages/SyncPage';
 import PersonalDataPage from '@/pages/PersonalDataPage';
 import SchedulePage from '@/pages/SchedulePage';
+import BackupPage from '@/pages/BackupPage';
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="schedule" element={<SchedulePage />} />
         <Route path="news" element={<NewsPage />} />
         <Route path="sync" element={<SyncPage />} />
+        <Route path="backup" element={<BackupPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
