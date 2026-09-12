@@ -352,7 +352,7 @@ class DigestRouteTest(unittest.TestCase):
 
         server.app.dependency_overrides[get_rag_service] = lambda: _StubRAG()
         try:
-            client = TestClient(server.app)
+            client = TestClient(server.app, base_url="http://localhost")
             resp = client.get("/api/digest?days=3")
         finally:
             server.app.dependency_overrides.clear()

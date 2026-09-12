@@ -2,28 +2,16 @@
 
 import asyncio
 import logging
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
 from server.deps import get_user
+from server.deps import ensure_local_origin as ensure_backup_origin
 from server.services.backup_service import MAX_BACKUP_BYTES, BackupError, BackupService, get_backup_service
 
 router = APIRouter(prefix="/api/backup", tags=["backup"])
 logger = logging.getLogger(__name__)
-
-
-def ensure_backup_origin(request: Request) -> None:
-    """备份只能由本地页面发起，精确核对主机名。"""
-    origin = request.headers.get("origin")
-    try:
-        parsed = urlsplit(origin) if origin else None
-        if parsed and (parsed.scheme not in ("http", "https") or parsed.hostname not in ("localhost", "127.0.0.1", "::1") or parsed.username or parsed.password):
-            raise ValueError("invalid origin")
-    except ValueError:
-        logger.warning("拒绝非本地来源的备份操作")
-        raise HTTPException(status_code=403, detail="仅允许本地页面操作备份") from None
 
 
 class ExportSelection(BaseModel):

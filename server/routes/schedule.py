@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field, model_validator
 
-from server.deps import get_user
+from server.deps import ensure_local_origin, get_user
 from server.services.academic_calendar import (
     AcademicCalendarParseError,
     parse_academic_calendar_ics,
@@ -77,17 +77,6 @@ class AcademicCalendarUpdate(BaseModel):
                 raise ValueError("调课或补课必须指定按星期几的课程安排")
             seen_dates.add(item.date)
         return self
-
-
-def ensure_local_origin(request: Request) -> None:
-    origin = request.headers.get("origin", "")
-    allowed_origin = (
-        not origin
-        or origin.startswith("http://localhost")
-        or origin.startswith("http://127.0.0.1")
-    )
-    if not allowed_origin:
-        raise HTTPException(status_code=403, detail="不允许的课表导入来源")
 
 
 @router.get("")

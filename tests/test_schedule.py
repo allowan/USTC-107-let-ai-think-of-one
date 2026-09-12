@@ -104,7 +104,7 @@ class ScheduleServiceTest(unittest.TestCase):
         app = create_app()
         app.dependency_overrides[get_schedule_service] = lambda: self.service
         before = self.service.db_path.read_bytes()
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://localhost")
         try:
             body = {"semester": "秋季", "courses": [{"name": "异常课", "meetings": [{"sections": [60]}]}]}
             response = client.post("/api/schedule/preview", json=body)
@@ -166,7 +166,7 @@ class ScheduleServiceTest(unittest.TestCase):
         before = self.service.list("local_user")
         app = create_app()
         app.dependency_overrides[get_schedule_service] = lambda: self.service
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://localhost")
         try:
             for meeting in [{"sections": [True]}, {"sections": [1.0]}, {"weeks": [False]}, {"weekday": 1.5}]:
                 response = client.post("/api/schedule/import", json={"semester": "秋季", "courses": [{"name": "异常课", "meetings": [meeting]}]})
@@ -235,7 +235,7 @@ class ScheduleServiceTest(unittest.TestCase):
         app = create_app()
         app.dependency_overrides[get_schedule_service] = lambda: self.service
         payload = {"semester": "秋季", "courses": [{"name": "课程A", "meetings": []}]}
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://localhost")
         try:
             denied = client.post(
                 "/api/schedule/import",
@@ -299,7 +299,7 @@ class ScheduleServiceTest(unittest.TestCase):
 
         app = create_app()
         app.dependency_overrides[get_schedule_service] = lambda: self.service
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://localhost")
         try:
             invalid_start = client.put("/api/schedule/calendar", json={
                 "semester": "秋季", "start_date": "2026-09-01", "total_weeks": 18,
@@ -328,7 +328,7 @@ class ScheduleServiceTest(unittest.TestCase):
         self.service.save_calendar("local_user", "2026年秋季学期", date(2026, 8, 31), 20, [])
         app = create_app()
         app.dependency_overrides[get_schedule_service] = lambda: self.service
-        client = TestClient(app)
+        client = TestClient(app, base_url="http://localhost")
         try:
             response = client.put("/api/schedule/calendar", json={
                 "semester": "2026年秋季学期",
@@ -461,7 +461,7 @@ class AcademicCalendarImportTest(unittest.TestCase):
             service = ScheduleService(Path(folder) / "schedule.db")
             app = create_app()
             app.dependency_overrides[get_schedule_service] = lambda: service
-            client = TestClient(app, raise_server_exceptions=True)
+            client = TestClient(app, base_url="http://localhost", raise_server_exceptions=True)
             try:
                 payload = {"semester": "2026年秋季学期"}
                 files = {"file": ("arbitrary-name.ics", self.sample(), "text/calendar")}

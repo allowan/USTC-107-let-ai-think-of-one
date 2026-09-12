@@ -1,22 +1,23 @@
 """Personal data routes: /api/personal-data/*"""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, Field
 
-from server.deps import get_user
+from server.deps import ensure_local_origin, get_user
 from server.services.rag_service import RAGService, get_rag_service
 from server.services.schedule_service import ScheduleService, get_schedule_service
 from server.services.ustc_schedule import (
     format_schedule_for_personal_data,
     schedule_data_to_payload,
 )
-from server.routes.schedule import ensure_local_origin
 
 from server.services.file_import import extract_file, FileImportError, MAX_FILE_BYTES
 
 router = APIRouter(prefix="/api/personal-data", tags=["personal-data"])
+logger = logging.getLogger(__name__)
 
 
 def _embed_unavailable_to_503(exc: RuntimeError):
@@ -41,7 +42,11 @@ async def get_personal_data(
     rag: RAGService = Depends(get_rag_service),
 ):
     # ChromaDB 读取是同步阻塞，丢进线程池避免卡住事件循环
-    data = await asyncio.to_thread(rag.list_user_data, user)
+    try:
+        data = await asyncio.to_thread(rag.list_user_data, user)
+    except Exception:
+        logger.warning("个人资料列表暂时无法读取")
+        raise HTTPException(status_code=503, detail="个人资料读取失败，请稍后重试；这不表示资料为空") from None
     ids = data.get("ids") or []
     metadatas = data.get("metadatas") or []
     documents = data.get("documents") or []

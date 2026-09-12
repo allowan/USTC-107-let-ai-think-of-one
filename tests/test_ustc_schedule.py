@@ -47,7 +47,7 @@ class UstcScheduleParserTest(unittest.TestCase):
             before = service.db_path.read_bytes()
             app = create_app()
             app.dependency_overrides[get_schedule_service] = lambda: service
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             try:
                 body = {"content": USTC_COURSE_TABLE_HTML}
                 response = client.post("/api/schedule/preview-ustc", json=body)
@@ -82,7 +82,7 @@ class UstcScheduleParserTest(unittest.TestCase):
             before = service.list("local_user")
             app = create_app()
             app.dependency_overrides[get_schedule_service] = lambda: service
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             bad_json = [json.dumps({"semester": "2026年秋季学期", "courses": [{"name": "异常课", "meetings": [meeting]}]})
                         for meeting in [{"sections": [True]}, {"sections": ["a"]}, {"weekday": 9}, {"weeks": [-1]}, {"weeks": [1.5]}]]
             bad_html = [USTC_COURSE_TABLE_HTML.replace(":5(8,9)", value) for value in
@@ -140,7 +140,7 @@ class UstcScheduleParserTest(unittest.TestCase):
             service = ScheduleService(Path(temp_dir) / "schedule.db")
             app = create_app()
             app.dependency_overrides[get_schedule_service] = lambda: service
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             try:
                 response = client.post(
                     "/api/schedule/import-ustc",
@@ -197,7 +197,7 @@ class UstcScheduleParserTest(unittest.TestCase):
             app = create_app()
             app.dependency_overrides[get_schedule_service] = lambda: service
             app.dependency_overrides[get_rag_service] = lambda: rag
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             try:
                 response = client.post(
                     "/api/personal-data/import-schedule",
