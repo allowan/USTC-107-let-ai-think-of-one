@@ -1,6 +1,7 @@
+import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from server.services.chat_service import ChatService
 
@@ -14,6 +15,30 @@ class _Request:
 
 
 class ChatServiceStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_message_mismatch_preserves_history_without_retry(self):
+        service = ChatService()
+        attempts = 0
+        sensitive_detail = "private-provider-error-detail"
+
+        async def failing_stream(*_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            yield ("thinking", "")
+            raise ValueError(f"tool_calls must have matching tool messages: {sensitive_detail}")
+
+        service.stream_chat_events = failing_stream
+        with patch.object(service, "delete_thread", new_callable=AsyncMock) as delete_thread:
+            with self.assertLogs("server", level="WARNING") as logs:
+                chunks = [chunk async for chunk in service.sse_generator("local_user", "hello", "topic")]
+
+        events = [json.loads(chunk.removeprefix("data: ").strip()) for chunk in chunks]
+        delete_thread.assert_not_called()
+        self.assertEqual(attempts, 1)
+        self.assertEqual([event["type"] for event in events], ["thinking", "error"])
+        self.assertIn("已有历史已保留", events[-1]["content"])
+        self.assertNotIn(sensitive_detail, "".join(chunks + logs.output))
+        self.assertEqual(service._active_threads, set())
+
     async def test_initialize_without_llm_key_keeps_base_server_usable(self):
         service = ChatService()
         with patch.dict(os.environ, {"LLM_API_KEY": ""}, clear=False):

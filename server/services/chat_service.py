@@ -244,7 +244,7 @@ class ChatService:
     async def sse_generator(
         self, username: str, content: str, topic_id: str, request: Request | None = None,
     ) -> AsyncIterator[str]:
-        """Full SSE response generator with error handling and retry on corrupted checkpoints."""
+        """Stream SSE events while preserving history when checkpoint validation fails."""
         thread_id = self._thread_id(username, topic_id)
 
         async def _stream() -> AsyncIterator[str]:
@@ -278,15 +278,10 @@ class ChatService:
         except Exception as exc:
             err_msg = str(exc)
             if "tool_calls" in err_msg and "tool messages" in err_msg:
-                logger.warning("Checkpoint corrupted for thread %s, retrying", thread_id)
-                await self.delete_thread(thread_id)
-                try:
-                    async with aclosing(_stream()) as stream:
-                        async for chunk in stream:
-                            yield chunk
-                except Exception as exc2:
-                    logger.error("SSE retry failed for thread %s: %s", thread_id, exc2, exc_info=True)
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc2}'})}\n\n"
+                # 工具调用失配不代表整段历史无效，不能以删除历史换取重试成功。
+                logger.warning("Checkpoint tool-message mismatch for thread %s; history preserved", thread_id)
+                error_content = "对话中的工具调用记录不完整，本次生成已停止，已有历史已保留。请先备份该话题，可新建话题继续对话。"
+                yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
             else:
                 logger.error("SSE error for thread %s: %s", thread_id, exc, exc_info=True)
                 yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc}'})}\n\n"

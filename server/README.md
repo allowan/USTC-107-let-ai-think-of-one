@@ -19,7 +19,7 @@
 
 | 服务 | 职责 |
 |---|---|
-| `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、checkpoint 删除与损坏重试；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
+| `chat_service.py` | Agent 生命周期（默认/按用户缓存，跨天自动重建以刷新 prompt 中的当前日期）、SSE 事件流、话题删除时清理 checkpoint；工具消息失配时保留历史并提示失败；未配 LLM Key 时保持懒加载，课表/个人数据 API 不受影响 |
 | `auth_service.py` | 话题 CRUD（委托 `campus_rag.auth`） |
 | `rag_service.py` | 检索与个人数据管理（委托 `campus_rag.query`）；`get_digest()` 聚合“最近新通知 + 临近/进行中事件”（委托 `campus_rag.get_notice_digest`，基于 `events.db` 时间索引） |
 | `schedule_service.py` | 本地结构化课表与校历存储（SQLite `schedule.db`，按用户+学期隔离，连接用完即关）；计算当前教学周、周日期范围和当日特殊安排；`current_semester()` 按今天日期推断当前学期（中科大三学期制，秋季跨年） |
@@ -82,7 +82,7 @@
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
 - **路径参数禁止二次解码**：starlette 路由层已自动解码一次，路由内再 `unquote()` 会损坏字面含 `%` 的参数。
 - **阻塞调用进线程池**：检索/入库含嵌入 API 调用，`async` 路由中一律 `asyncio.to_thread`；同步长任务同理（见 `sync_service.sync`）。
-- **SSE 损坏自愈**：检测到 checkpoint 损坏（tool_calls 与 tool messages 不匹配）时自动删除该 thread 并重试一次。
+- **SSE 历史保护**：检测到 checkpoint 中 tool_calls 与 tool messages 不匹配时停止本次生成并明确提示历史已保留，不自动删除或重试，不回显原始异常内容。用户可先备份该话题并新建话题继续，原话题的工具记录需要另行核对修复。
 - **设置变更失效链**：更新配置/切换模型 → `clear_agent_cache()`（含默认 agent）；更新工具开关 → 仅失效该用户 agent。
 - **连接生命周期**：缓存失效后旧 Agent 的连接延迟到使用它的流结束再关闭；构建期间发生设置变更时，丢弃旧配置构建结果并重试。同一话题的并发生成被拒绝，避免 checkpoint 相互覆盖。
 - **同步一致性**：同一进程串行执行同步；按来源替换更新通知，成功后原子写回版本号。请求取消时等待已启动的同步任务收尾，避免后台写入与下一次同步交错。
