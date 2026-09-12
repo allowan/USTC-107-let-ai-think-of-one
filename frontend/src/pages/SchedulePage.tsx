@@ -1,6 +1,6 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, App, Button, Empty, List, Select, Space, Spin, Tag, Typography } from 'antd';
-import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Empty, Select, Space, Spin, Tag, Typography } from 'antd';
+import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { scheduleApi } from '@/services/api';
 import { readScheduleFile, scheduleImportError } from '@/utils/scheduleImport';
@@ -304,19 +304,53 @@ export default function SchedulePage() {
             </div>
           </div>
           {unplacedCourses.length > 0 && (
-            <List
-              size="small"
-              header="节次或星期待核对的安排（每天仅支持第 1–13 节）"
-              dataSource={unplacedCourses}
-              renderItem={course => (
-                <List.Item key={course.id}>
-                  {course.name} · {course.location || '地点待定'} · {course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}
-                  {course.start_section !== null && ` · 原节次：${course.start_section}–${course.end_section ?? course.start_section}`}
-                  {course.start_time && course.end_time && ` · ${course.start_time}–${course.end_time}`}
-                  {course.raw_schedule && ` · 原始安排：${course.raw_schedule}`}
-                </List.Item>
-              )}
-            />
+            <section className="schedule-review" aria-labelledby="schedule-review-title">
+              <div className="schedule-review-heading">
+                <span className="schedule-review-icon"><InfoCircleOutlined /></span>
+                <div>
+                  <div className="schedule-review-title-row">
+                    <h2 id="schedule-review-title">待核对的安排</h2>
+                    <Tag color="gold">{unplacedCourses.length} 项</Tag>
+                  </div>
+                  <p>以下安排已保留，核对星期或节次后可重新导入。每天支持第 1–13 节。</p>
+                </div>
+              </div>
+              <ul className="schedule-review-list">
+                {unplacedCourses.map(course => {
+                  const weekdayValid = course.weekday !== null && Number.isInteger(course.weekday)
+                    && course.weekday >= 1 && course.weekday <= 7;
+                  const end = course.end_section ?? course.start_section;
+                  const sectionValid = course.start_section !== null && Number.isInteger(course.start_section)
+                    && course.start_section >= 1 && end !== null && Number.isInteger(end)
+                    && end >= course.start_section && end <= sectionCount;
+                  return (
+                    <li className="schedule-review-card" key={course.id}>
+                      <div className="schedule-review-card-heading">
+                        <h3>{course.name}</h3>
+                        <Space size={[0, 4]} wrap>
+                          {!weekdayValid && <Tag color="gold">{course.weekday === null ? '星期待定' : '星期异常'}</Tag>}
+                          {!sectionValid && <Tag color="gold">{course.start_section === null ? '节次待定' : '节次异常'}</Tag>}
+                        </Space>
+                      </div>
+                      <dl className="schedule-review-meta">
+                        <div><dt>地点</dt><dd>{course.location || '地点待定'}</dd></div>
+                        <div><dt>教师</dt><dd>{course.teachers.join('、') || '教师待定'}</dd></div>
+                        <div><dt>星期</dt><dd>{weekdayValid ? weekdays[course.weekday! - 1] : course.weekday === null ? '待定' : `原始值：${course.weekday}`}</dd></div>
+                        <div><dt>节次</dt><dd>{course.start_section === null ? '待定' : `第 ${course.start_section}${end === course.start_section ? '' : `–${end}`} 节`}</dd></div>
+                        <div className="schedule-review-meta-wide"><dt>周次</dt><dd>{course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}</dd></div>
+                        {(course.start_time || course.end_time) && <div className="schedule-review-meta-wide"><dt>时间</dt><dd>{course.start_time || '待定'}–{course.end_time || '待定'}</dd></div>}
+                      </dl>
+                      {course.raw_schedule && (
+                        <details className="schedule-review-original">
+                          <summary>查看原始安排</summary>
+                          <p>{course.raw_schedule}</p>
+                        </details>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
           )}
         </>
       )}

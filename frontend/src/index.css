@@ -484,3 +484,156 @@ html, body, #root {
   letter-spacing: 2px;
   color: #8c8c8c;
 }
+
+/* 待核对安排与正式课表分区，长原文按需展开。 */
+.schedule-review {
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid #eee5d3;
+  border-radius: 14px;
+  background: #fffcf5;
+}
+
+.schedule-review-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.schedule-review-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #fff1cc;
+  color: #946200;
+  font-size: 18px;
+}
+
+.schedule-review-title-row,
+.schedule-review-card-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schedule-review-title-row h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #403b30;
+}
+
+.schedule-review-heading p {
+  margin: 6px 0 0;
+  color: #766d5b;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.schedule-review-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.schedule-review-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #ece8df;
+  border-radius: 10px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.schedule-review-card-heading {
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 14px;
+}
+
+.schedule-review-card-heading h3 {
+  flex: 1 1 160px;
+  min-width: 0;
+  margin: 0;
+  color: #262626;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.schedule-review-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.schedule-review-meta > div {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.schedule-review-meta dt {
+  flex-shrink: 0;
+  color: #8c8c8c;
+}
+
+.schedule-review-meta dd {
+  margin: 0;
+  min-width: 0;
+  color: #434343;
+}
+
+.schedule-review-meta-wide {
+  grid-column: 1 / -1;
+}
+
+.schedule-review-original {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed #ece8df;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.schedule-review-original summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #766d5b;
+  border-radius: 3px;
+}
+
+.schedule-review-original summary:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 3px;
+}
+
+.schedule-review-original p {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #faf9f6;
+  color: #595959;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .schedule-review { padding: 16px; }
+  .schedule-review-list { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 480px) {
+  .schedule-review-card { padding: 14px; }
+  .schedule-review-meta { grid-template-columns: minmax(0, 1fr); }
+}
