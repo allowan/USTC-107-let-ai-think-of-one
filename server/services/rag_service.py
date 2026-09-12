@@ -34,6 +34,15 @@ class RAGService:
         return list_user_data(username)
 
     @staticmethod
+    def format_user_data(data: dict) -> list[dict]:
+        """按原文坐标合并资料，编辑和预览不重复检索块的重叠文字。"""
+        from campus_rag import group_user_document_chunks
+
+        return [{"source": source, "full_content": item["content"],
+                 "preview": item["content"][:200] + "..." if len(item["content"]) > 200 else item["content"],
+                 "chunks": len(item["chunks"])} for source, item in group_user_document_chunks(data).items()]
+
+    @staticmethod
     def add_user_data(username: str, content: str, source: str = "手动输入"):
         from campus_rag import add_user_data
         doc = Document(text=content, metadata={"source": source})

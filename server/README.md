@@ -41,7 +41,7 @@
 | POST | `/api/topics/{id}/summarize` | 自动生成话题标题 |
 | GET | `/api/topics/{id}/history` | 获取话题对话历史 |
 | POST | `/api/chat/stream` | SSE 流式对话（`{"content","topic_id"}`），事件：`thinking` / `tool_use` / `token` / `error` / `done`；客户端断开连接（前端“停止生成”/切页）即中止模型生成 |
-| GET | `/api/personal-data` | 列出个人数据（按来源聚合，按 `chunk_index` 还原顺序） |
+| GET | `/api/personal-data` | 列出个人数据（按来源聚合，按 `chunk_index` 还原顺序）；存储故障返回 503，不伪装空列表 |
 | POST | `/api/personal-data` | 添加个人数据 |
 | POST | `/api/personal-data/parse-file` | 解析上传文件（TXT/MD/CSV/JSON/PDF/DOCX）为文本供编辑后入库（仅限本地来源） |
 | POST | `/api/personal-data/import-schedule` | 将已导入的本地课表写入个人知识库供检索（仅限本地来源） |
@@ -133,3 +133,4 @@ pytest tests/test_server_api.py -v   # 路由契约/编码往返/状态机，离
 - 资料更新/删除与取消事件追踪将来源作为完整标识处理，支持名称中的斜杠及 URL；路径仅解码一次，保留字面 `%2F`。回归：`pytest tests/test_adversarial_api.py -q`。
 - 本地单用户访问边界：启动器仅监听 `127.0.0.1`，HTTP 请求的 Host 与浏览器 Origin 必须精确匹配 localhost、127.0.0.1 或 IPv6 回环地址；拒绝伪装域名与外站请求。无 Origin 的本机命令行请求仍可使用，不增加登录或修改密钥配置。
 - 教务周次解析在展开范围前检查单条安排的累计数量（最多 1000 项），拒绝超大范围，防止小输入导致巨量内存分配；保留正常间断周和单双周。
+- 个人资料列表与备份共用原文坐标合并，避免重叠片段在编辑/导出时累积重复；无坐标的旧资料保留原拼接。仅新增公共合并入口与回归测试，不迁移存储或修改真实资料。

@@ -173,19 +173,11 @@ class BackupService:
 
     def _documents(self, username: str) -> dict[str, dict]:
         data = self.document_reader(username)
-        grouped: dict[str, list[tuple[int, str]]] = {}
-        for meta, content in zip(data.get("metadatas") or [], data.get("documents") or [], strict=True):
-            meta = meta or {}
-            source = meta.get("source") or "手动输入"
-            if not isinstance(source, str) or not isinstance(content, str):
-                raise BackupError("个人资料内容异常，导出已取消")
-            order = meta.get("chunk_index", 0)
-            grouped.setdefault(source, []).append((order if isinstance(order, int) else 0, content))
+        from campus_rag import group_user_document_chunks
+
         return {
-            hashlib.sha256(source.encode("utf-8")).hexdigest(): {
-                "source": source, "content": "\n".join(text for _, text in sorted(chunks, key=lambda item: item[0])),
-                "chunks": chunks,
-            } for source, chunks in grouped.items()
+            hashlib.sha256(source.encode("utf-8")).hexdigest(): {"source": source, **item}
+            for source, item in group_user_document_chunks(data).items()
         }
 
     def catalog(self, username: str) -> dict:

@@ -23,6 +23,13 @@ def read_user_data_for_backup(user_id: str) -> dict[str, list]:
     return read_user_collection_for_backup(user_id)
 
 
+def group_user_document_chunks(data: dict) -> dict[str, dict]:
+    """复用原文坐标合并资料片段，供列表和文字备份使用。"""
+    from .data_loader import group_document_chunks
+
+    return group_document_chunks(data)
+
+
 def backup_document_matches(source: str, content: str, chunks: list[tuple[int, str]]) -> bool:
     """按入库分块规则检查恢复副本完整性，不调用嵌入或 LLM。"""
     from .data_loader import split_documents

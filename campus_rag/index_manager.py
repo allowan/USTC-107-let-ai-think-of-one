@@ -264,14 +264,29 @@ class RAGSystem:
         return VectorStoreIndex.from_vector_store(vector_store)
 
     def add_user_documents(self, user_id: str, documents: list) -> VectorStoreIndex:
-        """向用户的私有索引中追加文档，自动跳过重复内容。"""
+        """向用户的私有索引中追加文档，仅跳过同一来源的重复内容。"""
         with _index_write():
             coll_name = _user_collection_name(user_id)
             collection = self.chroma_client.get_or_create_collection(coll_name)
             assert_collection_dim(collection)
-            existing_hashes = self._get_existing_hashes(coll_name)
+            existing = collection.get(include=["documents", "metadatas"])
+            existing_documents: dict[tuple, list] = {}
+            for meta, text in zip(existing.get("metadatas") or [], existing.get("documents") or [], strict=True):
+                meta = meta or {}
+                key = (meta.get("source"), meta.get("ref_doc_id"))
+                existing_documents.setdefault(key, []).append((meta.get("chunk_index", 0), text))
+            signatures = {(source, tuple(sorted(chunks))) for (source, _), chunks in existing_documents.items()}
             nodes = split_documents(documents)
-            new_nodes = [n for n in nodes if hashlib.md5(n.text.encode()).hexdigest() not in existing_hashes]
+            incoming: dict[tuple, list] = {}
+            for node in nodes:
+                incoming.setdefault((node.metadata.get("source"), node.ref_doc_id), []).append(node)
+            # 整份文档相同才跳过，不能因两份资料共享一段文字而删掉其中一份的分块。
+            new_nodes = []
+            for (source, _), group in incoming.items():
+                signature = (source, tuple(sorted((n.metadata.get("chunk_index", 0), n.text) for n in group)))
+                if signature not in signatures:
+                    new_nodes.extend(group)
+                    signatures.add(signature)
             if new_nodes:
                 vector_store = ChromaVectorStore(chroma_collection=collection)
                 index = VectorStoreIndex.from_vector_store(vector_store)
@@ -288,11 +303,11 @@ class RAGSystem:
         try:
             collection = self.chroma_client.get_collection(_user_collection_name(user_id))
             result = collection.get(include=["metadatas", "documents"])
-        except Exception as e:
-            # 集合不存在返回空列表是正常语义，但真实异常必须留痕，
-            # 否则用户数据"凭空消失"无任何线索可查。
-            logger.debug("list_user_documents(%s) 读取失败: %s", user_id, e)
+        except NotFoundError:
             return {"ids": [], "metadatas": [], "documents": [], "previews": []}
+        except Exception:
+            logger.warning("个人资料读取失败，请重试；未将存储错误视为空集合")
+            raise
         docs = result.get("documents") or []
         result["previews"] = [d[:200] + "..." if len(d) > 200 else d for d in docs]
         return result
