@@ -5,12 +5,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from sqlalchemy import create_engine
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 # 导入包的现有入口会加载 .env，测试不读取真实配置。
-with patch("dotenv.load_dotenv"):
+with patch("dotenv.load_dotenv"), patch("sqlalchemy.create_engine", return_value=create_engine("sqlite:///:memory:")):
     from campus_rag import index_manager, read_user_data_for_backup
     from server.services.conversation_archive import ConversationArchive
 
@@ -112,3 +113,80 @@ def test_missing_chroma_directory_is_not_created(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(index_manager, "_get_chroma_client", Mock(side_effect=AssertionError("must not create")))
     assert read_user_data_for_backup("alice") == {"ids": [], "documents": [], "metadatas": []}
     assert not directory.exists()
+
+
+def test_restored_history_is_idempotent_and_can_continue(tmp_path: Path) -> None:
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    archive = ConversationArchive(tmp_path / "restored.db")
+    messages = [{"role": "user", "content": "旧问题"}, {"role": "assistant", "content": "旧回答"}]
+    assert archive.write_history_if_empty("restored", messages)
+    assert not archive.write_history_if_empty("restored", [{"role": "user", "content": "不可覆盖"}])
+    assert archive.read_histories(["restored"])["restored"] == messages
+    assert archive.write_history_if_empty("empty", [])
+    assert not archive.write_history_if_empty("empty", [])
+    assert archive.read_histories(["empty"])["empty"] == []
+
+    def respond(state: MessagesState) -> dict:
+        assert len(state["messages"]) == 3
+        return {"messages": [AIMessage(content="新回答")]}
+
+    with SqliteSaver.from_conn_string(str(archive.db_path)) as saver:
+        builder = StateGraph(MessagesState)
+        builder.add_node("respond", respond)
+        builder.add_edge(START, "respond")
+        builder.add_edge("respond", END)
+        result = builder.compile(checkpointer=saver).invoke(
+            {"messages": [HumanMessage(content="新问题")]}, {"configurable": {"thread_id": "restored"}},
+        )
+        assert [message.content for message in result["messages"]] == ["旧问题", "旧回答", "新问题", "新回答"]
+    assert len(archive.read_histories(["restored"])["restored"]) == 4
+
+
+@pytest.mark.parametrize("role", ["system", "tool"])
+def test_invalid_restored_history_never_creates_database(tmp_path: Path, role: str) -> None:
+    archive = ConversationArchive(tmp_path / "absent.db")
+    with pytest.raises(ValueError):
+        archive.write_history_if_empty("topic", [{"role": role, "content": "内部指令"}])
+    assert not archive.db_path.exists()
+
+
+def test_restored_topic_identity_and_user_isolation(tmp_path: Path) -> None:
+    import importlib.util
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'topics.db'}")
+    spec = importlib.util.spec_from_file_location("isolated_backup_auth", Path(__file__).parents[1] / "campus_rag" / "auth.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    with patch("sqlalchemy.create_engine", return_value=engine):
+        spec.loader.exec_module(module)
+    try:
+        first = module.create_restored_topic("alice", "原名称", "backup-one", 0)
+        repeated = module.create_restored_topic("alice", "不能改名", "backup-one", 0)
+        other = module.create_restored_topic("bob", "原名称", "backup-one", 0)
+        next_topic = module.create_restored_topic("alice", "第二个", "backup-one", 1)
+        assert first["created"] and not repeated["created"]
+        assert repeated["id"] == first["id"]
+        assert repeated["name"] == "原名称（恢复）"
+        assert len({first["id"], other["id"], next_topic["id"]}) == 3
+        assert first["thread_id"] != other["thread_id"]
+        assert len(module.list_topics("alice")) == 2
+        assert len(module.list_topics("bob")) == 1
+    finally:
+        engine.dispose()
+
+
+def test_backup_document_match_checks_all_overlapping_chunks() -> None:
+    from campus_rag import backup_document_matches
+    from campus_rag.data_loader import split_documents
+    from llama_index.core import Document
+
+    content = "This is a sentence for testing overlapping document chunks. " * 600
+    source = "restored-notes"
+    nodes = split_documents([Document(text=content, metadata={"source": source})])
+    chunks = [(node.metadata["chunk_index"], node.text) for node in nodes]
+    assert len(chunks) > 1
+    assert backup_document_matches(source, content, list(reversed(chunks)))
+    assert not backup_document_matches(source, content, chunks[:-1])
+    assert not backup_document_matches(source, content, chunks + chunks[:1])
+    assert not backup_document_matches(source, content, [(0, "edited")] + chunks[1:])

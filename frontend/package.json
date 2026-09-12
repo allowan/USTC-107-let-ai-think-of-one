@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test:backup": "node --test ../tests/test_backup_frontend.cjs",
     "test:schedule": "node --test ../tests/test_schedule_import_frontend.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",

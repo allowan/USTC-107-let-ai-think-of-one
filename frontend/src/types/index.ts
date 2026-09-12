@@ -178,6 +178,20 @@ export interface BackupCatalog {
   errors: string[];
 }
 
+export interface BackupRestorePreview {
+  checksum: string;
+  created_at: string;
+  topics: Array<{ name: string; message_count: number }>;
+  documents: Array<{ source: string; characters: number }>;
+}
+
+export interface BackupRestoreResult {
+  restored: number;
+  skipped: number;
+  failed: number;
+  results: Array<{ kind: 'topic' | 'document'; name: string; status: 'restored' | 'skipped' | 'failed'; message: string }>;
+}
+
 export interface DigestEvent {
   source: string;
   title: string | null;

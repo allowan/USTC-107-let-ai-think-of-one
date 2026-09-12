@@ -23,6 +23,14 @@ def read_user_data_for_backup(user_id: str) -> dict[str, list]:
     return read_user_collection_for_backup(user_id)
 
 
+def backup_document_matches(source: str, content: str, chunks: list[tuple[int, str]]) -> bool:
+    """按入库分块规则检查恢复副本完整性，不调用嵌入或 LLM。"""
+    from .data_loader import split_documents
+
+    nodes = split_documents([Document(text=content, metadata={"source": source})])
+    return sorted(chunks) == [(node.metadata["chunk_index"], node.text) for node in nodes]
+
+
 def reset_caches() -> None:
     """重置所有缓存状态，下次调用时自动重建。"""
     global _rag, _public_index

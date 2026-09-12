@@ -21,6 +21,12 @@ class AuthService:
         return create_topic(username, name)
 
     @staticmethod
+    def create_restored_topic(username: str, name: str, backup_id: str, index: int) -> dict:
+        """创建或复用恢复副本的话题，通过包公共接口保存。"""
+        from campus_rag import create_restored_topic
+        return create_restored_topic(username, name, backup_id, index)
+
+    @staticmethod
     def get_topic(username: str, topic_id: str) -> dict | None:
         from campus_rag import get_topic
         return get_topic(username, topic_id)

@@ -161,4 +161,15 @@ export const backupApi = {
   export: (topicIds: string[], documentIds: string[]) => api.post<Blob>('/backup/export', {
     topic_ids: topicIds, document_ids: documentIds,
   }, { responseType: 'blob', timeout: 60000 }),
+  preview: (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post<import('@/types').BackupRestorePreview>('/backup/preview', form, { timeout: 60000 });
+  },
+  restore: (file: File, checksum: string) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('confirmed_checksum', checksum);
+    return api.post<import('@/types').BackupRestoreResult>('/backup/restore', form, { timeout: 0 });
+  },
 };

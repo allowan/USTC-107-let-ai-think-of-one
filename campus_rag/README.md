@@ -85,6 +85,8 @@ get_notice_digest(days=7)
 
 ### 追踪事件（今日面板用）
 
+恢复话题使用公共接口 `create_restored_topic(username, name, backup_id, index)`，由当前用户、备份 SHA256 和话题序号派生稳定 UUID5，名称添加“（恢复）”。同一备份重试复用话题 ID 和现有名称，返回 `created` 标志；不覆盖原话题，不修改表结构。对话正文由服务层通过 LangGraph 官方 checkpoint API 写入仅含用户/助手文字的新话题，已有 checkpoint 则跳过。
+
 ```python
 from campus_rag import track_event, untrack_event, list_tracked_events
 
@@ -189,3 +191,4 @@ BM25 从当前 ChromaDB 集合读取分块，保留节点身份、来源和链�
 验证关注来源保留、删除/等量替换后的缓存一致性、失败降级以及工具内部 LLM 调用次数；实际首字时间、总耗时及端到端质量需要在线模型评测。
 
 本轮对抗性回归位于 `tests/test_integrity_regressions.py`，新增代码集中在共享召回、缓存失效和重排序响应校验，以及对应的故障测试；未增加新模块。关键词缓存首次构建需要读取并分词整个集合，后续查询复用；大语料的内存与冷启动耗时仍需专项测量。纯搜索现在也可能调用已配置的重排序服务，其耗时不能等同于纯本地检索。
+`backup_document_matches(source, content, chunks)` 使用入库相同的分块规则核对恢复副本完整性，包含重叠片段与序号检查，不初始化嵌入服务或 LLM。
