@@ -142,8 +142,14 @@ def _parse_week_values(value: str) -> list[int]:
     if not re.fullmatch(rf"{_WEEK_PART}(?:[,，、]{_WEEK_PART})*", value):
         raise UstcScheduleParseError("课表周次包含非法字符")
     weeks: list[int] = []
+    expanded_count = 0
     for part in re.split(r"[,，、]", value):
         numbers = [int(number) for number in re.findall(r"\d+", part)]
+        # 范围必须在展开前限制，单双周过滤和去重不能降低分配成本。
+        count = numbers[1] - numbers[0] + 1 if len(numbers) >= 2 else len(numbers)
+        expanded_count += max(0, count)
+        if expanded_count > 1000:
+            raise UstcScheduleParseError("课表周次范围过大，请检查原始安排")
         if len(numbers) >= 2 and re.search(r"[~～—-]", part):
             start, end = numbers[0], numbers[1]
             if start <= end:

@@ -397,13 +397,29 @@ class ScheduleService:
         """按当前学期校历生成今天和明天的实际课程提醒。"""
 
         target = on_date or date.today()
-        semester = current_semester(datetime(target.year, target.month, target.day))
-        courses = self.list(username, semester)["courses"]
+        with closing(self._connect()) as db:
+            calendars = db.execute(
+                "SELECT semester, start_date, total_weeks FROM academic_calendars "
+                "WHERE username = ? ORDER BY start_date DESC, semester DESC",
+                (username,),
+            ).fetchall()
+
+        def semester_for(day: date) -> str:
+            # 实际校历优先于月份推测；重叠时采用最近开始的学期。
+            for name, start, total_weeks in calendars:
+                first = date.fromisoformat(start)
+                if first <= day < first + timedelta(weeks=total_weeks):
+                    return name
+            return current_semester(datetime(day.year, day.month, day.day))
+
+        semester = semester_for(target)
 
         def reminder_for(day: date) -> dict:
-            calendar = self.get_calendar(username, semester, day)
+            day_semester = semester_for(day)
+            calendar = self.get_calendar(username, day_semester, day)
             if calendar is None:
                 return {"date": day.isoformat(), "week": None, "courses": [], "special_dates": []}
+            courses = self.list(username, day_semester)["courses"]
             specials = calendar["today_special_dates"]
             week = calendar["current_week"]
             suspended = any(item.get("kind") in {"holiday", "no_class"} for item in specials)
