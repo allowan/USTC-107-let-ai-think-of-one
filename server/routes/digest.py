@@ -55,7 +55,7 @@ async def add_tracked(body: dict, user: str = Depends(get_user)):
     )
 
 
-@router.delete("/tracked/{source}")
+@router.delete("/tracked/{source:path}")
 async def remove_tracked(source: str, user: str = Depends(get_user)):
     from campus_rag import untrack_event
     if not untrack_event(user, source):

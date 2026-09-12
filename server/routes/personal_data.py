@@ -145,7 +145,7 @@ async def import_schedule_to_personal_data(
     }
 
 
-@router.put("/{source}")
+@router.put("/{source:path}")
 async def update_personal_data(
     source: str,
     body: dict,
@@ -162,7 +162,7 @@ async def update_personal_data(
     return {"message": "数据已更新"}
 
 
-@router.delete("/{source}")
+@router.delete("/{source:path}")
 async def delete_personal_data(
     source: str,
     user: str = Depends(get_user),
