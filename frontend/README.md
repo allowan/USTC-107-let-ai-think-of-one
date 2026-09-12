@@ -37,7 +37,9 @@ React 18 + Vite 6 + TypeScript 5 + Ant Design + Zustand 的单页应用，通过
 | `error` | 处理失败，渲染为错误气泡 |
 | `done` | 流结束 |
 
-前端解析约定：逐行 `JSON.parse` 单独容错（坏行跳过不杀流）；流结束时 flush 解码器残余；切换话题或组件卸载时主动 `abort`。回答中的 Markdown 由 `react-markdown` + `remark-gfm` 渲染（表格包裹在 `.chat-markdown-table` 横向滚动容器中，样式见 `index.css`）。“停止生成”按钮通过 `AbortController` 中止 fetch，后端检测到客户端断开即停止模型生成。
+前端解析约定：按换行解析 `data: ` JSON；只有收到 `done` 或明确的 `error` 才视为服务端已结束处理。提前 EOF 会保留已收到的文字并提示回答可能不完整，不自动重发；切换话题或组件卸载时主动 `abort`。回答中的 Markdown 由 `react-markdown` + `remark-gfm` 渲染（表格包裹在 `.chat-markdown-table` 横向滚动容器中，样式见 `index.css`）。“停止生成”按钮通过 `AbortController` 中止 fetch，后端检测到客户端断开即停止模型生成。
+
+进入或切换话题时，历史加载成功后才允许发送（包括 Enter）。加载失败显示重新加载入口并保留草稿；旧话题的迟到响应不会替换新话题历史。离线交互回归：`node --test tests/test_chat_frontend.cjs`（项目根目录）。
 
 ## 开发命令
 

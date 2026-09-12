@@ -113,6 +113,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [historyState, setHistoryState] = useState<{ topicId: string; status: 'loading' | 'ready' | 'error' }>({ topicId: '', status: 'loading' });
+  const [historyReload, setHistoryReload] = useState(0);
   const [statusText, setStatusText] = useState<string>('');
   const [modelSettings, setModelSettings] = useState<GlobalSettings | null>(null);
   const [modelSettingsLoading, setModelSettingsLoading] = useState(true);
@@ -124,6 +126,7 @@ export default function ChatPage() {
   const autoCreatedRef = useRef(false);
   const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
   const { message } = App.useApp();
+  const historyReady = historyState.topicId === activeTopicId && historyState.status === 'ready';
 
   useEffect(() => () => { abortControllerRef.current?.abort(); }, []);
 
@@ -176,6 +179,7 @@ export default function ChatPage() {
 
     let cancelled = false;
     setMessages([]);
+    setHistoryState({ topicId: activeTopicId, status: 'loading' });
     if (activeTopicId) {
       topicApi.getHistory(activeTopicId).then(({ data }) => {
         if (cancelled) return;
@@ -188,10 +192,13 @@ export default function ChatPage() {
           }));
           setMessages(msgs);
         }
-      }).catch(() => {});
+        setHistoryState({ topicId: activeTopicId, status: 'ready' });
+      }).catch(() => {
+        if (!cancelled) setHistoryState({ topicId: activeTopicId, status: 'error' });
+      });
     }
     return () => { cancelled = true; };
-  }, [activeTopicId]);
+  }, [activeTopicId, historyReload]);
 
   // Navigating away from the chat page should not leave a stream running
   // (abort on unmount is the same mechanism as the stop button).
@@ -232,7 +239,8 @@ export default function ChatPage() {
   const send = async () => {
     // loading 时拦截：Enter 键不经过按钮的 loading 态，不拦截会并行发两条流，
     // token 交错追加进同一条消息导致输出错乱。
-    if (loading) return;
+    // 历史快照就绪前禁止写入本地消息，避免迟到的快照覆盖新一轮对话。
+    if (loading || !historyReady) return;
     const content = input.trim();
     if (!content) return;
     if (!activeTopicId) { message.warning('请先在左侧创建一个话题'); return; }
@@ -273,6 +281,7 @@ export default function ChatPage() {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let terminalEvent = false;
 
       while (true) {
         if (abortController.signal.aborted) break;
@@ -293,7 +302,9 @@ export default function ChatPage() {
           if (abortController.signal.aborted) break;
           if (line.startsWith('data: ')) {
             const data = JSON.parse(line.slice(6));
-            if (data.type === 'thinking') {
+            if (data.type === 'done') {
+              terminalEvent = true;
+            } else if (data.type === 'thinking') {
               setStatusText('Thinking...');
             } else if (data.type === 'tool_use') {
               setStatusText(`Using tool: ${data.content}`);
@@ -309,12 +320,16 @@ export default function ChatPage() {
                 return [...prev, { id: Date.now().toString(), role: 'assistant', content: data.content, timestamp: Date.now() }];
               });
             } else if (data.type === 'error') {
+              terminalEvent = true;
               setStatusText('');
               if (useTopicStore.getState().activeTopicId !== topicId) return;
               setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'assistant', content: `错误：${data.content}`, timestamp: Date.now() }]);
             }
           }
         }
+      }
+      if (!abortController.signal.aborted && !terminalEvent) {
+        throw new Error('连接提前结束，回答可能不完整，请核对后再继续。');
       }
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -385,7 +400,14 @@ export default function ChatPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
       <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
-        {messages.length === 0 && !loading && <Empty description="开始和 AI 助手对话吧" style={{ marginTop: 120 }} />}
+        {activeTopicId && !historyReady && (
+          <div role="status" style={{ textAlign: 'center', padding: 24 }}>
+            {historyState.topicId === activeTopicId && historyState.status === 'error' ? (
+              <>对话历史加载失败，请重试后发送。<Button onClick={() => setHistoryReload((value) => value + 1)}>重新加载</Button></>
+            ) : <><LoadingOutlined /> 正在加载对话历史…</>}
+          </div>
+        )}
+        {messages.length === 0 && !loading && historyReady && <Empty description="开始和 AI 助手对话吧" style={{ marginTop: 120 }} />}
         {messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)}
         {loading && (
           <div className="stream-status">
@@ -437,7 +459,7 @@ export default function ChatPage() {
               停止生成
             </Button>
           ) : (
-            <Button type="primary" icon={<SendOutlined />} onClick={send} disabled={!input.trim()}>
+            <Button type="primary" icon={<SendOutlined />} onClick={send} disabled={!input.trim() || !historyReady}>
               发送
             </Button>
           )}
