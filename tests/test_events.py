@@ -8,6 +8,7 @@
 
 import tempfile
 import unittest
+import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -156,6 +157,13 @@ class EventStoreTest(unittest.TestCase):
         self.store.clear()
         self.assertEqual(self.store.count(), 0)
 
+    def test_replace_rolls_back_old_snapshot_on_insert_failure(self):
+        self.store.upsert_events([_mk_event("old.txt", "2026-09-10")])
+        duplicate = _mk_event("new.txt", "2026-09-11")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.replace_events([duplicate, duplicate])
+        self.assertEqual(set(self.store.existing_states()), {"old.txt"})
+
     def test_query_upcoming_window_sort_and_filter(self):
         self.store.upsert_events([
             _mk_event("past.txt", "2026-09-04"),      # 早于 today，排除
@@ -232,6 +240,16 @@ class SyncFacadeTest(unittest.TestCase):
         # 坏文档不得中断整批
         n = events.sync_events_from_documents([_Bad(), good], today=date(2026, 9, 1))
         self.assertGreaterEqual(n, 1)
+
+    def test_strict_sync_propagates_extraction_failure(self):
+        with patch.object(events, "_event_from_document", side_effect=OSError("broken")):
+            with self.assertRaisesRegex(OSError, "broken"):
+                events.sync_events_from_documents_strict([object()])
+
+    def test_query_failure_is_distinct_from_empty_result(self):
+        with patch.object(events.EventStore, "query_upcoming", side_effect=sqlite3.OperationalError("locked")):
+            with self.assertRaises(events.EventQueryError):
+                events.get_upcoming_events()
 
     def test_delete_and_clear_facade(self):
         docs = [Document(text="报名截止 2026年9月10日 。", metadata={"source": "a.txt"})]

@@ -25,4 +25,4 @@ from .auth import get_user_tool_prefs, set_user_tool_prefs
 from .auth import track_event, untrack_event, list_tracked_events
 from .query_engine import get_rag_response, rerank_nodes
 from .index_manager import RAGSystem
-from .events import get_upcoming_events, get_upcoming_starts, get_notice_digest, sync_notice_events
+from .events import EventQueryError, get_upcoming_events, get_upcoming_starts, get_notice_digest, sync_notice_events

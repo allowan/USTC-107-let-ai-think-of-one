@@ -15,6 +15,23 @@ class _Request:
 
 
 class ChatServiceStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_general_stream_error_does_not_expose_provider_details(self):
+        service = ChatService()
+        sensitive = "sk-fictional-secret private prompt"
+
+        async def failing_stream(*_args, **_kwargs):
+            raise RuntimeError(sensitive)
+            yield
+
+        service.stream_chat_events = failing_stream
+        with self.assertLogs("server", level="ERROR") as logs:
+            chunks = [chunk async for chunk in service.sse_generator("local_user", "hello", "topic")]
+        combined = "".join(chunks + logs.output)
+        self.assertNotIn(sensitive, combined)
+        self.assertNotIn("sk-fictional-secret", combined)
+        event = json.loads(chunks[0].removeprefix("data: ").strip())
+        self.assertIn("已有对话历史已保留", event["content"])
+
     async def test_tool_message_mismatch_preserves_history_without_retry(self):
         service = ChatService()
         attempts = 0

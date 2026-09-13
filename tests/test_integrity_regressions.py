@@ -245,6 +245,33 @@ def test_sync_replaces_before_deleting_and_collapses_updates(monkeypatch: pytest
     remove.assert_called_once_with("b")
 
 
+def test_event_index_failure_propagates_after_vector_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rag = Mock()
+    monkeypatch.setattr(query, "_rag", fake_rag)
+    monkeypatch.setattr(query.events, "sync_events_from_documents_strict", Mock(side_effect=OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        query.upsert_public_documents([Document(text="notice", metadata={"source": "a"})])
+    fake_rag.replace_documents.assert_called_once()
+
+
+def test_topic_delete_keeps_metadata_when_checkpoint_cleanup_fails() -> None:
+    from fastapi import HTTPException
+    from server.routes.topics import remove_topic
+
+    auth = Mock()
+    auth.get_topic.return_value = {"thread_id": "user-local_user-topic-1"}
+    chat = Mock()
+    chat.delete_thread = AsyncMock(side_effect=OSError("locked"))
+
+    async def scenario() -> None:
+        with pytest.raises(HTTPException) as caught:
+            await remove_topic("1", user="local_user", auth=auth, chat=chat)
+        assert caught.value.status_code == 503
+        auth.delete_topic.assert_not_called()
+
+    asyncio.run(scenario())
+
+
 def test_change_log_returns_latest_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import sync_server.database as db
 

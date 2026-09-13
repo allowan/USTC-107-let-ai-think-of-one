@@ -36,3 +36,46 @@ def test_source_identifier_survives_path_decoding(source: str) -> None:
                 remove.assert_called_once_with("local_user", source)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("body", [
+    {"source": "a" * 1025},
+    {"source": "a", "date_value": "2026-9-1"},
+    {"source": "a", "url": "javascript:alert(1)"},
+    {"source": "a", "url": "https://user:pass@example.test/a"},
+    {"source": "a", "title": ["not", "text"]},
+])
+def test_tracked_event_rejects_ambiguous_or_oversized_fields(body: dict) -> None:
+    app = FastAPI()
+    app.include_router(digest_router)
+
+    async def exercise() -> None:
+        with patch("campus_rag.track_event") as track:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+            ) as client:
+                response = await client.post("/api/digest/tracked", json=body)
+            assert response.status_code == 400
+            track.assert_not_called()
+
+    asyncio.run(exercise())
+
+
+def test_digest_storage_failure_returns_retryable_error() -> None:
+    from campus_rag import EventQueryError
+
+    app = FastAPI()
+    app.include_router(digest_router)
+    rag = Mock()
+    rag.get_digest.side_effect = EventQueryError("internal detail")
+    app.dependency_overrides[get_rag_service] = lambda: rag
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost",
+        ) as client:
+            response = await client.get("/api/digest")
+        assert response.status_code == 503
+        assert "internal detail" not in response.text
+
+    asyncio.run(exercise())

@@ -157,6 +157,7 @@ export default function DigestPage() {
   const [digest, setDigest] = useState<DigestData | null>(null);
   const [tracked, setTracked] = useState<TrackedEvent[]>([]);
   const [courseReminders, setCourseReminders] = useState<CourseReminderData | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [calendarPreview, setCalendarPreview] = useState<TrackedEvent[] | null>(null);
   const [calendarSelection, setCalendarSelection] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
@@ -191,7 +192,9 @@ export default function DigestPage() {
       setDigest(d);
       setTracked(t.items || []);
       setCourseReminders(courses);
+      setLoadError(false);
     } catch {
+      setLoadError(true);
       message.error('加载今日面板失败');
     } finally {
       setLoading(false);
@@ -308,6 +311,12 @@ export default function DigestPage() {
         </Space>
       </div>
 
+      {loadError && <Alert type="error" showIcon style={{ marginBottom: 16 }}
+        message="今日面板加载失败"
+        description={digest ? '以下保留上次成功获取的结果，可能已经过期。请重新加载后核对截止事项。' : '无法确认当前是否有截止事项或课程安排，请重新加载。'}
+        action={<Button size="small" onClick={() => void load()} loading={loading}>重新加载</Button>}
+      />}
+
       <Modal title="预览追踪日历" open={calendarPreview !== null} onCancel={() => { if (!exporting) setCalendarPreview(null); }}
         onOk={() => void exportCalendar()} okText="确认下载日历" cancelText="取消" confirmLoading={exporting}
         okButtonProps={{ disabled: !calendarSelection.length || calendarSelection.length > 1000 }}>
@@ -324,7 +333,7 @@ export default function DigestPage() {
 
       {loading && !digest ? (
         <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
-      ) : (
+      ) : !digest ? null : (
         <>
           {courseReminders?.calendar_configured && (
             <Card size="small" className="digest-card" title={<Space><BellOutlined style={{ color: '#1677ff' }} /><span>课程提醒 · {courseReminders.semester}</span></Space>}>

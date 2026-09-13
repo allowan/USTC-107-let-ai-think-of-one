@@ -84,6 +84,7 @@
 - **回答核对**：Agent 提示词要求核对证据年份、学期和适用人群，区分发布/开始/截止日期；无相符证据时说明不足，冲突来源并列给出。此约束仍需用 `tests/answer_review_cases.json` 审查真实回答，来源命中测试不能代替答案正确性测试。
 
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
+- **话题删除顺序**：先删除 checkpoint，再删除话题元数据；checkpoint 清理失败时返回 503 并保留可见话题，避免接口报告成功后留下无法访问的私人历史。清理操作可重复执行，元数据删除失败时再次删除即可收敛。
 - **路径参数禁止二次解码**：starlette 路由层已自动解码一次，路由内再 `unquote()` 会损坏字面含 `%` 的参数。
 - **阻塞调用进线程池**：检索/入库含嵌入 API 调用，`async` 路由中一律 `asyncio.to_thread`；同步长任务同理（见 `sync_service.sync`）。
 - **SSE 历史保护**：检测到 checkpoint 中 tool_calls 与 tool messages 不匹配时停止本次生成并明确提示历史已保留，不自动删除或重试，不回显原始异常内容。用户可先备份该话题并新建话题继续，原话题的工具记录需要另行核对修复。
@@ -96,6 +97,8 @@
 - **课程提醒合并规则**：今日与明日分别按实际校历日期选择学期（重叠时采用最近开始的学期），无覆盖校历才回退月份推测；再定位教学周并按课程 `weeks` 和星期筛选；节假日/停课清空当日课程，调课/补课改用指定星期课程。今日页面读取该结果，不重复实现日期算法。
 - **追踪事件存 `users.db`**：`tracked_events` 表（username+source 主键，重复追踪即更新），CRUD 在 `campus_rag/auth.py`，与话题/工具偏好同库。
 - **事件窗口语义**：`get_notice_digest` 的 upcoming 合并两类——`deadline` 型（`event_start <= end 且 deadline >= today`）与 `start` 型（时间窗相交：`event_start <= window_end 且 COALESCE(event_end, event_start) >= today`）。后者会把“已开始未结束”的展览/施工带出来并标记 `ongoing=true`，前端据此显示“进行中”而非负数剩余天数。
+- **事件失败语义**：事件库查询失败必须向 `/api/digest` 返回稳定的 503，Agent 工具提示“事件数据暂时不可用”，不得伪装成“没有即将发生的事件”。空列表只表示查询成功且确实无数据。追踪 CRUD 全部进入线程池；来源、标题、类别、日期和 URL 在写库前校验长度与格式，日期统一保存为 `YYYY-MM-DD`。
+- **聊天错误脱敏**：普通模型或工具链异常只向 SSE 返回稳定错误文案，日志记录异常类型和 thread 标识，不记录供应商异常正文，避免请求内容或凭据随异常泄露。checkpoint 工具消息失配继续使用专门的历史保留提示。
 - **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（仅作无校历时的回退）；`get_my_schedule` 与今日/明日提醒统一调用 `ScheduleService.resolve_semester()`，优先选择覆盖所查日期且最近开始的本用户校历，无覆盖才按月份推断。未导入所选学期时明确报告已导入学期列表，不返回其他学期课表；显式指定学期仍按用户选择查询。
 
 ## 课表导入校验

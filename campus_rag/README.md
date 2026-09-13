@@ -64,6 +64,8 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 
 ### 事件时间索引（截止日/发生时间查询）
 
+事件读取接口严格区分“查询成功但无结果”和“事件库不可用”：`get_upcoming_events`、`get_upcoming_starts`、`get_notice_digest` 遇到存储或日期数据异常时记录日志并抛出稳定的 `EventQueryError`。启动期和通知入库后的事件抽取仍为 best-effort，不阻断 RAG 主流程。
+
 把通知里的关键字段抽取成结构化记录，使“未来 N 天内截止/发生的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
 
 ```python

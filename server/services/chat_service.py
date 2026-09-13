@@ -192,7 +192,7 @@ class ChatService:
     def _thread_id(username: str, topic_id: str) -> str:
         return f"user-{username}-topic-{topic_id}" if topic_id else f"user-{username}"
 
-    async def delete_thread(self, thread_id: str):
+    async def delete_thread(self, thread_id: str) -> None:
         """Delete all checkpoints for a thread."""
         import aiosqlite
         # Try to use an existing agent's connection first
@@ -211,6 +211,7 @@ class ChatService:
             await conn.commit()
         except Exception:
             logger.warning("Failed to delete checkpoints for thread %s", thread_id, exc_info=True)
+            raise
         finally:
             if own:
                 await conn.close()
@@ -321,8 +322,10 @@ class ChatService:
                 error_content = "对话中的工具调用记录不完整，本次生成已停止，已有历史已保留。请先备份该话题，可新建话题继续对话。"
                 yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
             else:
-                logger.error("SSE error for thread %s: %s", thread_id, exc, exc_info=True)
-                yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc}'})}\n\n"
+                # 供应商异常可能携带请求正文、地址或认证信息；只记录类型，
+                # 用户侧返回稳定文案，不能把未知异常当作安全文本透传。
+                logger.error("SSE failed for thread %s (%s)", thread_id, type(exc).__name__)
+                yield f"data: {json.dumps({'type': 'error', 'content': '处理失败，请检查模型连接后重试。已有对话历史已保留。'})}\n\n"
         finally:
             self._active_threads.discard(thread_id)
 
