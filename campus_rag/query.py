@@ -248,21 +248,21 @@ def add_public_documents(documents: list) -> None:
     _enrich_url_metadata(documents)
     _ensure_init()
     _rag.add_documents_to_public(documents)
-    events.sync_events_from_documents_strict(documents)
+    events.sync_events_from_documents(documents, strict=True)
 
 
 def upsert_public_documents(documents: list) -> None:
     """按来源替换同步通知，新数据写入成功前保留旧分块。"""
     _enrich_url_metadata(documents)
     _get_rag().replace_documents("public", documents)
-    events.sync_events_from_documents_strict(documents)
+    events.sync_events_from_documents(documents, strict=True)
 
 
 def delete_public_data(source: str) -> int:
     """按来源删除公共集合中的文档块，返回删除数量（同步服务增量更新用）。"""
     count = _get_rag().delete_public_documents_by_source(source)
     # 通知被删除时同步移除其事件，避免时间索引残留已下线通知。
-    events.delete_events_by_source_strict(source)
+    events.delete_events_by_source(source, strict=True)
     return count
 
 
@@ -275,7 +275,7 @@ def replace_public_documents(documents: list) -> None:
     _enrich_url_metadata(documents)
     _get_rag().replace_documents("public", documents, replace_all=True)
     # 事件快照在单独事务内替换；失败会阻止同步版本推进，重试可恢复一致性。
-    events.sync_events_from_documents_strict(documents, replace_all=True)
+    events.sync_events_from_documents(documents, replace_all=True)
 
 
 def update_user_data(user_id: str, source: str, content: str) -> None:

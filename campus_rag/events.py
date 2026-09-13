@@ -431,9 +431,9 @@ class EventStore:
             rows = db.execute("SELECT source, source_hash, extractor FROM notice_events").fetchall()
         return {r[0]: (r[1], r[2] or "") for r in rows}
 
-    def upsert_events(self, events: list[dict]) -> int:
-        """写入/更新事件，返回实际写入条数。source 为主键，重复即覆盖。"""
-        if not events:
+    def upsert_events(self, events: list[dict], *, replace_all: bool = False) -> int:
+        """增量更新或在同一事务内替换全量事件，失败时回滚。"""
+        if not events and not replace_all:
             return 0
         now = datetime.now().isoformat(timespec="seconds")
         rows = [
@@ -447,36 +447,11 @@ class EventStore:
             for e in events
         ]
         with closing(self._connect()) as db, db:
+            if replace_all:
+                db.execute("DELETE FROM notice_events")
             db.executemany(
-                """
-                INSERT OR REPLACE INTO notice_events (
-                    source, source_hash, title, category, audience,
-                    publish_date, deadline, deadline_text, event_start,
-                    event_end, location, url, extracted_at, extractor
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-        return len(rows)
-
-    def replace_events(self, events: list[dict]) -> int:
-        """在一个事务内以权威快照替换事件，写入失败时保留旧索引。"""
-        now = datetime.now().isoformat(timespec="seconds")
-        rows = [
-            (
-                e["source"], e["source_hash"], e.get("title"), e.get("category"),
-                e.get("audience"), e.get("publish_date"), e.get("deadline"),
-                e.get("deadline_text"), e.get("event_start"), e.get("event_end"),
-                e.get("location"), e.get("url"), now,
-                e.get("extractor") or EXTRACTOR_VERSION,
-            )
-            for e in events
-        ]
-        with closing(self._connect()) as db, db:
-            db.execute("DELETE FROM notice_events")
-            db.executemany(
-                """
-                INSERT INTO notice_events (
+                ("INSERT" if replace_all else "INSERT OR REPLACE") + """
+                INTO notice_events (
                     source, source_hash, title, category, audience,
                     publish_date, deadline, deadline_text, event_start,
                     event_end, location, url, extracted_at, extractor
@@ -592,19 +567,24 @@ def _event_from_document(doc, today: date | None = None) -> dict | None:
     return event
 
 
-def sync_events_from_documents(documents: list, today: date | None = None) -> int:
+def sync_events_from_documents(
+    documents: list, today: date | None = None, *, strict: bool = False, replace_all: bool = False,
+) -> int:
     """从 Document 列表抽取并写入事件，返回新写入条数。
 
     幂等：内容哈希未变的通知直接跳过。单条解析失败只记日志、不中断整批，
-    保证事件抽取永远不会拖垮入库主流程。
+    strict 或全量替换时任何失败均向上传播，阻止同步版本推进。
     """
-    if not documents:
+    strict = strict or replace_all
+    if not documents and not replace_all:
         return 0
 
     store = get_event_store()
     try:
-        existing = store.existing_states()
+        existing = {} if replace_all else store.existing_states()
     except Exception:
+        if strict:
+            raise
         logger.warning("读取事件状态失败，本批全量重抽", exc_info=True)
         existing = {}
     extracted: list[dict] = []
@@ -612,6 +592,8 @@ def sync_events_from_documents(documents: list, today: date | None = None) -> in
         try:
             event = _event_from_document(doc, today=today)
         except Exception:
+            if strict:
+                raise
             logger.warning("事件抽取失败，跳过该文档", exc_info=True)
             continue
         if event is None:
@@ -619,37 +601,13 @@ def sync_events_from_documents(documents: list, today: date | None = None) -> in
         if existing.get(event["source"]) == (event["source_hash"], EXTRACTOR_VERSION):
             continue
         extracted.append(event)
-    if not extracted:
-        return 0
     try:
-        return store.upsert_events(extracted)
+        return store.upsert_events(extracted, replace_all=replace_all)
     except Exception:
+        if strict:
+            raise
         logger.warning("事件写入失败，已跳过（不影响 RAG 入库）", exc_info=True)
         return 0
-
-
-def sync_events_from_documents_strict(
-    documents: list, today: date | None = None, *, replace_all: bool = False,
-) -> int:
-    """同步路径使用的严格更新；任何抽取或存储失败都阻止版本推进。"""
-    store = get_event_store()
-    existing = {} if replace_all else store.existing_states()
-    extracted: list[dict] = []
-    for doc in documents:
-        event = _event_from_document(doc, today=today)
-        if event is None:
-            continue
-        if existing.get(event["source"]) == (event["source_hash"], EXTRACTOR_VERSION):
-            continue
-        extracted.append(event)
-    if replace_all:
-        return store.replace_events(extracted)
-    return store.upsert_events(extracted)
-
-
-def delete_events_by_source_strict(source: str) -> int:
-    """同步删除使用的严格入口，失败向上抛出以阻止版本推进。"""
-    return get_event_store().delete_by_source(source)
 
 
 def sync_events_from_data_dir(data_dir: str, today: date | None = None) -> int:
@@ -680,10 +638,13 @@ def sync_notice_events(data_dir: str | None = None, today: date | None = None) -
     return sync_events_from_data_dir(target, today=today)
 
 
-def delete_events_by_source(source: str) -> int:
+def delete_events_by_source(source: str, *, strict: bool = False) -> int:
+    """删除来源对应的事件；同步调用使用 strict 让失败向上传播。"""
     try:
         return get_event_store().delete_by_source(source)
     except Exception:
+        if strict:
+            raise
         logger.warning("删除事件失败 source=%s", source, exc_info=True)
         return 0
 

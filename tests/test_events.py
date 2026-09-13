@@ -161,7 +161,7 @@ class EventStoreTest(unittest.TestCase):
         self.store.upsert_events([_mk_event("old.txt", "2026-09-10")])
         duplicate = _mk_event("new.txt", "2026-09-11")
         with self.assertRaises(sqlite3.IntegrityError):
-            self.store.replace_events([duplicate, duplicate])
+            self.store.upsert_events([duplicate, duplicate], replace_all=True)
         self.assertEqual(set(self.store.existing_states()), {"old.txt"})
 
     def test_query_upcoming_window_sort_and_filter(self):
@@ -244,7 +244,15 @@ class SyncFacadeTest(unittest.TestCase):
     def test_strict_sync_propagates_extraction_failure(self):
         with patch.object(events, "_event_from_document", side_effect=OSError("broken")):
             with self.assertRaisesRegex(OSError, "broken"):
-                events.sync_events_from_documents_strict([object()])
+                events.sync_events_from_documents([object()], strict=True)
+
+    def test_empty_snapshot_clears_events_but_empty_increment_preserves_them(self):
+        store = events.get_event_store()
+        store.upsert_events([_mk_event("old.txt", "2026-09-10")])
+        events.sync_events_from_documents([], strict=True)
+        self.assertEqual(store.count(), 1)
+        events.sync_events_from_documents([], replace_all=True)
+        self.assertEqual(store.count(), 0)
 
     def test_query_failure_is_distinct_from_empty_result(self):
         with patch.object(events.EventStore, "query_upcoming", side_effect=sqlite3.OperationalError("locked")):

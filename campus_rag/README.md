@@ -64,7 +64,9 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 
 ### 事件时间索引（截止日/发生时间查询）
 
-事件读取接口严格区分“查询成功但无结果”和“事件库不可用”：`get_upcoming_events`、`get_upcoming_starts`、`get_notice_digest` 遇到存储或日期数据异常时记录日志并抛出稳定的 `EventQueryError`。启动期和通知入库后的事件抽取仍为 best-effort，不阻断 RAG 主流程。
+事件读取接口严格区分“查询成功但无结果”和“事件库不可用”：`get_upcoming_events`、`get_upcoming_starts`、`get_notice_digest` 遇到存储或日期数据异常时记录日志并抛出稳定的 `EventQueryError`。启动期事件抽取仍为 best-effort；同步写入或删除失败必须向上传播，阻止版本推进。
+
+事件同步复用 `sync_events_from_documents`：默认保持启动阶段的尽力抽取，`strict=True` 将失败向上传播，`replace_all=True` 强制严格处理并复用同一写入事务替换快照；删除同样通过现有入口的 `strict=True` 控制。
 
 把通知里的关键字段抽取成结构化记录，使“未来 N 天内截止/发生的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
 
@@ -85,7 +87,7 @@ sync_notice_events()
 get_notice_digest(days=7)
 ```
 
-返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `upsert_public_documents` / `replace_public_documents` / `delete_public_data` 与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
+返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `upsert_public_documents` / `replace_public_documents` / `delete_public_data` 与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；启动期抽取失败只记日志；同步路径采用严格模式，失败后可重试恢复一致性。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
 
 抽取边界（评测可见 `scripts/eval_events.py`）：只抽日粒度；月粒度区间（“2026.9-2027.1”）、新闻式时间状语先行（“6月15日下午，…”）、网页表格转文本的跨行时间表（如选课阶段表）不在覆盖范围，由语义检索兜底。
 

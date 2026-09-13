@@ -248,7 +248,7 @@ def test_sync_replaces_before_deleting_and_collapses_updates(monkeypatch: pytest
 def test_event_index_failure_propagates_after_vector_write(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_rag = Mock()
     monkeypatch.setattr(query, "_rag", fake_rag)
-    monkeypatch.setattr(query.events, "sync_events_from_documents_strict", Mock(side_effect=OSError("disk full")))
+    monkeypatch.setattr(query.events, "sync_events_from_documents", Mock(side_effect=OSError("disk full")))
     with pytest.raises(OSError, match="disk full"):
         query.upsert_public_documents([Document(text="notice", metadata={"source": "a"})])
     fake_rag.replace_documents.assert_called_once()
