@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test:chat": "node --test ../tests/test_chat_frontend.cjs",
+    "test:sync": "node --test ../tests/test_sync_frontend.cjs",
+    "test:calendar": "node --test ../tests/test_calendar_frontend.cjs",
     "test:backup": "node --test ../tests/test_backup_frontend.cjs",
     "test:schedule": "node --test ../tests/test_schedule_import_frontend.cjs",
     "dev": "vite",

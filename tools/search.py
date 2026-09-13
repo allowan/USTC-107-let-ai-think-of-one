@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
 import json
@@ -246,7 +247,12 @@ def _search_tavily_results(query: str, api_key: str, max_results: int = 5) -> li
     )
     response.raise_for_status()
     return [
-        {"title": item.get("title") or item.get("url", ""), "url": item.get("url", "")}
+        {
+            "title": item.get("title") or item.get("url", ""),
+            "url": item.get("url", ""),
+            "content": item.get("content") or "",
+            "published_date": item.get("published_date") or "",
+        }
         for item in response.json().get("results", [])
         if item.get("url")
     ][: max(1, min(max_results, 10))]
@@ -297,7 +303,7 @@ def _validate_ustc_url(url: str) -> str:
     return validated
 
 
-def search_ustc_web_text(query: str, max_results: int = 5) -> str:
+def _search_ustc_results(query: str, max_results: int = 5) -> list[dict[str, str]]:
     results = _search_web_results(f"site:ustc.edu.cn {query}", max_results=10)
     allowed = _ustc_allowed_hosts()
     official = [
@@ -305,7 +311,12 @@ def search_ustc_web_text(query: str, max_results: int = 5) -> str:
         if urlparse(item["url"]).hostname
         and urlparse(item["url"]).hostname.lower() in allowed
     ][:max_results]
-    return _format_search_results(official)
+    return official
+
+
+def search_ustc_web_text(query: str, max_results: int = 5) -> str:
+    """搜索官方站点并返回兼容的文本结果。"""
+    return _format_search_results(_search_ustc_results(query, max_results))
 
 
 def fetch_ustc_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> str:
@@ -367,7 +378,7 @@ def _validate_course_review_url(url: str) -> str:
     return validated
 
 
-def search_course_reviews_text(query: str, max_results: int = 5) -> str:
+def _search_course_review_results(query: str, max_results: int = 5) -> list[dict[str, str]]:
     """Search public course pages on the configured course-review sites."""
     site_error: Exception | None = None
     try:
@@ -394,7 +405,12 @@ def search_course_reviews_text(query: str, max_results: int = 5) -> str:
         and parsed.hostname.lower() in allowed_hosts
         and any(parsed.path.startswith(prefix) for prefix in paths)
     ][:max_results]
-    return _format_search_results(reviews)
+    return reviews
+
+
+def search_course_reviews_text(query: str, max_results: int = 5) -> str:
+    """搜索评课社区并返回兼容的文本结果。"""
+    return _format_search_results(_search_course_review_results(query, max_results))
 
 
 def fetch_course_review_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> str:
@@ -406,8 +422,50 @@ def fetch_course_review_page_text(url: str, max_chars: int = MAX_TOOL_CHARS) -> 
     )
 
 
-@tool("web_search")
-def search_web(query: str) -> str:
+def _evidence_artifact(results: list[dict[str, str]], kind: str) -> dict[str, object]:
+    evidence = []
+    for item in results:
+        url = item.get("url", "").strip()
+        try:
+            parsed = urlparse(url)
+            safe = (
+                parsed.scheme in {"http", "https"} and parsed.hostname
+                and parsed.username is None and parsed.password is None
+                and not any(char.isspace() or ord(char) < 32 for char in url)
+            )
+        except ValueError:
+            logger.warning("搜索结果包含无效的来源 URL，已隐藏链接")
+            safe = False
+        url = url if safe else ""
+        title = item.get("title") or url or "网页原文"
+        excerpt = item.get("content", "")[:2000]
+        evidence.append({
+            "id": hashlib.sha256(
+                json.dumps([kind, url, title, excerpt], ensure_ascii=False).encode("utf-8")
+            ).hexdigest(),
+            "source": url or title,
+            "title": title,
+            "url": url,
+            "published_at": item.get("published_date", ""),
+            "excerpt": excerpt,
+            "kind": kind,
+        })
+    return {"evidence": evidence, "warnings": []}
+
+
+def _search_tool_result(results: list[dict[str, str]], kind: str) -> tuple[str, dict[str, object]]:
+    return _format_search_results(results), _evidence_artifact(results, kind)
+
+
+def _fetch_tool_result(url: str, text: str, title: str, kind: str) -> tuple[str, dict[str, object]]:
+    return (
+        f"来源: {_format_markdown_link(title, url)}\n\n{text}",
+        _evidence_artifact([{"url": url, "title": title, "content": text}], kind),
+    )
+
+
+@tool("web_search", response_format="content_and_artifact")
+def search_web(query: str) -> tuple[str, dict[str, object]]:
     """Search the public web and return result titles and URLs."""
     try:
         # WEBSEARCH_PROVIDER 默认 tavily（需 TAVILY_API_KEY），未配置 Key 或
@@ -417,62 +475,62 @@ def search_web(query: str) -> str:
             api_key = os.getenv("TAVILY_API_KEY", "").strip()
             if api_key:
                 try:
-                    return _format_search_results(_search_tavily_results(query, api_key))
+                    return _search_tool_result(_search_tavily_results(query, api_key), "web")
                 except (httpx.HTTPError, OSError) as exc:
                     logger.warning("Tavily search failed, falling back to DuckDuckGo: %s", exc)
             else:
                 logger.warning("WEBSEARCH_PROVIDER=tavily but TAVILY_API_KEY is not set; falling back to DuckDuckGo")
-        return search_web_text(query)
+        return _search_tool_result(_search_web_results(query), "web")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("public web search failed for %r: %s", query, exc)
-        return f"搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")
 
 
-@tool("web_fetch")
-def fetch_text_from_url(url: str) -> str:
+@tool("web_fetch", response_format="content_and_artifact")
+def fetch_text_from_url(url: str) -> tuple[str, dict[str, object]]:
     """Fetch a public HTTP/HTTPS page and return extracted visible text."""
     try:
-        return f"来源: {_format_markdown_link('网页原文', url)}\n\n{fetch_page_text(url)}"
+        return _fetch_tool_result(url, fetch_page_text(url), "网页原文", "web")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("web fetch failed for %s: %s", url, exc)
-        return f"网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")
 
 
-@tool("ustc_web_search")
-def search_ustc_web(query: str) -> str:
+@tool("ustc_web_search", response_format="content_and_artifact")
+def search_ustc_web(query: str) -> tuple[str, dict[str, object]]:
     """Search configured official USTC websites for up-to-date public information."""
     try:
-        return search_ustc_web_text(query)
+        return _search_tool_result(_search_ustc_results(query), "official")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("USTC web search failed for %r: %s", query, exc)
-        return f"科大网站搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"科大网站搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")
 
 
-@tool("ustc_web_fetch")
-def fetch_ustc_text_from_url(url: str) -> str:
+@tool("ustc_web_fetch", response_format="content_and_artifact")
+def fetch_ustc_text_from_url(url: str) -> tuple[str, dict[str, object]]:
     """Fetch visible text from a URL on the configured official USTC website whitelist."""
     try:
-        return f"来源: {_format_markdown_link('网页原文', url)}\n\n{fetch_ustc_page_text(url)}"
+        return _fetch_tool_result(url, fetch_ustc_page_text(url), "网页原文", "official")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("USTC fetch failed for %s: %s", url, exc)
-        return f"科大网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"科大网页读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")
 
 
-@tool("course_review_search")
-def search_course_reviews(query: str) -> str:
+@tool("course_review_search", response_format="content_and_artifact")
+def search_course_reviews(query: str) -> tuple[str, dict[str, object]]:
     """Search public USTC course reviews and return course-page links."""
     try:
-        return search_course_reviews_text(query)
+        return _search_tool_result(_search_course_review_results(query), "course_review")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("course review search failed for %r: %s", query, exc)
-        return f"评课社区搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"评课社区搜索失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")
 
 
-@tool("course_review_fetch")
-def fetch_course_review_text(url: str) -> str:
+@tool("course_review_fetch", response_format="content_and_artifact")
+def fetch_course_review_text(url: str) -> tuple[str, dict[str, object]]:
     """Fetch visible text from a public USTC course review page."""
     try:
-        return f"来源: {_format_markdown_link('评课社区课程页', url)}\n\n{fetch_course_review_page_text(url)}"
+        return _fetch_tool_result(url, fetch_course_review_page_text(url), "评课社区课程页", "course_review")
     except (httpx.HTTPError, OSError, ValueError) as exc:
         logger.warning("course review fetch failed for %s: %s", url, exc)
-        return f"评课社区页面读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。"
+        return f"评课社区页面读取失败（网络或代理不可用）：{exc}。请不要重复调用此工具。", _evidence_artifact([], "web")

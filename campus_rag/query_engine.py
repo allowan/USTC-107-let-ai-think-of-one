@@ -5,11 +5,12 @@ import time
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 
 from typing import List, Optional
 from llama_index.core import VectorStoreIndex
 from llama_index.core.retrievers import VectorIndexRetriever
-from llama_index.core.schema import NodeWithScore
+from llama_index.core.schema import BaseNode, NodeWithScore
 from llama_index.core.prompts import PromptTemplate
 
 from . import config
@@ -168,25 +169,60 @@ def retrieve_nodes(
     query: str, public_index: Optional[VectorStoreIndex] = None,
     user_index: Optional[VectorStoreIndex] = None, top_k: int = 10,
     rerank: bool = True,
+    *,
+    public_index_loader: Callable[[], VectorStoreIndex] | None = None,
+    user_index_loader: Callable[[], VectorStoreIndex] | None = None,
+    public_nodes_loader: Callable[[], list[BaseNode]] | None = None,
+    user_nodes_loader: Callable[[], list[BaseNode]] | None = None,
+    warnings: list[str] | None = None,
 ) -> List[NodeWithScore]:
     """从各自集合召回向量和关键词候选，按 RRF 融合，不调用生成模型。"""
     if not query.strip() or top_k <= 0:
         return []
     all_nodes = []
-    for index in (public_index, user_index):
-        if index is None:
+    for index, index_loader, nodes_loader in (
+        (public_index, public_index_loader, public_nodes_loader),
+        (user_index, user_index_loader, user_nodes_loader),
+    ):
+        if index is None and index_loader is None and nodes_loader is None:
             continue
-        vector_nodes = _get_cached_retriever(index, top_k).retrieve(query)
-        if not vector_nodes:
-            from .keyword_retriever import extract_keywords
-            retry = extract_keywords(query)
-            if retry and retry != query.strip():
-                vector_nodes = _get_cached_retriever(index, top_k).retrieve(retry)
+        vector_error = None
+        keyword_error = None
         try:
-            keyword_nodes = _get_bm25_cached(index).retrieve(query, top_k=top_k)
-        except Exception:
+            if index is None and index_loader is not None:
+                index = index_loader()
+            if index is None:
+                raise RuntimeError("向量索引不可用")
+            vector_nodes = _get_cached_retriever(index, top_k).retrieve(query)
+            if not vector_nodes:
+                from .keyword_retriever import extract_keywords
+                retry = extract_keywords(query)
+                if retry and retry != query.strip():
+                    vector_nodes = _get_cached_retriever(index, top_k).retrieve(retry)
+        except Exception as exc:
+            logger.exception("向量召回失败，尝试关键词检索")
+            vector_error = exc
+            vector_nodes = []
+        try:
+            if index is not None:
+                keyword_retriever = _get_bm25_cached(index)
+            elif nodes_loader is not None:
+                from .keyword_retriever import BM25Retriever
+                keyword_retriever = BM25Retriever(nodes=nodes_loader())
+            else:
+                raise RuntimeError("关键词语料不可用")
+            keyword_nodes = keyword_retriever.retrieve(query, top_k=top_k)
+        except Exception as exc:
             logger.exception("关键词召回失败，回退向量候选")
+            keyword_error = exc
             keyword_nodes = []
+        if vector_error is not None and keyword_error is not None:
+            raise RuntimeError("向量与关键词检索均失败，请检查嵌入服务和资料存储后重试。") from keyword_error
+        if warnings is not None:
+            if vector_error is not None:
+                warnings.append("向量检索不可用，已降级为关键词检索，结果可能不完整。")
+            elif keyword_error is not None:
+                warnings.append("关键词检索不可用，已降级为向量检索，结果可能不完整。")
         fused = {}
         for ranking in (vector_nodes, keyword_nodes):
             seen = set()
@@ -230,11 +266,23 @@ def get_rag_response(
     top_k: int = 10,
     rerank: bool = True,
     data_dir: str = None,
+    *,
+    public_index_loader: Callable[[], VectorStoreIndex] | None = None,
+    user_index_loader: Callable[[], VectorStoreIndex] | None = None,
+    public_nodes_loader: Callable[[], list[BaseNode]] | None = None,
+    user_nodes_loader: Callable[[], list[BaseNode]] | None = None,
 ) -> str:
     """共用纯检索管线并生成回答；data_dir 仅保留参数兼容，语料来自集合。"""
-    final_nodes = retrieve_nodes(query, public_index, user_index, top_k, rerank)
+    warnings: list[str] = []
+    final_nodes = retrieve_nodes(
+        query, public_index, user_index, top_k, rerank,
+        public_index_loader=public_index_loader, user_index_loader=user_index_loader,
+        public_nodes_loader=public_nodes_loader, user_nodes_loader=user_nodes_loader,
+        warnings=warnings,
+    )
+    prefix = "\n".join(warnings)
     if not final_nodes:
-        return "未找到相关信息。"
+        return f"{prefix}\n未找到相关信息。" if prefix else "未找到相关信息。"
 
     context = "\n\n".join([_node_context_block(node) for node in final_nodes])
     prompt = QA_PROMPT.format(context_str=context, query_str=query)
@@ -242,4 +290,5 @@ def get_rag_response(
     llm = config.require_llm()
     from llama_index.core.llms import ChatMessage
     response = llm.chat([ChatMessage(role="user", content=prompt)])
-    return str(response.message.content or "")
+    answer = str(response.message.content or "")
+    return f"{prefix}\n\n{answer}" if prefix else answer

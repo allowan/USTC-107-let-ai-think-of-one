@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Modal, Tabs, Form, Input, Switch, Button, App, Spin, Space, Typography, Card, Empty, Popconfirm, Select, Divider, Tag } from 'antd';
+import { Alert, Modal, Tabs, Form, Input, Switch, Button, App, Spin, Space, Typography, Card, Empty, Popconfirm, Select, Divider, Tag } from 'antd';
 import { SaveOutlined, PlusOutlined, EditOutlined, DeleteOutlined, MinusCircleOutlined, ApiOutlined } from '@ant-design/icons';
 import { settingsApi } from '@/services/api';
 import type { ModelGroup, ToolSetting } from '@/types';
@@ -32,6 +32,7 @@ export default function SettingsModal({ visible, onClose }: Props) {
       label: '工具设置',
       children: <ToolSettingsTab />,
     },
+    { key: 'diagnostics', label: '连接诊断', children: <DiagnosticsTab /> },
   ];
 
   return (
@@ -53,6 +54,38 @@ export default function SettingsModal({ visible, onClose }: Props) {
 
 function errorDetail(error: unknown, fallback: string) {
   return axios.isAxiosError(error) ? error.response?.data?.detail || fallback : fallback;
+}
+
+function DiagnosticsTab() {
+  const [loading, setLoading] = useState(false);
+  const [checks, setChecks] = useState<{ llm: boolean; chromadb: boolean } | null>(null);
+  const [error, setError] = useState(false);
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const diagnose = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(false);
+    setChecks(null);
+    try {
+      const { data } = await settingsApi.diagnose();
+      if (active.current) setChecks(data.checks);
+    } catch {
+      if (active.current) setError(true);
+    } finally {
+      if (active.current) setLoading(false);
+    }
+  };
+  return <Space direction="vertical" style={{ width: '100%' }}>
+    <Text>点击后检查模型连接和本地资料库。模型检查会向当前供应商发送一次简短请求，可能产生少量费用；不会发送个人资料。</Text>
+    <Button onClick={() => void diagnose()} loading={loading}>开始诊断</Button>
+    {error && <Alert type="error" message="诊断请求失败，请检查本地后端后重试。" />}
+    {checks && <>
+      <Alert type={checks.llm ? 'success' : 'warning'} message={checks.llm ? '模型连接正常' : '模型不可用或检查超时，请核对模型配置与网络。'} />
+      <Alert type={checks.chromadb ? 'success' : 'warning'} message={checks.chromadb ? '本地资料库可访问' : '资料库不可用或检查超时，请核对存储状态。'} />
+      <Text type="secondary">本次检查不验证嵌入、重排序或同步服务。正在执行的探测不会因等待超时而重复启动。</Text>
+    </>}
+  </Space>;
 }
 
 function ProviderGroupsTab() {

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Card, Tag, Button, App, Spin, Empty, Space, Typography, Tooltip } from 'antd';
+import { Alert, Checkbox, Modal, Card, Tag, Button, App, Spin, Empty, Space, Typography, Tooltip } from 'antd';
 import {
   BellOutlined,
   ClockCircleOutlined,
@@ -12,6 +12,7 @@ import {
 } from '@ant-design/icons';
 import { digestApi, scheduleApi, trackApi } from '@/services/api';
 import type { CourseReminderData, CourseReminderDay, DigestData, DigestEvent, TrackedEvent } from '@/types';
+import { buildTrackedCalendar, isCalendarDate } from '@/utils/calendarExport';
 
 const { Text, Link } = Typography;
 
@@ -156,6 +157,28 @@ export default function DigestPage() {
   const [digest, setDigest] = useState<DigestData | null>(null);
   const [tracked, setTracked] = useState<TrackedEvent[]>([]);
   const [courseReminders, setCourseReminders] = useState<CourseReminderData | null>(null);
+  const [calendarPreview, setCalendarPreview] = useState<TrackedEvent[] | null>(null);
+  const [calendarSelection, setCalendarSelection] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
+
+  const exportCalendar = async () => {
+    if (!calendarPreview || exporting || !calendarSelection.length) return;
+    setExporting(true);
+    try {
+      const content = await buildTrackedCalendar(calendarPreview.filter(item => calendarSelection.includes(item.source)));
+      const url = URL.createObjectURL(new Blob([content], { type: 'text/calendar;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'campus-tracked-events.ics';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setCalendarPreview(null);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '日历导出失败，请重试');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -270,6 +293,10 @@ export default function DigestPage() {
           </Text>
         </div>
         <Space>
+          <Button size="small" disabled={!tracked.length || loading} onClick={() => {
+            setCalendarPreview(tracked.map(item => ({ ...item })));
+            setCalendarSelection(tracked.filter(item => isCalendarDate(item.date_value)).map(item => item.source));
+          }}>导出追踪日历</Button>
           <Button.Group>
             {[7, 14, 30].map((d) => (
               <Button key={d} size="small" type={days === d ? 'primary' : 'default'} onClick={() => setDays(d)}>
@@ -280,6 +307,20 @@ export default function DigestPage() {
           <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading} />
         </Space>
       </div>
+
+      <Modal title="预览追踪日历" open={calendarPreview !== null} onCancel={() => { if (!exporting) setCalendarPreview(null); }}
+        onOk={() => void exportCalendar()} okText="确认下载日历" cancelText="取消" confirmLoading={exporting}
+        okButtonProps={{ disabled: !calendarSelection.length || calendarSelection.length > 1000 }}>
+        <Alert type="info" showIcon message="请核对日期后下载"
+          description="仅导出所选项为全天事件，不代表具体截止时刻。文件是当前追踪记录的快照，不会自动随通知更新，也不会自动添加到你的日历。" style={{ marginBottom: 16 }} />
+        <Checkbox.Group value={calendarSelection} onChange={values => setCalendarSelection(values as string[])}>
+          <Space direction="vertical">
+            {(calendarPreview || []).map(item => <Checkbox key={item.source} value={item.source} disabled={!isCalendarDate(item.date_value)}>
+              {item.title || item.source} · {item.date_kind === 'deadline' ? '截止' : '开始'} {isCalendarDate(item.date_value) ? item.date_value : '日期待核对，不能导出'}
+            </Checkbox>)}
+          </Space>
+        </Checkbox.Group>
+      </Modal>
 
       {loading && !digest ? (
         <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>

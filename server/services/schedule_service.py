@@ -393,9 +393,8 @@ class ScheduleService:
         )
         return result
 
-    def get_course_reminders(self, username: str, on_date: date | None = None) -> dict:
-        """按当前学期校历生成今天和明天的实际课程提醒。"""
-
+    def resolve_semester(self, username: str, on_date: date | None = None) -> str:
+        """按本用户实际校历选择学期，无覆盖时才回退月份推断。"""
         target = on_date or date.today()
         with closing(self._connect()) as db:
             calendars = db.execute(
@@ -404,18 +403,19 @@ class ScheduleService:
                 (username,),
             ).fetchall()
 
-        def semester_for(day: date) -> str:
-            # 实际校历优先于月份推测；重叠时采用最近开始的学期。
-            for name, start, total_weeks in calendars:
-                first = date.fromisoformat(start)
-                if first <= day < first + timedelta(weeks=total_weeks):
-                    return name
-            return current_semester(datetime(day.year, day.month, day.day))
+        for name, start, total_weeks in calendars:
+            first = date.fromisoformat(start)
+            if first <= target < first + timedelta(weeks=total_weeks):
+                return name
+        return current_semester(datetime(target.year, target.month, target.day))
 
-        semester = semester_for(target)
+    def get_course_reminders(self, username: str, on_date: date | None = None) -> dict:
+        """按当前学期校历生成今天和明天的实际课程提醒。"""
+        target = on_date or date.today()
+        semester = self.resolve_semester(username, target)
 
         def reminder_for(day: date) -> dict:
-            day_semester = semester_for(day)
+            day_semester = self.resolve_semester(username, day)
             calendar = self.get_calendar(username, day_semester, day)
             if calendar is None:
                 return {"date": day.isoformat(), "week": None, "courses": [], "special_dates": []}

@@ -9,6 +9,7 @@ from pathlib import Path
 import chromadb
 from chromadb.errors import NotFoundError
 from llama_index.core import VectorStoreIndex
+from llama_index.core.schema import BaseNode
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from .data_loader import load_documents_from_files, split_documents
 from . import config
@@ -125,6 +126,21 @@ def read_user_collection_for_backup(user_id: str) -> dict[str, list]:
     except (chromadb.errors.ChromaError, OSError, RuntimeError, ValueError, KeyError):
         logger.error("读取个人资料备份失败，未生成不完整的资料导出")
         raise
+
+
+def read_collection_nodes(user_id: str | None = None) -> list[BaseNode]:
+    """只读目标集合的检索分块，不初始化嵌入模型或创建集合。"""
+    if not Path(_DEFAULT_PERSIST_DIR).exists():
+        return []
+    with _write_lock:
+        try:
+            collection = _get_chroma_client().get_collection(
+                "public" if user_id is None else _user_collection_name(user_id),
+                embedding_function=None,
+            )
+        except NotFoundError:
+            return []
+        return ChromaVectorStore(chroma_collection=collection).get_nodes(node_ids=None)
 
 
 class RAGSystem:

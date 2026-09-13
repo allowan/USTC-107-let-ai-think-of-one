@@ -33,7 +33,8 @@
 
 | Method | Path | 说明 |
 |---|---|---|
-| GET | `/api/health` | 健康检查（agent / LLM / ChromaDB，全部在线程池探测不阻塞事件循环；LLM 未配置时仅降级不报错） |
+| GET | `/api/health` | 轻量存活检查，仅返回 `status: ok`、`checks: {service: true}`，不构建 Agent、不请求模型或数据库 |
+| POST | `/api/health/diagnostics` | 用户主动诊断 LLM / ChromaDB；会产生一次模型请求，线程池并行探测，最多等待 10 秒；失败或超时返回 `degraded` 和对应 `checks: false`。未结束的探测由后续请求复用，避免超时后反复创建后台任务；不返回底层异常或凭据 |
 | GET | `/api/topics` | 话题列表 |
 | POST | `/api/topics` | 创建话题 |
 | PUT | `/api/topics/{id}` | 重命名话题 |
@@ -79,6 +80,9 @@
 
 ## 关键约定
 
+- **回答证据**：沿用 `astream(stream_mode="messages")`，从成功工具消息的 `artifact` 发出 `evidence` SSE 事件（content 为 `{evidence: [...], warnings: [...]}`）。卡片字段为 `id/source/title/url/published_at/excerpt/kind`，类别区分官方、个人、公开网页及学生评价。仅转发白名单字段和 HTTP(S) 链接，每轮最多 40 个片段，每片段最多 2000 字。卡片表示本轮实际检索资料，并不宣称模型每句话均已核验；降级说明单独展示。工具 artifact 由现有 checkpoint 保存，历史接口在对应助手回合返回相同可选字段；无 artifact 的旧历史保持兼容，不迁移数据库，文字备份仍只包含可见正文。
+- **回答核对**：Agent 提示词要求核对证据年份、学期和适用人群，区分发布/开始/截止日期；无相符证据时说明不足，冲突来源并列给出。此约束仍需用 `tests/answer_review_cases.json` 审查真实回答，来源命中测试不能代替答案正确性测试。
+
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
 - **路径参数禁止二次解码**：starlette 路由层已自动解码一次，路由内再 `unquote()` 会损坏字面含 `%` 的参数。
 - **阻塞调用进线程池**：检索/入库含嵌入 API 调用，`async` 路由中一律 `asyncio.to_thread`；同步长任务同理（见 `sync_service.sync`）。
@@ -92,7 +96,7 @@
 - **课程提醒合并规则**：今日与明日分别按实际校历日期选择学期（重叠时采用最近开始的学期），无覆盖校历才回退月份推测；再定位教学周并按课程 `weeks` 和星期筛选；节假日/停课清空当日课程，调课/补课改用指定星期课程。今日页面读取该结果，不重复实现日期算法。
 - **追踪事件存 `users.db`**：`tracked_events` 表（username+source 主键，重复追踪即更新），CRUD 在 `campus_rag/auth.py`，与话题/工具偏好同库。
 - **事件窗口语义**：`get_notice_digest` 的 upcoming 合并两类——`deadline` 型（`event_start <= end 且 deadline >= today`）与 `start` 型（时间窗相交：`event_start <= window_end 且 COALESCE(event_end, event_start) >= today`）。后者会把“已开始未结束”的展览/施工带出来并标记 `ongoing=true`，前端据此显示“进行中”而非负数剩余天数。
-- **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（春季≈2-6 月、夏季≈7-8 月、秋季≈9 月-次年1月）；`get_my_schedule` 工具不指定学期时按 `current_semester()` 确定性推断，再按校历筛选当前/指定教学周并附带特殊日期提醒；未导入当前学期时明确报告已导入学期列表，不返回其他学期课表。
+- **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（仅作无校历时的回退）；`get_my_schedule` 与今日/明日提醒统一调用 `ScheduleService.resolve_semester()`，优先选择覆盖所查日期且最近开始的本用户校历，无覆盖才按月份推断。未导入所选学期时明确报告已导入学期列表，不返回其他学期课表；显式指定学期仍按用户选择查询。
 
 ## 课表导入校验
 

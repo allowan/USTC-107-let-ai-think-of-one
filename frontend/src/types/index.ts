@@ -3,6 +3,18 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  evidence?: ChatEvidence[];
+  warnings?: string[];
+}
+
+export interface ChatEvidence {
+  id: string;
+  source: string;
+  title: string;
+  url: string;
+  published_at: string;
+  excerpt: string;
+  kind: 'official' | 'personal' | 'web' | 'course_review';
 }
 
 export interface TopicInfo {

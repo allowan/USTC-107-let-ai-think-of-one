@@ -129,3 +129,25 @@ test('SSE 明确 error 结束不会额外误报连接中断', async () => {
   assert.match(ui.messages()[1].content, /模型不可用/);
 });
 
+test('工具证据在回答前到达并跨帧去重，切换历史后仍可显示', async () => {
+  const evidence = { id: 'source-1', source: '通知.txt', title: '实际通知', url: 'https://example.org/a',
+    published_at: '', excerpt: '实际片段', kind: 'official' };
+  const frame = `data: ${JSON.stringify({ type: 'evidence', content: { evidence: [evidence], warnings: ['关键词降级'] } })}\n\n`;
+  const history = deferred();
+  const ui = harness([history], [frame.slice(0, 14), frame.slice(14), frame, 'data: {"type":"token","content":"回答"}\n\ndata: {"type":"done"}\n\n']);
+  type(ui);
+  history.resolve({ data: { messages: [] } }); await settle();
+  await sendButton(ui.render()).props.onClick();
+  assert.equal(ui.messages().length, 2);
+  assert.equal(ui.messages()[1].content, '回答');
+  assert.equal(ui.messages()[1].evidence.length, 1);
+  assert.equal(ui.messages()[1].warnings.length, 1);
+
+  const restored = deferred();
+  const next = harness([restored]); next.render();
+  restored.resolve({ data: { messages: [{ role: 'assistant', content: '历史回答', evidence: [evidence], warnings: ['关键词降级'] }] } });
+  await settle(); next.render();
+  assert.equal(next.messages()[0].evidence[0].excerpt, '实际片段');
+  assert.equal(next.messages()[0].warnings[0], '关键词降级');
+});
+

@@ -25,10 +25,11 @@ export const topicApi = {
     }),
 
   getHistory: (topicId: string) =>
-    api.get<{ messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(`/topics/${topicId}/history`),
+    api.get<{ messages: Array<Pick<import('@/types').ChatMessage, 'role' | 'content' | 'evidence' | 'warnings'>> }>(`/topics/${topicId}/history`),
 };
 
 export const settingsApi = {
+  diagnose: () => api.post<{ status: 'ok' | 'degraded'; checks: { llm: boolean; chromadb: boolean } }>('/health/diagnostics', {}, { timeout: 15000 }),
   getGlobal: () =>
     api.get<import('@/types').GlobalSettings>('/settings'),
 

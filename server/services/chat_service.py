@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -20,6 +21,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger("server")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def merge_evidence(existing: dict, artifact: object) -> dict:
+    """合并工具证据的可展示白名单；不把任意工具正文当作证据。"""
+    items: dict[str, dict] = {}
+    warnings: list[str] = []
+    for payload in (existing, artifact):
+        if not isinstance(payload, dict):
+            continue
+        raw_items = payload.get("evidence", [])
+        for item in raw_items[:40] if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict) or item.get("kind") not in {"official", "personal", "web", "course_review"}:
+                continue
+            fields = ("id", "source", "title", "url", "published_at", "excerpt")
+            if not all(isinstance(item.get(key), str) for key in fields) or not item["id"]:
+                continue
+            clean = {key: item[key][:2000 if key == "excerpt" else 512] for key in fields}
+            try:
+                parsed = urlsplit(clean["url"])
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                    clean["url"] = ""
+            except ValueError:
+                logger.warning("证据链接格式无效，隐藏链接")
+                clean["url"] = ""
+            clean["kind"] = item["kind"]
+            if clean["id"] in items or len(items) < 40:
+                items[clean["id"]] = clean
+        raw_warnings = payload.get("warnings", [])
+        for warning in raw_warnings[:10] if isinstance(raw_warnings, list) else []:
+            if isinstance(warning, str) and warning and warning[:512] not in warnings and len(warnings) < 10:
+                warnings.append(warning[:512])
+    return {"evidence": list(items.values()), "warnings": warnings}
 
 
 def _llm_credentials_configured() -> bool:
@@ -189,9 +222,9 @@ class ChatService:
 
     async def stream_chat_events(
         self, username: str, content: str, topic_id: str,
-    ) -> AsyncIterator[tuple[str, str]]:
+    ) -> AsyncIterator[tuple[str, str | dict]]:
         """Async generator yielding SSE-style (event_type, data) tuples."""
-        from langchain_core.messages import AIMessageChunk
+        from langchain_core.messages import AIMessageChunk, ToolMessage
 
         ctx = await self.get_agent(username)
         thread_id = self._thread_id(username, topic_id)
@@ -208,7 +241,12 @@ class ChatService:
                 stream_mode="messages",
             )) as messages:
                 async for msg_chunk, _metadata in messages:
-                    if isinstance(msg_chunk, AIMessageChunk):
+                    if isinstance(msg_chunk, ToolMessage):
+                        if msg_chunk.status != "error":
+                            evidence = merge_evidence({}, msg_chunk.artifact)
+                            if evidence["evidence"] or evidence["warnings"]:
+                                yield ("evidence", evidence)
+                    elif isinstance(msg_chunk, AIMessageChunk):
                         emitted_tool = False
                         if msg_chunk.tool_call_chunks:
                             for tc in msg_chunk.tool_call_chunks:

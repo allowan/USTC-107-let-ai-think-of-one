@@ -1,14 +1,20 @@
+import hashlib
 import logging
+import re
 import threading
+from collections.abc import Callable
+from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from llama_index.core import Document, VectorStoreIndex
+from llama_index.core.schema import NodeWithScore
 
 _base = Path(__file__).resolve().parent
 
 from . import config
 from . import events
-from .index_manager import RAGSystem, read_user_collection_for_backup
+from .index_manager import RAGSystem, read_collection_nodes, read_user_collection_for_backup
 
 logger = logging.getLogger("campus_rag.query")
 
@@ -74,9 +80,10 @@ def _get_user_index(user_id: str) -> VectorStoreIndex:
         return _user_indexes[user_id]
 
 
-def _format_nodes(nodes, empty_message: str) -> str:
+def _format_nodes(nodes, empty_message: str, warnings: list[str] | None = None) -> str:
+    prefix = "\n".join(warnings or [])
     if not nodes:
-        return empty_message
+        return f"{prefix}\n{empty_message}" if prefix else empty_message
     contexts = []
     for node in nodes:
         meta = node.metadata or {}
@@ -84,38 +91,144 @@ def _format_nodes(nodes, empty_message: str) -> str:
         if meta.get("url"):
             header += f" [源链接: {meta['url']}]"
         contexts.append(f"{header}\n{node.get_content()}")
-    return "\n\n".join(contexts)
+    return "\n\n".join(([prefix] if prefix else []) + contexts)
+
+
+def _get_public_index() -> VectorStoreIndex:
+    with _init_lock:
+        _ensure_init()
+        return _public_index
+
+
+def retrieve_notice_nodes(
+    query: str, *, top_k: int = 10, rerank: bool = True,
+    warnings: list[str] | None = None,
+) -> list[NodeWithScore]:
+    """检索公共节点，warnings 收集单路降级说明，包括无命中情形。"""
+    from .query_engine import retrieve_nodes
+
+    return retrieve_nodes(
+        query, top_k=top_k, rerank=rerank, warnings=warnings,
+        public_index_loader=_get_public_index, public_nodes_loader=read_collection_nodes,
+    )
+
+
+def retrieve_user_nodes(
+    query: str, user_id: str, *, top_k: int = 10, rerank: bool = True,
+    warnings: list[str] | None = None,
+) -> list[NodeWithScore]:
+    """仅检索指定用户节点，warnings 收集单路降级说明。"""
+    from .query_engine import retrieve_nodes
+
+    return retrieve_nodes(
+        query, top_k=top_k, rerank=rerank, warnings=warnings,
+        user_index_loader=lambda: _get_user_index(user_id),
+        user_nodes_loader=lambda: read_collection_nodes(user_id),
+    )
+
+
+def search_keyword_nodes(
+    query: str, *, user_id: str | None = None,
+    data_dir: str | None = None, top_k: int = 10,
+) -> list[NodeWithScore]:
+    """复用生产 BM25；默认只读目标集合，可显式指定离线评测语料目录。"""
+    if data_dir is not None and user_id is not None:
+        raise ValueError("不能同时指定个人集合和离线语料目录")
+    if not query.strip() or top_k <= 0:
+        return []
+    return create_keyword_search(user_id=user_id, data_dir=data_dir)(query, top_k)
+
+
+def create_keyword_search(
+    *, user_id: str | None = None, data_dir: str | None = None,
+) -> Callable[[str, int], list[NodeWithScore]]:
+    """构建生产 BM25 的只读快照查询函数，批量评测可复用而不反复建索引。"""
+    from .keyword_retriever import BM25Retriever
+
+    if data_dir is not None and user_id is not None:
+        raise ValueError("不能同时指定个人集合和离线语料目录")
+    retriever = (BM25Retriever(data_dir=data_dir) if data_dir is not None
+                 else BM25Retriever(nodes=read_collection_nodes(user_id)))
+    return retriever.retrieve
 
 
 def search_notices(query: str) -> str:
     """混合检索公共通知片段，不调用生成模型。"""
-    from .query_engine import retrieve_nodes
-    with _init_lock:
-        _ensure_init()
-        index = _public_index
-    return _format_nodes(retrieve_nodes(query, public_index=index), "未在通知中找到相关信息。")
+    warnings: list[str] = []
+    nodes = retrieve_notice_nodes(query, warnings=warnings)
+    return _format_nodes(nodes, "未在通知中找到相关信息。", warnings)
 
 
 def search_user_data(query: str, user_id: str) -> str:
     """混合检索用户私有片段，不调用生成模型。"""
-    from .query_engine import retrieve_nodes
-    return _format_nodes(retrieve_nodes(query, user_index=_get_user_index(user_id)), "未在个人数据中找到相关信息。")
+    warnings: list[str] = []
+    nodes = retrieve_user_nodes(query, user_id, warnings=warnings)
+    return _format_nodes(nodes, "未在个人数据中找到相关信息。", warnings)
+
+
+def _evidence_artifact(nodes: list[NodeWithScore], kind: str, warnings: list[str]) -> dict:
+    evidence = []
+    for node in nodes:
+        meta = node.metadata or {}
+        text = node.get_content()
+        source = str(meta.get("source") or "未知来源")
+        title_match = re.search(r"(?m)^标题[：:]\s*(.+)$", text)
+        title = str(meta.get("title") or (title_match[1] if title_match else source))
+        published = str(meta.get("publish_date") or meta.get("published_at") or "")
+        if not published:
+            matched = re.search(r"(?m)^(?:发布日期|发布时间)[：:]\s*(\d{4}-\d{2}-\d{2})", text)
+            published = matched[1] if matched else ""
+        try:
+            published = date.fromisoformat(published[:10]).isoformat() if published else ""
+        except ValueError:
+            logger.warning("证据发布日期无效，保留为未知")
+            published = ""
+        url = str(meta.get("url") or "")
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                url = ""
+        except ValueError:
+            logger.warning("证据来源链接无效，隐藏链接")
+            url = ""
+        evidence.append({
+            "id": hashlib.sha256(f"{kind}\0{source}\0{node.node.node_id}".encode()).hexdigest(),
+            "source": source, "title": title, "url": url, "published_at": published,
+            "excerpt": text[:2000], "kind": kind,
+        })
+    return {"evidence": evidence, "warnings": warnings}
+
+
+def search_notices_with_evidence(query: str) -> tuple[str, dict]:
+    """从一次通知检索生成正文与真实节点证据，供 Agent 工具使用。"""
+    warnings: list[str] = []
+    nodes = retrieve_notice_nodes(query, warnings=warnings)
+    return _format_nodes(nodes, "未在通知中找到相关信息。", warnings), _evidence_artifact(nodes, "official", warnings)
+
+
+def search_user_data_with_evidence(query: str, user_id: str) -> tuple[str, dict]:
+    """从指定用户的一次检索生成正文与证据，不混入其他用户资料。"""
+    warnings: list[str] = []
+    nodes = retrieve_user_nodes(query, user_id, warnings=warnings)
+    return _format_nodes(nodes, "未在个人数据中找到相关信息。", warnings), _evidence_artifact(nodes, "personal", warnings)
 
 
 def search_notices_answer(query: str) -> str:
     """搜索官方通知，经 LLM 总结后返回回答。"""
-    with _init_lock:
-        _ensure_init()
-        index = _public_index
     from .query_engine import get_rag_response
-    return get_rag_response(query, public_index=index, data_dir=str(_base / "data"))
+    return get_rag_response(
+        query, public_index_loader=_get_public_index,
+        public_nodes_loader=read_collection_nodes,
+    )
 
 
 def search_user_data_answer(query: str, user_id: str) -> str:
     """搜索用户个人数据，经 LLM 总结后返回回答。"""
-    user_idx = _get_user_index(user_id)
     from .query_engine import get_rag_response
-    return get_rag_response(query, user_index=user_idx)
+    return get_rag_response(
+        query, user_index_loader=lambda: _get_user_index(user_id),
+        user_nodes_loader=lambda: read_collection_nodes(user_id),
+    )
 
 
 def _enrich_url_metadata(documents: list) -> None:

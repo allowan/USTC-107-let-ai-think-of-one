@@ -33,5 +33,11 @@
   {"query": "中秋月饼包装设计征集", "expect": ["中秋月饼包装"]},
   {"query": "瀚海22超算系统怎么申请使用", "expect": ["瀚海22"]},
   {"query": "考研考场规则有哪些", "expect": ["考场规则"]},
-  {"query": "教学楼教室示意图在哪里看", "expect": ["教学楼教室示意图"]}
+  {"query": "教学楼教室示意图在哪里看", "expect": ["教学楼教室示意图"]},
+  {"query": "2026年秋季学期本科生选课", "expect": ["20425_2026年秋季学期本科生选课通知"], "category": "explicit_year_audience"},
+  {"query": "2026年秋季学期研究生选课与本科生选课通知分别是什么", "expect": ["20425_2026年秋季学期本科生选课通知", "3498_2026年秋季学期研究生网上选课须知"], "category": "multi_source"},
+  {"query": "2026年本科生夏季和秋季学期选课通知", "expect": ["20153_2026年夏季学期本科生选课通知", "20425_2026年秋季学期本科生选课通知"], "category": "semester_conflict"},
+  {"query": "量子奶茶传送门的开放时间", "expect": [], "category": "no_answer"},
+  {"query": "2099年秋季学期本科生选课截止时间", "expect": [], "category": "no_answer_wrong_year"},
+  {"query": "zzzxqvqzz", "expect": [], "category": "no_answer_oov"}
 ]
