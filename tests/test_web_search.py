@@ -201,9 +201,9 @@ class WebSearchProviderTest(unittest.TestCase):
         from tools import search
         os.environ["WEBSEARCH_PROVIDER"] = "tavily"
         os.environ.pop("TAVILY_API_KEY", None)
-        with patch.object(search, "search_web_text", return_value="兜底结果") as ddg:
+        with patch.object(search, "_search_web_results", return_value=[{"title": "兜底结果", "url": "https://example.com"}]) as ddg:
             result = search.search_web.invoke({"query": "任意查询"})
-        self.assertEqual(result, "兜底结果")
+        self.assertEqual(result, "1. [兜底结果](https://example.com)")
         ddg.assert_called_once_with("任意查询")
 
     def test_ddg_provider_skips_tavily(self):
@@ -211,9 +211,9 @@ class WebSearchProviderTest(unittest.TestCase):
         os.environ["WEBSEARCH_PROVIDER"] = "ddg"
         os.environ["TAVILY_API_KEY"] = "tvly-test-key"
         with patch.object(search, "_search_tavily_results") as tavily:
-            with patch.object(search, "search_web_text", return_value="ddg 结果"):
+            with patch.object(search, "_search_web_results", return_value=[{"title": "ddg 结果", "url": "https://example.com"}]):
                 result = search.search_web.invoke({"query": "任意查询"})
-        self.assertEqual(result, "ddg 结果")
+        self.assertEqual(result, "1. [ddg 结果](https://example.com)")
         tavily.assert_not_called()
 
 

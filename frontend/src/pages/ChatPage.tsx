@@ -15,7 +15,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTopicStore } from '@/stores/topicStore';
 import { settingsApi, topicApi } from '@/services/api';
-import type { ChatMessage, GlobalSettings } from '@/types';
+import type { ChatEvidence, ChatMessage, GlobalSettings } from '@/types';
 import { normalizeAutoLink } from '@/utils/markdownLinks';
 
 type ChatMarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
@@ -84,6 +84,36 @@ const MARKDOWN_COMPONENTS: Components = {
   table: MarkdownTableRenderer,
 };
 const MARKDOWN_PLUGINS = [remarkGfm];
+
+interface EvidenceCardsProps {
+  evidence: ChatEvidence[];
+  warnings: string[];
+}
+
+function EvidenceCards({ evidence, warnings }: EvidenceCardsProps) {
+  const labels = { official: '官方通知', personal: '个人资料', web: '公开网页', course_review: '学生评价（主观参考）' };
+  return <>
+    {warnings.map(warning => <div role="status" key={warning} style={{ color: '#ad6800', marginTop: 8 }}>{warning}</div>)}
+    {evidence.length > 0 && <details style={{ marginTop: 12, borderTop: '1px solid #eee', paddingTop: 8 }}>
+      <summary style={{ cursor: 'pointer' }}>本轮检索资料（{evidence.length} 个片段）</summary>
+      <p style={{ color: '#666', fontSize: 13 }}>以下是工具实际返回的资料，供核对回答；不代表回答中的每句话均已核验。片段最多展示 2000 字。</p>
+      {evidence.map(item => {
+        let url = '';
+        try {
+          const parsed = new URL(item.url);
+          if (['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password) url = item.url;
+        } catch { /* 缺少或非法链接时只显示片段。 */ }
+        return <details key={item.id} style={{ marginTop: 8, padding: 10, border: '1px solid #ddd', borderRadius: 8 }}>
+          <summary style={{ cursor: 'pointer' }}>{item.title || item.source} · {labels[item.kind]}</summary>
+          <div style={{ fontSize: 13, color: '#666', marginTop: 8 }}>{item.source} · {item.published_at ? `发布于 ${item.published_at}` : '发布日期未知'}</div>
+          <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflowY: 'auto', margin: '8px 0' }}>{item.excerpt}</div>
+          {url && <a href={url} target="_blank" rel="noopener noreferrer">查看原文</a>}
+        </details>;
+      })}
+    </details>}
+  </>;
+}
+
 const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
   const isUser = msg.role === 'user';
   return (
@@ -102,6 +132,7 @@ const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
             >
               {msg.content}
             </ReactMarkdown>
+            <EvidenceCards evidence={msg.evidence || []} warnings={msg.warnings || []} />
           </div>
         )}
       </div>
@@ -113,6 +144,8 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [historyState, setHistoryState] = useState<{ topicId: string; status: 'loading' | 'ready' | 'error' }>({ topicId: '', status: 'loading' });
+  const [historyReload, setHistoryReload] = useState(0);
   const [statusText, setStatusText] = useState<string>('');
   const [modelSettings, setModelSettings] = useState<GlobalSettings | null>(null);
   const [modelSettingsLoading, setModelSettingsLoading] = useState(true);
@@ -124,6 +157,7 @@ export default function ChatPage() {
   const autoCreatedRef = useRef(false);
   const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
   const { message } = App.useApp();
+  const historyReady = historyState.topicId === activeTopicId && historyState.status === 'ready';
 
   useEffect(() => () => { abortControllerRef.current?.abort(); }, []);
 
@@ -176,6 +210,7 @@ export default function ChatPage() {
 
     let cancelled = false;
     setMessages([]);
+    setHistoryState({ topicId: activeTopicId, status: 'loading' });
     if (activeTopicId) {
       topicApi.getHistory(activeTopicId).then(({ data }) => {
         if (cancelled) return;
@@ -184,14 +219,19 @@ export default function ChatPage() {
             id: `${activeTopicId}-${i}`,
             role: m.role,
             content: m.content,
+            evidence: m.evidence,
+            warnings: m.warnings,
             timestamp: Date.now(),
           }));
           setMessages(msgs);
         }
-      }).catch(() => {});
+        setHistoryState({ topicId: activeTopicId, status: 'ready' });
+      }).catch(() => {
+        if (!cancelled) setHistoryState({ topicId: activeTopicId, status: 'error' });
+      });
     }
     return () => { cancelled = true; };
-  }, [activeTopicId]);
+  }, [activeTopicId, historyReload]);
 
   // Navigating away from the chat page should not leave a stream running
   // (abort on unmount is the same mechanism as the stop button).
@@ -232,7 +272,8 @@ export default function ChatPage() {
   const send = async () => {
     // loading 时拦截：Enter 键不经过按钮的 loading 态，不拦截会并行发两条流，
     // token 交错追加进同一条消息导致输出错乱。
-    if (loading) return;
+    // 历史快照就绪前禁止写入本地消息，避免迟到的快照覆盖新一轮对话。
+    if (loading || !historyReady) return;
     const content = input.trim();
     if (!content) return;
     if (!activeTopicId) { message.warning('请先在左侧创建一个话题'); return; }
@@ -273,6 +314,7 @@ export default function ChatPage() {
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let terminalEvent = false;
 
       while (true) {
         if (abortController.signal.aborted) break;
@@ -293,10 +335,25 @@ export default function ChatPage() {
           if (abortController.signal.aborted) break;
           if (line.startsWith('data: ')) {
             const data = JSON.parse(line.slice(6));
-            if (data.type === 'thinking') {
+            if (data.type === 'done') {
+              terminalEvent = true;
+            } else if (data.type === 'thinking') {
               setStatusText('Thinking...');
             } else if (data.type === 'tool_use') {
               setStatusText(`Using tool: ${data.content}`);
+            } else if (data.type === 'evidence') {
+              setMessages(prev => {
+                if (useTopicStore.getState().activeTopicId !== topicId) return prev;
+                const last = prev[prev.length - 1];
+                const current: ChatMessage = last?.role === 'assistant' ? last : {
+                  id: `${Date.now()}-evidence`, role: 'assistant', content: '', timestamp: Date.now(),
+                };
+                const incoming: ChatEvidence[] = Array.isArray(data.content?.evidence) ? data.content.evidence : [];
+                const evidence = [...new Map([...(current.evidence || []), ...incoming].map(item => [item.id, item])).values()].slice(0, 40);
+                const warnings = [...new Set<string>([...(current.warnings || []), ...(Array.isArray(data.content?.warnings) ? data.content.warnings : [])])].slice(0, 10);
+                const updated = { ...current, evidence, warnings };
+                return last?.role === 'assistant' ? [...prev.slice(0, -1), updated] : [...prev, updated];
+              });
             } else if (data.type === 'token') {
               setStatusText('');
               setMessages((prev) => {
@@ -309,12 +366,16 @@ export default function ChatPage() {
                 return [...prev, { id: Date.now().toString(), role: 'assistant', content: data.content, timestamp: Date.now() }];
               });
             } else if (data.type === 'error') {
+              terminalEvent = true;
               setStatusText('');
               if (useTopicStore.getState().activeTopicId !== topicId) return;
               setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'assistant', content: `错误：${data.content}`, timestamp: Date.now() }]);
             }
           }
         }
+      }
+      if (!abortController.signal.aborted && !terminalEvent) {
+        throw new Error('连接提前结束，回答可能不完整，请核对后再继续。');
       }
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -385,7 +446,14 @@ export default function ChatPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
       <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
-        {messages.length === 0 && !loading && <Empty description="开始和 AI 助手对话吧" style={{ marginTop: 120 }} />}
+        {activeTopicId && !historyReady && (
+          <div role="status" style={{ textAlign: 'center', padding: 24 }}>
+            {historyState.topicId === activeTopicId && historyState.status === 'error' ? (
+              <>对话历史加载失败，请重试后发送。<Button onClick={() => setHistoryReload((value) => value + 1)}>重新加载</Button></>
+            ) : <><LoadingOutlined /> 正在加载对话历史…</>}
+          </div>
+        )}
+        {messages.length === 0 && !loading && historyReady && <Empty description="开始和 AI 助手对话吧" style={{ marginTop: 120 }} />}
         {messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)}
         {loading && (
           <div className="stream-status">
@@ -437,7 +505,7 @@ export default function ChatPage() {
               停止生成
             </Button>
           ) : (
-            <Button type="primary" icon={<SendOutlined />} onClick={send} disabled={!input.trim()}>
+            <Button type="primary" icon={<SendOutlined />} onClick={send} disabled={!input.trim() || !historyReady}>
               发送
             </Button>
           )}

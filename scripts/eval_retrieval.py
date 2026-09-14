@@ -1,146 +1,142 @@
-"""检索召回率评测：对比 query 真值与检索结果 top-k 命中情况。
+"""复用生产检索的离线 BM25 / 在线混合检索评测。
 
-用法：
-    python scripts/eval_retrieval.py              # BM25 模式（离线，默认）
-    python scripts/eval_retrieval.py --vector     # 向量检索模式（需嵌入服务可用）
-
-输出逐条命中明细 + Recall@1/3/5/10 与 MRR@10 汇总。真值见
-tests/retrieval_ground_truth.json（expect 为命中即算对的来源文件名子串列表）。
-
-该脚本是迭代检索参数（chunk、top_k、重排序）的靶子，不是 pytest 单测——
-语料或真值变化后直接重跑。BM25 模式不经过嵌入/LLM，随时可跑；向量模式
-走与生产一致的 campus_rag.search_notices 公开接口（解析其"来源"标注），
-不触碰模块内部实现。
+expect 中每个子串都是一个必需来源；expect=[] 是库内无答案负例。
+来源命中不代表答案、日期或适用人群正确，需另行审查答案。
 """
 from __future__ import annotations
 
+import argparse
 import json
-import os
-import re
 import sys
+from collections import defaultdict
 from pathlib import Path
+from time import perf_counter
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
 TRUTH_PATH = ROOT / "tests" / "retrieval_ground_truth.json"
 DATA_DIR = ROOT / "campus_rag" / "data"
-
 K_VALUES = (1, 3, 5, 10)
 TOP_K = max(K_VALUES)
 
 
-def _load_corpus(data_dir: Path) -> list[tuple[str, str]]:
-    """读 data 目录下所有 .txt，返回 [(source, content), ...]。"""
-    out = []
-    for fname in sorted(os.listdir(str(data_dir))):
-        if not fname.endswith(".txt"):
-            continue
-        with open(data_dir / fname, encoding="utf-8") as f:
-            content = f.read()
-        if content.strip():
-            out.append((fname, content))
-    return out
+def _ranked_sources(
+    query: str, *, hybrid: bool = False, rerank: bool = True,
+    keyword_search: Callable | None = None,
+) -> list[str]:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    if hybrid:
+        from campus_rag import retrieve_notice_nodes
 
+        warnings: list[str] = []
+        nodes = retrieve_notice_nodes(query, top_k=TOP_K, rerank=rerank, warnings=warnings)
+        if warnings:
+            raise RuntimeError("混合检索发生降级，不能计入完整混合检索基线")
+    else:
+        from campus_rag import search_keyword_nodes
 
-def _vector_ranked_sources(query: str) -> list[str]:
-    """走向量检索公开接口，从格式化结果的 [来源: ...] 标注解析来源序列。"""
-    sys.path.insert(0, str(ROOT))
-    from campus_rag import search_notices
-
-    text = search_notices(query)
-    return re.findall(r"\[来源: ([^\]]+)\]", text)
+        nodes = (keyword_search(query, TOP_K) if keyword_search else
+                 search_keyword_nodes(query, data_dir=str(DATA_DIR), top_k=TOP_K))
+    return [str(node.node.metadata.get("source", "")) for node in nodes]
 
 
 def _first_hit_rank(ranked_sources: list[str], expect: list[str]) -> int | None:
-    """返回首个命中块的名次（1 起），未命中返回 None。"""
     for rank, source in enumerate(ranked_sources, start=1):
-        if any(e in source for e in expect):
+        if any(expected in source for expected in expect):
             return rank
     return None
 
 
-def main() -> int:
-    use_vector = "--vector" in sys.argv
-    truth = json.loads(TRUTH_PATH.read_text(encoding="utf-8"))
-    corpus = _load_corpus(DATA_DIR)
-
-    if use_vector:
-        print("模式：向量检索（campus_rag.search_notices，需嵌入服务）")
-
-        def ranked_sources(query: str) -> list[str]:
-            return _vector_ranked_sources(query)
-    else:
-        if not corpus:
-            print("语料为空：campus_rag/data 下没有 .txt 文件，无法评测")
-            return 1
-        print(f"模式：BM25（离线，语料 {len(corpus)} 篇）")
-        # 语料只建一次索引：先一次性完成分词与 BM25 构建。
-        # 不用 keyword_retriever.BM25Retriever：其检索结果丢弃来源元数据，
-        # 无法满足评测的来源归因需求；此处用生产同款参数（1024/50 切块 +
-        # jieba 分词）自建带 source 的索引。
-        from rank_bm25 import BM25Okapi
-        from llama_index.core import Document
-        from llama_index.core.node_parser import SentenceSplitter
-
-        splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=50)
-        chunks: list[str] = []
-        chunk_sources: list[str] = []
-        for source, content in corpus:
-            nodes = splitter.get_nodes_from_documents(
-                [Document(text=content, metadata={"source": source})]
-            )
-            for node in nodes:
-                text = node.get_content()
-                if text.strip():
-                    chunks.append(text)
-                    chunk_sources.append(source)
-        try:
-            import jieba
-            tokenize = lambda t: list(jieba.cut(t.lower()))
-        except ImportError:
-            tokenize = lambda t: re.findall(r"[一-鿿]+|[a-zA-Z0-9]+", t.lower())
-        bm25 = BM25Okapi([tokenize(c) for c in chunks])
-        print(f"索引：{len(chunks)} 个块")
-
-        def ranked_sources(query: str) -> list[str]:
-            scores = bm25.get_scores(tokenize(query))
-            top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:TOP_K]
-            return [chunk_sources[i] for i in top]
-
-    hits_at = {k: 0 for k in K_VALUES}
-    rr_sum = 0.0
-    misses: list[tuple[str, list[str]]] = []
-
+def evaluate(truth: list[dict], retrieve: Callable[[str], list[str]]) -> list[dict]:
+    """记录逐条检索结果和耗时，错误单独记录且不视作成功拒答。"""
+    rows = []
     for item in truth:
-        query, expect = item["query"], item["expect"]
+        started = perf_counter()
+        error = None
         try:
-            sources = ranked_sources(query)
+            sources = retrieve(item["query"])[:TOP_K]
         except Exception as exc:
-            print(f"[error] 检索失败：{query} — {exc}")
-            misses.append((query, expect))
-            continue
-        rank = _first_hit_rank(sources, expect)
-        if rank is not None:
-            for k in K_VALUES:
-                if rank <= k:
-                    hits_at[k] += 1
-            rr_sum += 1.0 / rank
-        else:
-            misses.append((query, expect))
+            # 评测需保留失败样本并继续下一条，避免服务异常导致指标虚高。
+            error = type(exc).__name__
+            print(f"[error] 检索失败：{item['query']} ({error})")
+            sources = []
+        rows.append({**item, "category": item.get("category", "general"), "sources": sources,
+                     "error": error, "seconds": perf_counter() - started})
+    return rows
 
-    n = len(truth)
-    print(f"\n=== 检索召回评测（{n} 条 query）===\n")
+
+def summarize(rows: list[dict]) -> dict:
+    """计算正例宏平均指标及成功执行的负例误召回率。"""
+    positives = [row for row in rows if row["expect"]]
+    negatives = [row for row in rows if not row["expect"] and row["error"] is None]
+    count = len(positives)
+    hits = {}
+    recall = {}
     for k in K_VALUES:
-        print(f"Recall@{k:<3} {hits_at[k]}/{n} = {hits_at[k] / n:.1%}")
-    print(f"MRR@{TOP_K:<4} {rr_sum / n:.3f}")
+        hits[k] = sum(_first_hit_rank(row["sources"][:k], row["expect"]) is not None
+                      for row in positives) / count if count else 0.0
+        recall[k] = sum(sum(any(expected in source for source in row["sources"][:k])
+                                   for expected in row["expect"]) / len(row["expect"])
+                        for row in positives) / count if count else 0.0
+    rr = sum(1 / rank if (rank := _first_hit_rank(row["sources"], row["expect"])) else 0
+             for row in positives)
+    elapsed = [row["seconds"] for row in rows]
+    return {"positive_count": count, "negative_count": len(negatives),
+            "errors": sum(row["error"] is not None for row in rows),
+            "hit": hits, "recall": recall, "mrr": rr / count if count else 0.0,
+            "false_retrieval": sum(bool(row["sources"]) for row in negatives) / len(negatives) if negatives else None,
+            "seconds_total": sum(elapsed), "seconds_mean": sum(elapsed) / len(elapsed) if elapsed else 0.0,
+            "seconds_max": max(elapsed, default=0.0)}
 
-    print("\n=== 未命中明细 ===\n")
-    if misses:
-        for query, expect in misses:
-            print(f"  {query}  →  期望 {expect}")
-    else:
-        print("（全部命中）")
 
-    return 0
+def main(argv: list[str] | None = None) -> int:
+    """输出总体和分类指标，检索发生错误时返回非零退出码。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hybrid", "--vector", action="store_true", help="混合检索，需要嵌入服务；--vector 为兼容别名")
+    parser.add_argument("--no-rerank", action="store_true", help="关闭混合检索重排序")
+    args = parser.parse_args(argv)
+    truth = json.loads(TRUTH_PATH.read_text(encoding="utf-8"))
+    if not truth:
+        parser.error("真值集为空")
+    if not args.hybrid and not any(DATA_DIR.glob("*.txt")):
+        parser.error("离线语料为空")
+    print("模式：" + ("生产混合检索" if args.hybrid else "生产 BM25（离线，不调用嵌入/LLM）"))
+    keyword_search = None
+    if not args.hybrid:
+        sys.path.insert(0, str(ROOT))
+        from campus_rag import create_keyword_search
+
+        started = perf_counter()
+        keyword_search = create_keyword_search(data_dir=str(DATA_DIR))
+        print(f"离线索引构建耗时：{perf_counter() - started:.2f}s（不计入查询耗时）")
+    rows = evaluate(truth, lambda query: _ranked_sources(
+        query, hybrid=args.hybrid, rerank=not args.no_rerank, keyword_search=keyword_search,
+    ))
+    result = summarize(rows)
+    print(f"\n样本 {len(rows)}；正例 {result['positive_count']}；成功执行负例 {result['negative_count']}；错误 {result['errors']}")
+    for k in K_VALUES:
+        print(f"Hit@{k:<2} {result['hit'][k]:.1%}  Recall@{k:<2} {result['recall'][k]:.1%}")
+    print(f"MRR@10 {result['mrr']:.3f}")
+    false_rate = result["false_retrieval"]
+    print("无答案误召回率：" + (f"{false_rate:.1%}" if false_rate is not None else "N/A"))
+    timing_scope = "混合模式含首次初始化" if args.hybrid else "已复用离线索引"
+    print(f"查询耗时（{timing_scope}）：总计 {result['seconds_total']:.2f}s，均值 {result['seconds_mean']:.3f}s，最大 {result['seconds_max']:.3f}s")
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        groups[row["category"]].append(row)
+    for category, members in groups.items():
+        group = summarize(members)
+        negative_rate = group['false_retrieval']
+        negative_text = f"{negative_rate:.1%}" if negative_rate is not None else "N/A"
+        print(f"  {category}: n={len(members)} Hit@10={group['hit'][10]:.1%} Recall@10={group['recall'][10]:.1%} MRR={group['mrr']:.3f} 负例误召回={negative_text} 错误={group['errors']}")
+    print("\n未完整召回 / 负例误召回：")
+    for row in rows:
+        missing = [expected for expected in row["expect"] if not any(expected in source for source in row["sources"])]
+        if missing or (not row["expect"] and row["sources"]):
+            print(f"  {row['query']} → " + (f"缺少 {missing}" if missing else "无答案仍返回候选"))
+    print("说明：负例返回候选不等于最终回答幻觉；日期、适用人群、答案正确性须另行审查。")
+    return 1 if result["errors"] else 0
 
 
 if __name__ == "__main__":

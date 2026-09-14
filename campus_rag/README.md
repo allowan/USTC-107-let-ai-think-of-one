@@ -4,6 +4,8 @@
 
 ## 公开接口（经 `campus_rag/__init__.py` 导出）
 
+`search_notices_with_evidence(query)` / `search_user_data_with_evidence(query, user_id)` 返回 `(content, artifact)`，只检索一次并从同一组节点生成工具正文和证据。artifact 含 `evidence` 与 `warnings`；每片段包含稳定标识、来源、标题、链接、发布日期、最多 2000 字原文及类别。发布日期仅使用明确元数据/标记为发布日期的原文，不将正文里的活动日期当成发布日期。工具通过 LangChain `content_and_artifact` 持久化，普通字符串搜索接口保持兼容。
+
 跨模块使用一律通过包入口导出的公共 API，禁止直接导入内部函数或私有变量。
 
 ### 纯检索（不经过 LLM）
@@ -45,7 +47,11 @@ delete_user_data("local_user", "课表.txt")
 
 个人数据操作不再初始化公共通知索引。纯检索与回答查询复用索引对象及同一套检索器缓存；向量与关键词缓存均有容量上限。
 
+个人资料列表仅在集合不存在时返回空列表；存储读取失败会上抛，界面提示重试，避免把故障显示成“暂无资料”。追加资料仅在同一来源内去重，相同文字可以分别属于不同资料；去重读取失败时停止写入。
+
 ### 高级查询引擎
+
+个人备份读取接口 `read_user_data_for_backup(user_id)` 经 query 门面读取该用户集合的原始 `ids / metadatas / documents`，不读取向量、公共集合或配置，不初始化 RAGSystem、嵌入模型或 LLM。不存在的向量库目录或个人集合返回空列表；存储读取故障记录不含正文的日志并上抛，不能视为空资料。读取与本进程写入互斥；不承诺跨进程事务快照。返回的元数据是内部原始资料，导出服务仍须按白名单筛选，不能直接序列化整个元数据。
 
 ```python
 from campus_rag import RAGSystem, get_rag_response, rerank_nodes
@@ -57,6 +63,10 @@ nodes = rerank_nodes("查询文本", nodes, top_n=10)
 ```
 
 ### 事件时间索引（截止日/发生时间查询）
+
+事件读取接口严格区分“查询成功但无结果”和“事件库不可用”：`get_upcoming_events`、`get_upcoming_starts`、`get_notice_digest` 遇到存储或日期数据异常时记录日志并抛出稳定的 `EventQueryError`。启动期事件抽取仍为 best-effort；同步写入或删除失败必须向上传播，阻止版本推进。
+
+事件同步复用 `sync_events_from_documents`：默认保持启动阶段的尽力抽取，`strict=True` 将失败向上传播，`replace_all=True` 强制严格处理并复用同一写入事务替换快照；删除同样通过现有入口的 `strict=True` 控制。
 
 把通知里的关键字段抽取成结构化记录，使“未来 N 天内截止/发生的事件”成为确定性数据库查询（日期运算在代码里完成，不交给 LLM）。抽取用确定性正则（离线、非阻塞、可复现），入库时自动同步，无需手动调用。
 
@@ -77,11 +87,13 @@ sync_notice_events()
 get_notice_digest(days=7)
 ```
 
-返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `upsert_public_documents` / `replace_public_documents` / `delete_public_data` 与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；抽取失败只记日志，绝不影响 RAG 入库与检索。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
+返回 `list[dict]`，每项含 `source / title / category / audience / publish_date / deadline / deadline_text / event_start / event_end / location / url`。事件同步已挂入 `add_public_documents` / `upsert_public_documents` / `replace_public_documents` / `delete_public_data` 与应用启动（`lifespan` 调 `sync_notice_events`），按内容哈希 + 抽取器版本（`EXTRACTOR_VERSION`，升级抽取逻辑后递增以触发旧记录自动重抽）幂等；启动期抽取失败只记日志；同步路径采用严格模式，失败后可重试恢复一致性。因不依赖嵌入，即使未配嵌入/LLM，事件查询仍可用。
 
 抽取边界（评测可见 `scripts/eval_events.py`）：只抽日粒度；月粒度区间（“2026.9-2027.1”）、新闻式时间状语先行（“6月15日下午，…”）、网页表格转文本的跨行时间表（如选课阶段表）不在覆盖范围，由语义检索兜底。
 
 ### 追踪事件（今日面板用）
+
+恢复话题使用公共接口 `create_restored_topic(username, name, backup_id, index)`，由当前用户、备份 SHA256 和话题序号派生稳定 UUID5，名称添加“（恢复）”。同一备份重试复用话题 ID 和现有名称，返回 `created` 标志；不覆盖原话题，不修改表结构。对话正文由服务层通过 LangGraph 官方 checkpoint API 写入仅含用户/助手文字的新话题，已有 checkpoint 则跳过。
 
 ```python
 from campus_rag import track_event, untrack_event, list_tracked_events
@@ -162,12 +174,14 @@ pytest tests/test_campus_rag.py -v
 # 输出逐字段 P/R 与偏差明细；调整 events.py 抽取正则后重跑验证。
 python scripts/eval_events.py
 
-# 检索召回率评测：对比 query 真值（tests/retrieval_ground_truth.json）与
-# top-k 命中来源，输出 Recall@1/3/5/10 与 MRR@10 及未命中明细；
-# 默认 BM25 离线模式，--vector 走向量检索公开接口（需嵌入服务可达）。
-# 调整切块、top_k、重排序等检索参数后重跑对比。
+# 检索评测：复用生产 search_keyword_nodes，默认 BM25 离线模式。
+# 输出 Hit@K、MRR@10、各必需来源的 Recall@K、负例误召回率、分组指标与耗时。
+# expect 每个子串代表一个必需来源；空列表表示库内无答案，检索报错独立记录。
+# --hybrid 使用生产混合检索（需嵌入服务）；--vector 保留为其兼容别名。
+# --no-rerank 可关闭混合检索重排序。日期/答案正确性需另行人工或模型审查，
+# 不能由来源命中率推断；人工审查案例见 tests/answer_review_cases.json。
 python scripts/eval_retrieval.py
-python scripts/eval_retrieval.py --vector
+python scripts/eval_retrieval.py --hybrid --no-rerank
 
 # 快速冒烟（需嵌入/LLM API 可达）
 python -c "from campus_rag import search_notices; print(search_notices('今年暑假有什么活动？'))"
@@ -176,7 +190,17 @@ python -c "from campus_rag import search_notices_answer; print(search_notices_an
 
 嵌入或 LLM 不可用时，依赖网络的用例会自动跳过（不视为失败）。
 
+2026-09-13 本轮离线 BM25 基线：41 题（38 正例、3 无答案负例），Hit@1 为 84.2%，Hit@5/Recall@5 均为 100%，MRR@10 为 0.902；3 个负例中 2 个仍返回候选。该小样本结果只衡量当前语料的来源召回，不能证明最终回答准确率，也不能代表在线混合检索。新增负例揭示了常见词/错误年份仍会召回资料的边界，需用答案审查案例继续验证模型是否正确说明证据不足。
+
 ## 统一检索管线
+
+检索两路分别执行：向量服务或索引初始化失败（包括冷启动维度探测）时，从现有目标集合只读加载分块执行 BM25；关键词读取或检索失败时保留向量结果。单路失败会在返回文字中标明降级，即使剩余一路没有命中也保留说明；两路均失败则明确报错，不显示为空资料。降级不创建、修改或删除集合，不放宽入库维度检查。个人检索始终只读取指定用户集合。
+
+`retrieve_notice_nodes` / `retrieve_user_nodes` 提供同管线节点结果，支持 `top_k`、`rerank` 和可选 `warnings: list[str]`；调用方应展示收集到的降级说明。关键词降级首次读取整个已有集合，不依赖嵌入服务；缺失集合视为空语料，存储读取错误继续报告失败。
+
+`search_keyword_nodes(query, *, user_id=None, data_dir=None, top_k=10)` 复用生产 BM25，默认只读公共集合，指定 `user_id` 时只读该用户集合；评测可显式传入 `data_dir` 使用同一加载、切块、分词和匹配规则。个人集合与语料目录不能同时指定。
+
+`create_keyword_search(*, user_id=None, data_dir=None)` 返回同一只读快照的可复用查询函数（参数 `query, top_k=10`），供离线批量评测只建一次索引；语料变化后须重新创建。评测单独报告建索引耗时，不将重复建索引成本混入每题热查询时间。
 
 已确认的实现约定：Agent 检索工具只返回带来源的片段，由 Agent 生成最终回答；保留 `*_answer` 接口供独立调用。公共与个人检索共用向量召回、BM25 排名融合及可选重排序。
 
@@ -187,3 +211,5 @@ BM25 从当前 ChromaDB 集合读取分块，保留节点身份、来源和链�
 验证关注来源保留、删除/等量替换后的缓存一致性、失败降级以及工具内部 LLM 调用次数；实际首字时间、总耗时及端到端质量需要在线模型评测。
 
 本轮对抗性回归位于 `tests/test_integrity_regressions.py`，新增代码集中在共享召回、缓存失效和重排序响应校验，以及对应的故障测试；未增加新模块。关键词缓存首次构建需要读取并分词整个集合，后续查询复用；大语料的内存与冷启动耗时仍需专项测量。纯搜索现在也可能调用已配置的重排序服务，其耗时不能等同于纯本地检索。
+`backup_document_matches(source, content, chunks)` 使用入库相同的分块规则核对恢复副本完整性，包含重叠片段与序号检查，不初始化嵌入服务或 LLM。
+`group_user_document_chunks(data)` 为资料列表和备份共用原文合并入口：按父文档与字符坐标消除经过正文核对的重叠，保留不同文档和不同位置的重复文字；缺坐标、坐标冲突时保守保留片段，无法恢复分块时已丢弃的原始空白，不宣称字节级还原。个人资料去重以来源及整份文档的分块序列为依据，同时处理批内重复，不丢弃不同文档共享的片段。

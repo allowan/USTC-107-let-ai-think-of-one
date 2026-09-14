@@ -27,6 +27,10 @@ from pathlib import Path
 
 logger = logging.getLogger("campus_rag.events")
 
+
+class EventQueryError(RuntimeError):
+    """事件数据无法可靠读取，调用方不得把它解释为无结果。"""
+
 # 锚定项目根绝对路径：与 schedule.db / users.db 一致，相对路径会依赖启动 CWD。
 DB_PATH = Path(__file__).resolve().parent.parent / "events.db"
 
@@ -427,9 +431,9 @@ class EventStore:
             rows = db.execute("SELECT source, source_hash, extractor FROM notice_events").fetchall()
         return {r[0]: (r[1], r[2] or "") for r in rows}
 
-    def upsert_events(self, events: list[dict]) -> int:
-        """写入/更新事件，返回实际写入条数。source 为主键，重复即覆盖。"""
-        if not events:
+    def upsert_events(self, events: list[dict], *, replace_all: bool = False) -> int:
+        """增量更新或在同一事务内替换全量事件，失败时回滚。"""
+        if not events and not replace_all:
             return 0
         now = datetime.now().isoformat(timespec="seconds")
         rows = [
@@ -443,9 +447,11 @@ class EventStore:
             for e in events
         ]
         with closing(self._connect()) as db, db:
+            if replace_all:
+                db.execute("DELETE FROM notice_events")
             db.executemany(
-                """
-                INSERT OR REPLACE INTO notice_events (
+                ("INSERT" if replace_all else "INSERT OR REPLACE") + """
+                INTO notice_events (
                     source, source_hash, title, category, audience,
                     publish_date, deadline, deadline_text, event_start,
                     event_end, location, url, extracted_at, extractor
@@ -561,39 +567,45 @@ def _event_from_document(doc, today: date | None = None) -> dict | None:
     return event
 
 
-def sync_events_from_documents(documents: list, today: date | None = None) -> int:
+def sync_events_from_documents(
+    documents: list, today: date | None = None, *, strict: bool = False, replace_all: bool = False,
+) -> int:
     """从 Document 列表抽取并写入事件，返回新写入条数。
 
     幂等：内容哈希未变的通知直接跳过。单条解析失败只记日志、不中断整批，
-    保证事件抽取永远不会拖垮入库主流程。
+    strict 或全量替换时任何失败均向上传播，阻止同步版本推进。
     """
-    if not documents:
+    strict = strict or replace_all
+    if not documents and not replace_all:
         return 0
+
     store = get_event_store()
     try:
-        existing = store.existing_states()
+        existing = {} if replace_all else store.existing_states()
     except Exception:
+        if strict:
+            raise
         logger.warning("读取事件状态失败，本批全量重抽", exc_info=True)
         existing = {}
-    events: list[dict] = []
+    extracted: list[dict] = []
     for doc in documents:
         try:
             event = _event_from_document(doc, today=today)
         except Exception:
+            if strict:
+                raise
             logger.warning("事件抽取失败，跳过该文档", exc_info=True)
             continue
         if event is None:
             continue
-        # 内容哈希未变且抽取器版本一致才跳过：升级抽取逻辑（版本递增）
-        # 后旧记录会被自动重抽，新字段得以回填。
         if existing.get(event["source"]) == (event["source_hash"], EXTRACTOR_VERSION):
             continue
-        events.append(event)
-    if not events:
-        return 0
+        extracted.append(event)
     try:
-        return store.upsert_events(events)
+        return store.upsert_events(extracted, replace_all=replace_all)
     except Exception:
+        if strict:
+            raise
         logger.warning("事件写入失败，已跳过（不影响 RAG 入库）", exc_info=True)
         return 0
 
@@ -626,10 +638,13 @@ def sync_notice_events(data_dir: str | None = None, today: date | None = None) -
     return sync_events_from_data_dir(target, today=today)
 
 
-def delete_events_by_source(source: str) -> int:
+def delete_events_by_source(source: str, *, strict: bool = False) -> int:
+    """删除来源对应的事件；同步调用使用 strict 让失败向上传播。"""
     try:
         return get_event_store().delete_by_source(source)
     except Exception:
+        if strict:
+            raise
         logger.warning("删除事件失败 source=%s", source, exc_info=True)
         return 0
 
@@ -647,9 +662,9 @@ def get_upcoming_events(
     """查询未来 N 天内截止的校园事件（确定性日期运算，供 Agent 工具调用）。"""
     try:
         return get_event_store().query_upcoming(days=days, category=category, today=today)
-    except Exception:
+    except Exception as exc:
         logger.warning("查询即将截止事件失败", exc_info=True)
-        return []
+        raise EventQueryError("事件数据暂时不可用，请稍后重试。") from exc
 
 
 def get_upcoming_starts(
@@ -658,20 +673,18 @@ def get_upcoming_starts(
     """查询未来 N 天内开始发生的校园事件（展览/施工/班车等）。"""
     try:
         return get_event_store().query_upcoming_starts(days=days, category=category, today=today)
-    except Exception:
+    except Exception as exc:
         logger.warning("查询即将开始事件失败", exc_info=True)
-        return []
+        raise EventQueryError("事件数据暂时不可用，请稍后重试。") from exc
 
 
 def get_notice_digest(days: int = 7, today: date | None = None) -> dict:
     """聚合“最近新通知 + 临近事件（截止/开始）”两份数据（供前端今日面板消费）。
 
     days_left / days_since 等日期差在代码里算好（以服务端本地日期为基准），
-    前端与 LLM 不再做日期运算。best-effort：事件库不可用时返回空列表。
+    前端与 LLM 不再做日期运算。事件库不可用时抛出稳定错误，不伪装为空结果。
     """
     today = today or date.today()
-    upcoming: list[dict] = []
-    recent: list[dict] = []
     try:
         store = get_event_store()
         deadlines = store.query_upcoming(days=days, today=today)
@@ -689,8 +702,9 @@ def get_notice_digest(days: int = 7, today: date | None = None) -> dict:
         upcoming = deadlines + [e for e in starts if e["source"] not in seen]
         upcoming.sort(key=lambda e: e.get("deadline") or e.get("event_start") or "")
         recent = store.query_recent(days=days, today=today)
-    except Exception:
+    except Exception as exc:
         logger.warning("生成通知摘要失败", exc_info=True)
+        raise EventQueryError("事件数据暂时不可用，请稍后重试。") from exc
     for e in upcoming:
         if e.get("kind") == "deadline":
             when = e.get("deadline")

@@ -120,7 +120,7 @@ class TestChatRouteValidation(unittest.TestCase):
         from server.services.chat_service import get_chat_service
         # 校验在 handler 中先于业务逻辑执行，但依赖注入仍会解析，用 stub 顶替
         server.app.dependency_overrides[get_chat_service] = lambda: object()
-        cls.client = TestClient(server.app)
+        cls.client = TestClient(server.app, base_url="http://localhost")
 
     @classmethod
     def tearDownClass(cls):
@@ -264,7 +264,7 @@ class TestPersonalDataAggregation(unittest.TestCase):
         from fastapi.testclient import TestClient
         from server.services.rag_service import get_rag_service
         server.app.dependency_overrides[get_rag_service] = lambda: _OutOfOrderRAGStub()
-        cls.client = TestClient(server.app)
+        cls.client = TestClient(server.app, base_url="http://localhost")
 
     @classmethod
     def tearDownClass(cls):
@@ -299,7 +299,7 @@ class TestPersonalDataEmbedUnavailable(unittest.TestCase):
         from fastapi.testclient import TestClient
         from server.services.rag_service import get_rag_service
         server.app.dependency_overrides[get_rag_service] = lambda: _EmbedUnavailableRAGStub()
-        cls.client = TestClient(server.app)
+        cls.client = TestClient(server.app, base_url="http://localhost")
 
     @classmethod
     def tearDownClass(cls):
@@ -371,7 +371,7 @@ class TestSettingsRoutes(unittest.TestCase):
         import server
         from server.services.chat_service import get_chat_service
         server.app.dependency_overrides[get_chat_service] = lambda: object()
-        cls.client = TestClient(server.app)
+        cls.client = TestClient(server.app, base_url="http://localhost")
 
     @classmethod
     def tearDownClass(cls):

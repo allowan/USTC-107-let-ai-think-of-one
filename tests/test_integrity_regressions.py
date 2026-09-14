@@ -176,12 +176,19 @@ def test_answer_queries_reuse_public_index(monkeypatch: pytest.MonkeyPatch) -> N
     fake_rag = Mock()
     monkeypatch.setattr(query, "_rag", fake_rag)
     monkeypatch.setattr(query, "_public_index", None)
-    answer = Mock(return_value="回答")
-    monkeypatch.setattr(query_engine, "get_rag_response", answer)
+    node = NodeWithScore(node=TextNode(text="参考资料"), score=1.0)
+    vector = Mock(return_value=Mock(retrieve=Mock(return_value=[node])))
+    monkeypatch.setattr(query_engine, "_get_cached_retriever", vector)
+    monkeypatch.setattr(query_engine, "_get_bm25_cached", Mock(return_value=Mock(retrieve=Mock(return_value=[node]))))
+    monkeypatch.setattr(query_engine, "_get_reranker", lambda: None)
+    monkeypatch.setattr(config, "require_llm", lambda: SimpleNamespace(
+        chat=lambda messages: SimpleNamespace(message=SimpleNamespace(content="回答")),
+    ))
     for _ in range(20):
         assert query.search_notices_answer("问题") == "回答"
     assert fake_rag.get_or_create_public_index.call_count == 1
-    indexes = [call.kwargs["public_index"] for call in answer.call_args_list]
+    indexes = [call.args[0] for call in vector.call_args_list]
+    assert len(indexes) == 20
     assert all(index is indexes[0] for index in indexes)
 
 
@@ -236,6 +243,33 @@ def test_sync_replaces_before_deleting_and_collapses_updates(monkeypatch: pytest
     })
     assert [(doc.metadata["source"], doc.text) for doc in replace.call_args.args[0]] == [("a", "new")]
     remove.assert_called_once_with("b")
+
+
+def test_event_index_failure_propagates_after_vector_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rag = Mock()
+    monkeypatch.setattr(query, "_rag", fake_rag)
+    monkeypatch.setattr(query.events, "sync_events_from_documents", Mock(side_effect=OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        query.upsert_public_documents([Document(text="notice", metadata={"source": "a"})])
+    fake_rag.replace_documents.assert_called_once()
+
+
+def test_topic_delete_keeps_metadata_when_checkpoint_cleanup_fails() -> None:
+    from fastapi import HTTPException
+    from server.routes.topics import remove_topic
+
+    auth = Mock()
+    auth.get_topic.return_value = {"thread_id": "user-local_user-topic-1"}
+    chat = Mock()
+    chat.delete_thread = AsyncMock(side_effect=OSError("locked"))
+
+    async def scenario() -> None:
+        with pytest.raises(HTTPException) as caught:
+            await remove_topic("1", user="local_user", auth=auth, chat=chat)
+        assert caught.value.status_code == 503
+        auth.delete_topic.assert_not_called()
+
+    asyncio.run(scenario())
 
 
 def test_change_log_returns_latest_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,10 +547,10 @@ def test_bad_reranker_preserves_all_original_scores(monkeypatch: pytest.MonkeyPa
 
 def test_agent_search_tools_use_pure_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
     import main
-    notices = Mock(return_value="notice fragment")
-    personal = Mock(return_value="personal fragment")
-    monkeypatch.setattr(main, "search_notices", notices)
-    monkeypatch.setattr(main, "search_user_data", personal)
+    notices = Mock(return_value=("notice fragment", {"evidence": [], "warnings": []}))
+    personal = Mock(return_value=("personal fragment", {"evidence": [], "warnings": []}))
+    monkeypatch.setattr(main, "search_notices_with_evidence", notices)
+    monkeypatch.setattr(main, "search_user_data_with_evidence", personal)
     monkeypatch.setattr(config, "require_llm", Mock(side_effect=AssertionError("nested LLM")))
     assert main.search_campus_notices.invoke({"query": "q"}) == "notice fragment"
     assert main._make_search_my_data("local_user").invoke({"query": "q"}) == "personal fragment"

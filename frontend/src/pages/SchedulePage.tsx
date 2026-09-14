@@ -1,14 +1,26 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, App, Button, Empty, List, Select, Space, Spin, Tag, Typography } from 'antd';
-import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Empty, Select, Space, Spin, Tag, Typography } from 'antd';
+import { CalendarOutlined, CloudDownloadOutlined, FileAddOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import axios from 'axios';
 import { scheduleApi } from '@/services/api';
-import type { AcademicCalendar, ScheduleData, ScheduleImportPayload } from '@/types';
+import { readScheduleFile, scheduleImportError } from '@/utils/scheduleImport';
+import type { AcademicCalendar, ScheduleCourse, ScheduleData, ScheduleImportPreview } from '@/types';
 import AcademicCalendarModal from '@/components/Schedule/AcademicCalendarModal';
 import UstcScheduleImportModal from '@/components/Schedule/UstcScheduleImportModal';
+import ScheduleImportPreviewModal from '@/components/Schedule/ScheduleImportPreviewModal';
 
 const { Text, Title } = Typography;
 const weekdays = ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'];
+const sectionCount = 13;
+
+function hasValidGridPosition(course: ScheduleCourse): boolean {
+  const { weekday, start_section: start } = course;
+  const end = course.end_section ?? start;
+  // 异常导入数据不能通过 CSS Grid 隐式行列扩展课表。
+  return weekday !== null && Number.isInteger(weekday) && weekday >= 1 && weekday <= 7
+    && start !== null && Number.isInteger(start) && start >= 1
+    && end !== null && Number.isInteger(end) && end >= start && end <= sectionCount;
+}
 
 function addDays(value: string, days: number): Date {
   const result = new Date(`${value}T00:00:00`);
@@ -23,51 +35,13 @@ function localDate(value: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function parseCsv(text: string): ScheduleImportPayload {
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  if (lines.length < 2) throw new Error('CSV 至少需要表头和一行课程');
-  const headers = lines[0].split(',').map(value => value.trim());
-  const index = (name: string) => headers.indexOf(name);
-  const value = (cells: string[], name: string) => {
-    const position = index(name);
-    return position >= 0 ? cells[position]?.trim() || '' : '';
-  };
-  const courses = lines.slice(1).map(line => {
-    const cells = line.split(',').map(value => value.trim());
-    const sections = value(cells, 'sections').split(/[-~]/).map(Number).filter(Number.isFinite);
-    const weeks = value(cells, 'weeks').split(/[;，,]/).map(Number).filter(Number.isFinite);
-    return {
-      course_code: value(cells, 'course_code'),
-      name: value(cells, 'name'),
-      teachers: value(cells, 'teachers').split(/[;，]/).map(item => item.trim()).filter(Boolean),
-      credits: Number(value(cells, 'credits')) || null,
-      raw_schedule: value(cells, 'raw_schedule'),
-      meetings: [{
-        weekday: Number(value(cells, 'weekday')) || null,
-        sections,
-        weeks,
-        location: value(cells, 'location'),
-        start_time: value(cells, 'start_time') || null,
-        end_time: value(cells, 'end_time') || null,
-      }],
-    };
-  }).filter(course => course.name);
-  return { semester: '导入课表', courses };
-}
-
-async function readScheduleFile(file: File): Promise<ScheduleImportPayload> {
-  const content = await file.text();
-  if (file.name.toLowerCase().endsWith('.csv')) return parseCsv(content);
-  const payload = JSON.parse(content) as ScheduleImportPayload;
-  if (!payload.semester || !Array.isArray(payload.courses)) throw new Error('JSON 需要包含 semester 和 courses');
-  return payload;
-}
-
 export default function SchedulePage() {
   const { message } = App.useApp();
   const [data, setData] = useState<ScheduleData>({ semester: null, semesters: [], courses: [] });
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [importPreview, setImportPreview] = useState<ScheduleImportPreview | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [ustcImportVisible, setUstcImportVisible] = useState(false);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [calendar, setCalendar] = useState<AcademicCalendar | null>(null);
@@ -113,26 +87,39 @@ export default function SchedulePage() {
     try {
       const payload = await readScheduleFile(file);
       if (!payload.courses.length) throw new Error('文件中没有课程');
-      await scheduleApi.import(payload);
-      message.success(`已导入 ${payload.courses.length} 门课程`);
-      await load(payload.semester);
+      const response = await scheduleApi.preview(payload);
+      setImportError(null);
+      setImportPreview(response.data);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '课表文件导入失败');
+      message.error(scheduleImportError(error, '课表文件导入失败'));
     } finally {
       setImporting(false);
     }
   };
 
-  const sectionCount = useMemo(() => Math.max(
-    13,
-    ...data.courses.map(course => course.end_section || course.start_section || 0),
-  ), [data.courses]);
+  const confirmImport = async () => {
+    if (!importPreview || importPreview.errors.length || importing) return;
+    setImporting(true);
+    setImportError(null);
+    try {
+      await scheduleApi.import(importPreview.payload);
+      message.success(`已导入 ${importPreview.course_count} 门课程`);
+      setImportPreview(null);
+      await load(importPreview.payload.semester);
+    } catch (error) {
+      setImportError(scheduleImportError(error, '课表保存失败，请重试'));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const visibleCourses = useMemo(
     () => selectedWeek === null
       ? data.courses
       : data.courses.filter(course => course.weeks.length === 0 || course.weeks.includes(selectedWeek)),
     [data.courses, selectedWeek],
   );
+  const unplacedCourses = visibleCourses.filter(course => !hasValidGridPosition(course));
   const selectedWeekStart = calendar && selectedWeek
     ? addDays(calendar.start_date, (selectedWeek - 1) * 7)
     : null;
@@ -173,7 +160,7 @@ export default function SchedulePage() {
     { label: '上午', start: 1, end: 5 },
     { label: '下午', start: 6, end: 10 },
     { label: '晚上', start: 11, end: sectionCount },
-  ].filter(group => group.start <= sectionCount);
+  ];
   const courseCount = new Set(data.courses.map(course => course.course_code || course.name)).size;
 
   return (
@@ -202,7 +189,7 @@ export default function SchedulePage() {
           <Button icon={<CloudDownloadOutlined />} onClick={() => setUstcImportVisible(true)}>
             获取课表
           </Button>
-          <Button type="primary" icon={<FileAddOutlined />} loading={importing} onClick={() => fileInput.current?.click()}>
+          <Button type="primary" icon={<FileAddOutlined />} loading={importing} disabled={importPreview !== null} onClick={() => fileInput.current?.click()}>
             导入课表文件
           </Button>
           <input ref={fileInput} type="file" accept=".json,.csv,application/json,text/csv" hidden onChange={importFile} />
@@ -296,7 +283,7 @@ export default function SchedulePage() {
                   />
                 )),
               )}
-              {visibleCourses.filter(course => course.weekday && course.start_section).map(course => {
+              {visibleCourses.filter(hasValidGridPosition).map(course => {
                 const start = course.start_section || 1;
                 const span = Math.max(1, (course.end_section || start) - start + 1);
                 const time = course.start_time && course.end_time ? `${course.start_time}-${course.end_time}` : '';
@@ -316,16 +303,64 @@ export default function SchedulePage() {
               })}
             </div>
           </div>
-          {visibleCourses.some(course => !course.weekday || !course.start_section) && (
-            <List
-              size="small"
-              header="节次或星期待定的安排"
-              dataSource={visibleCourses.filter(course => !course.weekday || !course.start_section)}
-              renderItem={course => <List.Item key={course.id}>{course.name} · {course.location || '地点待定'} · {course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}</List.Item>}
-            />
+          {unplacedCourses.length > 0 && (
+            <section className="schedule-review" aria-labelledby="schedule-review-title">
+              <div className="schedule-review-heading">
+                <span className="schedule-review-icon"><InfoCircleOutlined /></span>
+                <div>
+                  <div className="schedule-review-title-row">
+                    <h2 id="schedule-review-title">待核对的安排</h2>
+                    <Tag color="gold">{unplacedCourses.length} 项</Tag>
+                  </div>
+                  <p>以下安排已保留，核对星期或节次后可重新导入。每天支持第 1–13 节。</p>
+                </div>
+              </div>
+              <ul className="schedule-review-list">
+                {unplacedCourses.map(course => {
+                  const weekdayValid = course.weekday !== null && Number.isInteger(course.weekday)
+                    && course.weekday >= 1 && course.weekday <= 7;
+                  const end = course.end_section ?? course.start_section;
+                  const sectionValid = course.start_section !== null && Number.isInteger(course.start_section)
+                    && course.start_section >= 1 && end !== null && Number.isInteger(end)
+                    && end >= course.start_section && end <= sectionCount;
+                  return (
+                    <li className="schedule-review-card" key={course.id}>
+                      <div className="schedule-review-card-heading">
+                        <h3>{course.name}</h3>
+                        <Space size={[0, 4]} wrap>
+                          {!weekdayValid && <Tag color="gold">{course.weekday === null ? '星期待定' : '星期异常'}</Tag>}
+                          {!sectionValid && <Tag color="gold">{course.start_section === null ? '节次待定' : '节次异常'}</Tag>}
+                        </Space>
+                      </div>
+                      <dl className="schedule-review-meta">
+                        <div><dt>地点</dt><dd>{course.location || '地点待定'}</dd></div>
+                        <div><dt>教师</dt><dd>{course.teachers.join('、') || '教师待定'}</dd></div>
+                        <div><dt>星期</dt><dd>{weekdayValid ? weekdays[course.weekday! - 1] : course.weekday === null ? '待定' : `原始值：${course.weekday}`}</dd></div>
+                        <div><dt>节次</dt><dd>{course.start_section === null ? '待定' : `第 ${course.start_section}${end === course.start_section ? '' : `–${end}`} 节`}</dd></div>
+                        <div className="schedule-review-meta-wide"><dt>周次</dt><dd>{course.weeks.length ? `第 ${course.weeks.join('、')} 周` : '全部周次'}</dd></div>
+                        {(course.start_time || course.end_time) && <div className="schedule-review-meta-wide"><dt>时间</dt><dd>{course.start_time || '待定'}–{course.end_time || '待定'}</dd></div>}
+                      </dl>
+                      {course.raw_schedule && (
+                        <details className="schedule-review-original">
+                          <summary>查看原始安排</summary>
+                          <p>{course.raw_schedule}</p>
+                        </details>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
           )}
         </>
       )}
+      <ScheduleImportPreviewModal
+        preview={importPreview}
+        saving={importing}
+        error={importError}
+        onConfirm={() => void confirmImport()}
+        onCancel={() => setImportPreview(null)}
+      />
       <UstcScheduleImportModal
         open={ustcImportVisible}
         onCancel={() => setUstcImportVisible(false)}

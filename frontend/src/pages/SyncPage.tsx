@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Card, Button, Statistic, Row, Col, Typography, App, Spin, Tag, Descriptions } from 'antd';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Alert, Card, Button, Statistic, Row, Col, Typography, App, Spin, Tag, Descriptions } from 'antd';
 import { SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, CloudServerOutlined } from '@ant-design/icons';
 import { syncApi } from '@/services/api';
 import type { SyncStatus, SyncResult } from '@/types';
@@ -12,24 +12,33 @@ export default function SyncPage() {
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [result, setResult] = useState<SyncResult | null>(null);
+  const [statusError, setStatusError] = useState(false);
+  const mounted = useRef(false);
+  const requestId = useRef(0);
 
   const fetchStatus = useCallback(async () => {
+    const id = ++requestId.current;
     setLoading(true);
     try {
       const { data } = await syncApi.getStatus();
+      if (!mounted.current || id !== requestId.current) return;
       setStatus(data);
+      setStatusError(false);
     } catch {
-      // 静默处理
+      if (mounted.current && id === requestId.current) setStatusError(true);
     } finally {
-      setLoading(false);
+      if (mounted.current && id === requestId.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchStatus();
+    mounted.current = true;
+    void fetchStatus();
+    return () => { mounted.current = false; requestId.current++; };
   }, [fetchStatus]);
 
   const handleSync = async () => {
+    if (statusError || loading || syncing || !status?.server_online) return;
     setSyncing(true);
     setResult(null);
     try {
@@ -59,15 +68,22 @@ export default function SyncPage() {
   return (
     <div>
       <h2 style={{ marginBottom: 24 }}>数据同步</h2>
+      {statusError && <Alert type="error" showIcon style={{ marginBottom: 16 }}
+        message="状态获取失败"
+        description={status ? '以下保留上次成功获取的状态，可能已过期。请重新获取后再同步。' : '无法获取同步状态，请检查本地后端并重试。'}
+      />}
+      <Button onClick={() => void fetchStatus()} loading={loading} disabled={syncing} style={{ marginBottom: 16 }}>
+        重新获取状态
+      </Button>
 
       <Row gutter={[24, 24]}>
         <Col xs={24} sm={12} lg={8}>
           <Card>
             <Statistic
-              title="服务端状态"
-              value={status?.server_online ? '在线' : '离线'}
-              valueStyle={{ color: status?.server_online ? '#52c41a' : '#ff4d4f' }}
-              prefix={status?.server_online ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
+              title={statusError && status ? '服务端状态（上次结果）' : '服务端状态'}
+              value={!status ? '未知' : status.server_online ? '在线' : '离线'}
+              valueStyle={{ color: !status || statusError ? '#888' : status.server_online ? '#52c41a' : '#ff4d4f' }}
+              prefix={!status || statusError ? <CloudServerOutlined /> : status.server_online ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
             />
           </Card>
         </Col>
@@ -94,7 +110,7 @@ export default function SyncPage() {
       <Card style={{ marginTop: 24 }}>
         <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="同步状态">
-            {status?.needs_sync ? (
+            {!status || statusError ? <Tag>等待获取最新状态</Tag> : status.needs_sync ? (
               <Tag color="orange">有待同步数据</Tag>
             ) : status?.server_online ? (
               <Tag color="green">已是最新</Tag>
@@ -109,13 +125,13 @@ export default function SyncPage() {
           icon={<SyncOutlined spin={syncing} />}
           onClick={handleSync}
           loading={syncing}
-          disabled={!status?.server_online}
+          disabled={loading || statusError || !status?.server_online}
           size="large"
         >
           立即同步
         </Button>
 
-        {!status?.server_online && (
+        {status && !statusError && !status.server_online && (
           <div style={{ marginTop: 12 }}>
             <Text type="secondary">
               服务端离线时，应用使用本地缓存的公共数据正常运行。下次上线时自动同步。

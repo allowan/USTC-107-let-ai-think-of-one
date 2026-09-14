@@ -1,11 +1,16 @@
 # auth.py
 # 本地单用户形态：无登录、无 JWT，get_user() 恒返回 "local_user"。
 # 本模块只保留话题、工具偏好、追踪事件三张业务表的 CRUD。
+import json
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 # 锚定项目根目录的绝对路径：相对路径 "./users.db" 依赖启动 CWD，
 # 从其他目录启动会静默新建空库导致话题"凭空消失"。
@@ -60,6 +65,28 @@ def create_topic(username: str, name: str) -> dict:
     db.commit()
     db.close()
     return {"id": tid, "name": name, "thread_id": _thread_id(username, tid)}
+
+
+def create_restored_topic(username: str, name: str, backup_id: str, index: int) -> dict:
+    """为同一用户、备份和序号复用恢复副本，不重命名或覆盖已有话题。"""
+    identity = json.dumps([username, backup_id, index], ensure_ascii=False, separators=(",", ":"))
+    topic_id = uuid.uuid5(uuid.NAMESPACE_URL, f"campus-backup-topic:{identity}").hex
+    try:
+        with SessionLocal() as db:
+            topic = db.query(Topic).filter_by(id=topic_id).first()
+            created = topic is None
+            if topic is None:
+                topic = Topic(id=topic_id, username=username, name=f"{name}（恢复）")
+                db.add(topic)
+                db.commit()
+                db.refresh(topic)
+            elif topic.username != username:
+                raise ValueError("恢复话题标识冲突")
+            return {"id": topic.id, "name": topic.name,
+                    "thread_id": _thread_id(username, topic.id), "created": created}
+    except (SQLAlchemyError, ValueError):
+        logger.error("创建恢复话题失败")
+        raise
 
 
 def list_topics(username: str) -> list:

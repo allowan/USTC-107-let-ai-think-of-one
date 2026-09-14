@@ -6,9 +6,12 @@
 """
 
 import asyncio
+from datetime import date
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from campus_rag import EventQueryError
 from server.deps import get_user
 from server.services.rag_service import RAGService, get_rag_service
 
@@ -21,43 +24,67 @@ async def digest_api(
     rag: RAGService = Depends(get_rag_service),
 ):
     # 事件库为同步 SQLite 查询，丢线程池避免阻塞事件循环（AGENTS.md 3.4）。
-    return await asyncio.to_thread(rag.get_digest, days)
+    try:
+        return await asyncio.to_thread(rag.get_digest, days)
+    except EventQueryError:
+        raise HTTPException(status_code=503, detail="事件数据暂时不可用，请稍后重试。")
 
 
 @router.get("/tracked")
 async def list_tracked(user: str = Depends(get_user)):
     from campus_rag import list_tracked_events
-    return {"items": list_tracked_events(user)}
+    return {"items": await asyncio.to_thread(list_tracked_events, user)}
+
+
+def _optional_text(body: dict, key: str, limit: int) -> str | None:
+    value = body.get(key)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{key} 必须是字符串")
+    value = value.strip()
+    if len(value) > limit:
+        raise HTTPException(status_code=400, detail=f"{key} 不能超过 {limit} 个字符")
+    return value or None
 
 
 @router.post("/tracked")
 async def add_tracked(body: dict, user: str = Depends(get_user)):
-    source = (body.get("source") or "").strip()
+    source = _optional_text(body, "source", 1024) or ""
     if not source:
         raise HTTPException(status_code=400, detail="source 不能为空")
-    date_kind = body.get("date_kind") or "deadline"
+    date_kind = _optional_text(body, "date_kind", 16) or "deadline"
     if date_kind not in ("deadline", "start"):
         raise HTTPException(status_code=400, detail="date_kind 必须是 deadline 或 start")
-    date_value = body.get("date_value")
+    date_value = _optional_text(body, "date_value", 10)
     if date_value:
-        # 前端按 ISO 解析计算剩余天数，非法值会让面板显示 NaN——入口即拦
-        from datetime import date
         try:
-            date.fromisoformat(str(date_value).strip())
+            if date.fromisoformat(date_value).isoformat() != date_value:
+                raise ValueError
         except ValueError:
             raise HTTPException(status_code=400, detail="date_value 必须是 ISO 日期（YYYY-MM-DD）")
+    url = _optional_text(body, "url", 2048)
+    if url:
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or any(char.isspace() for char in url)):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=400, detail="url 必须是无认证信息的 HTTP(S) 地址")
     from campus_rag import track_event
-    return track_event(
+    return await asyncio.to_thread(
+        track_event,
         username=user, source=source,
-        title=body.get("title"), category=body.get("category"),
+        title=_optional_text(body, "title", 500), category=_optional_text(body, "category", 100),
         date_kind=date_kind, date_value=date_value,
-        url=body.get("url"),
+        url=url,
     )
 
 
-@router.delete("/tracked/{source}")
+@router.delete("/tracked/{source:path}")
 async def remove_tracked(source: str, user: str = Depends(get_user)):
     from campus_rag import untrack_event
-    if not untrack_event(user, source):
+    if not await asyncio.to_thread(untrack_event, user, source):
         raise HTTPException(status_code=404, detail="未追踪该事件")
     return {"message": "已取消追踪"}

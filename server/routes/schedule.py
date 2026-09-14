@@ -1,27 +1,29 @@
 """Structured personal schedule routes."""
 
 import asyncio
+import logging
 from datetime import date, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field, model_validator
 
-from server.deps import get_user
+from server.deps import ensure_local_origin, get_user
 from server.services.academic_calendar import (
     AcademicCalendarParseError,
     parse_academic_calendar_ics,
 )
-from server.services.schedule_service import ScheduleService, get_schedule_service
+from server.services.schedule_service import ScheduleImportValidationError, ScheduleService, get_schedule_service
 from server.services.ustc_schedule import UstcScheduleParseError, parse_ustc_schedule
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
+logger = logging.getLogger(__name__)
 
 
 class Meeting(BaseModel):
-    weekday: int | None = Field(default=None, ge=1, le=7)
-    sections: list[int] = Field(default_factory=list)
-    weeks: list[int] = Field(default_factory=list)
+    weekday: Any = None
+    sections: list[Any] = Field(default_factory=list)
+    weeks: list[Any] = Field(default_factory=list)
     location: str = ""
     start_time: str | None = None
     end_time: str | None = None
@@ -75,17 +77,6 @@ class AcademicCalendarUpdate(BaseModel):
                 raise ValueError("调课或补课必须指定按星期几的课程安排")
             seen_dates.add(item.date)
         return self
-
-
-def ensure_local_origin(request: Request) -> None:
-    origin = request.headers.get("origin", "")
-    allowed_origin = (
-        not origin
-        or origin.startswith("http://localhost")
-        or origin.startswith("http://127.0.0.1")
-    )
-    if not allowed_origin:
-        raise HTTPException(status_code=403, detail="不允许的课表导入来源")
 
 
 @router.get("")
@@ -206,20 +197,60 @@ async def import_academic_calendar_ics(
     }
 
 
+@router.post("/preview")
+async def preview_schedule(
+    payload: ScheduleImport,
+    request: Request,
+    user: str = Depends(get_user),
+    service: ScheduleService = Depends(get_schedule_service),
+) -> dict:
+    """只读预览结构化课表，不替换已有记录。"""
+    ensure_local_origin(request)
+    return await asyncio.to_thread(
+        service.preview_import, user, payload.semester,
+        [course.model_dump() for course in payload.courses],
+    )
+
+
+@router.post("/preview-ustc")
+async def preview_ustc_schedule(
+    payload: UstcScheduleImport,
+    request: Request,
+    user: str = Depends(get_user),
+    service: ScheduleService = Depends(get_schedule_service),
+) -> dict:
+    """解析用户提供的教务 HTML/JSON 并只读预览。"""
+    ensure_local_origin(request)
+    try:
+        parsed = await asyncio.to_thread(parse_ustc_schedule, payload.content, payload.filename)
+    except UstcScheduleParseError as exc:
+        logger.warning("教务课表预览解析失败：%s", type(exc).__name__)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await asyncio.to_thread(service.preview_import, user, parsed["semester"], parsed["courses"])
+
+
 @router.post("/import")
 async def import_schedule(
     payload: ScheduleImport,
     request: Request,
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
-):
+) -> dict:
+    """完整校验结构化课表后替换目标学期。"""
     ensure_local_origin(request)
+    courses = [course.model_dump() for course in payload.courses]
     if not payload.courses:
         raise HTTPException(status_code=400, detail="未读取到课程")
-    count = await asyncio.to_thread(
-        service.replace, user, payload.semester,
-        [course.model_dump() for course in payload.courses],
-    )
+    try:
+        count = await asyncio.to_thread(
+            service.replace, user, payload.semester,
+            courses,
+        )
+    except ScheduleImportValidationError as exc:
+        logger.warning("结构化课表导入被拒绝：%d 项校验问题", len(exc.errors))
+        raise HTTPException(status_code=400, detail={
+            "message": "课表校验失败，原有课表未修改", "errors": exc.errors,
+        }) from exc
     return {"message": "课表同步成功", "semester": payload.semester, "meeting_count": count}
 
 
@@ -229,15 +260,21 @@ async def import_ustc_schedule(
     request: Request,
     user: str = Depends(get_user),
     service: ScheduleService = Depends(get_schedule_service),
-):
+) -> dict:
     """Parse an exported USTC course-table page and replace that semester."""
 
     ensure_local_origin(request)
     try:
         parsed = await asyncio.to_thread(parse_ustc_schedule, payload.content, payload.filename)
+        count = await asyncio.to_thread(service.replace, user, parsed["semester"], parsed["courses"])
+    except ScheduleImportValidationError as exc:
+        logger.warning("教务课表导入被拒绝：%d 项校验问题", len(exc.errors))
+        raise HTTPException(status_code=400, detail={
+            "message": "课表校验失败，原有课表未修改", "errors": exc.errors,
+        }) from exc
     except UstcScheduleParseError as exc:
+        logger.warning("教务课表解析失败：%s", type(exc).__name__)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    count = await asyncio.to_thread(service.replace, user, parsed["semester"], parsed["courses"])
     return {
         "message": "教务课表解析并同步成功",
         "semester": parsed["semester"],

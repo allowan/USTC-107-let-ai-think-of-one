@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -20,6 +21,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger("server")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def merge_evidence(existing: dict, artifact: object) -> dict:
+    """合并工具证据的可展示白名单；不把任意工具正文当作证据。"""
+    items: dict[str, dict] = {}
+    warnings: list[str] = []
+    for payload in (existing, artifact):
+        if not isinstance(payload, dict):
+            continue
+        raw_items = payload.get("evidence", [])
+        for item in raw_items[:40] if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict) or item.get("kind") not in {"official", "personal", "web", "course_review"}:
+                continue
+            fields = ("id", "source", "title", "url", "published_at", "excerpt")
+            if not all(isinstance(item.get(key), str) for key in fields) or not item["id"]:
+                continue
+            clean = {key: item[key][:2000 if key == "excerpt" else 512] for key in fields}
+            try:
+                parsed = urlsplit(clean["url"])
+                if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                    clean["url"] = ""
+            except ValueError:
+                logger.warning("证据链接格式无效，隐藏链接")
+                clean["url"] = ""
+            clean["kind"] = item["kind"]
+            if clean["id"] in items or len(items) < 40:
+                items[clean["id"]] = clean
+        raw_warnings = payload.get("warnings", [])
+        for warning in raw_warnings[:10] if isinstance(raw_warnings, list) else []:
+            if isinstance(warning, str) and warning and warning[:512] not in warnings and len(warnings) < 10:
+                warnings.append(warning[:512])
+    return {"evidence": list(items.values()), "warnings": warnings}
 
 
 def _llm_credentials_configured() -> bool:
@@ -159,7 +192,7 @@ class ChatService:
     def _thread_id(username: str, topic_id: str) -> str:
         return f"user-{username}-topic-{topic_id}" if topic_id else f"user-{username}"
 
-    async def delete_thread(self, thread_id: str):
+    async def delete_thread(self, thread_id: str) -> None:
         """Delete all checkpoints for a thread."""
         import aiosqlite
         # Try to use an existing agent's connection first
@@ -178,6 +211,7 @@ class ChatService:
             await conn.commit()
         except Exception:
             logger.warning("Failed to delete checkpoints for thread %s", thread_id, exc_info=True)
+            raise
         finally:
             if own:
                 await conn.close()
@@ -189,9 +223,9 @@ class ChatService:
 
     async def stream_chat_events(
         self, username: str, content: str, topic_id: str,
-    ) -> AsyncIterator[tuple[str, str]]:
+    ) -> AsyncIterator[tuple[str, str | dict]]:
         """Async generator yielding SSE-style (event_type, data) tuples."""
-        from langchain_core.messages import AIMessageChunk
+        from langchain_core.messages import AIMessageChunk, ToolMessage
 
         ctx = await self.get_agent(username)
         thread_id = self._thread_id(username, topic_id)
@@ -208,7 +242,12 @@ class ChatService:
                 stream_mode="messages",
             )) as messages:
                 async for msg_chunk, _metadata in messages:
-                    if isinstance(msg_chunk, AIMessageChunk):
+                    if isinstance(msg_chunk, ToolMessage):
+                        if msg_chunk.status != "error":
+                            evidence = merge_evidence({}, msg_chunk.artifact)
+                            if evidence["evidence"] or evidence["warnings"]:
+                                yield ("evidence", evidence)
+                    elif isinstance(msg_chunk, AIMessageChunk):
                         emitted_tool = False
                         if msg_chunk.tool_call_chunks:
                             for tc in msg_chunk.tool_call_chunks:
@@ -244,7 +283,7 @@ class ChatService:
     async def sse_generator(
         self, username: str, content: str, topic_id: str, request: Request | None = None,
     ) -> AsyncIterator[str]:
-        """Full SSE response generator with error handling and retry on corrupted checkpoints."""
+        """Stream SSE events while preserving history when checkpoint validation fails."""
         thread_id = self._thread_id(username, topic_id)
 
         async def _stream() -> AsyncIterator[str]:
@@ -278,18 +317,15 @@ class ChatService:
         except Exception as exc:
             err_msg = str(exc)
             if "tool_calls" in err_msg and "tool messages" in err_msg:
-                logger.warning("Checkpoint corrupted for thread %s, retrying", thread_id)
-                await self.delete_thread(thread_id)
-                try:
-                    async with aclosing(_stream()) as stream:
-                        async for chunk in stream:
-                            yield chunk
-                except Exception as exc2:
-                    logger.error("SSE retry failed for thread %s: %s", thread_id, exc2, exc_info=True)
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc2}'})}\n\n"
+                # 工具调用失配不代表整段历史无效，不能以删除历史换取重试成功。
+                logger.warning("Checkpoint tool-message mismatch for thread %s; history preserved", thread_id)
+                error_content = "对话中的工具调用记录不完整，本次生成已停止，已有历史已保留。请先备份该话题，可新建话题继续对话。"
+                yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
             else:
-                logger.error("SSE error for thread %s: %s", thread_id, exc, exc_info=True)
-                yield f"data: {json.dumps({'type': 'error', 'content': f'处理失败: {exc}'})}\n\n"
+                # 供应商异常可能携带请求正文、地址或认证信息；只记录类型，
+                # 用户侧返回稳定文案，不能把未知异常当作安全文本透传。
+                logger.error("SSE failed for thread %s (%s)", thread_id, type(exc).__name__)
+                yield f"data: {json.dumps({'type': 'error', 'content': '处理失败，请检查模型连接后重试。已有对话历史已保留。'})}\n\n"
         finally:
             self._active_threads.discard(thread_id)
 

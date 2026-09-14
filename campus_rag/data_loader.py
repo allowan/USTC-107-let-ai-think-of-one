@@ -1,9 +1,83 @@
 #data_loader.py
+import json
+import logging
+import os
 import re
 
 from llama_index.core import Document
 from llama_index.core.node_parser import SentenceSplitter
-import os
+
+logger = logging.getLogger(__name__)
+
+
+def group_document_chunks(data: dict) -> dict[str, dict]:
+    """按来源聚合文本，只移除同一原文坐标确认的分块重叠。"""
+    grouped: dict[str, list] = {}
+    for meta, text in zip(data.get("metadatas") or [], data.get("documents") or [], strict=True):
+        meta = meta or {}
+        source = meta.get("source") or "手动输入"
+        if not isinstance(source, str) or not isinstance(text, str):
+            raise ValueError("个人资料文本或来源格式异常")
+        order = meta.get("chunk_index", 0)
+        grouped.setdefault(source, []).append((order if type(order) is int else 0, text, meta))
+    result = {}
+    for source, chunks in grouped.items():
+        ordered = sorted(chunks, key=lambda item: item[0])
+        parents: dict[str, list] = {}
+        for order, text, meta in ordered:
+            span = _chunk_span(meta, text)
+            if span is None:
+                break
+            parent, start, end = span
+            parents.setdefault(parent, []).append((start, end, text))
+        else:
+            result[source] = {"content": "\n".join(_join_chunk_spans(spans) for spans in parents.values()),
+                              "chunks": [(order, text) for order, text, _ in ordered]}
+            continue
+        # 旧数据缺少坐标时保留全部文本，不能把用户有意重复的段落当成重叠。
+        result[source] = {"content": "\n".join(text for _, text, _ in ordered),
+                          "chunks": [(order, text) for order, text, _ in ordered]}
+    return result
+
+
+def _chunk_span(meta: dict, text: str) -> tuple[str, int, int] | None:
+    raw = meta.get("_node_content")
+    if not isinstance(raw, str):
+        return None
+    try:
+        node = json.loads(raw)
+    except (ValueError, RecursionError):
+        logger.warning("资料分块坐标无法解析，保留全部片段文字")
+        return None
+    if not isinstance(node, dict):
+        return None
+    parent = meta.get("ref_doc_id")
+    start, end = node.get("start_char_idx"), node.get("end_char_idx")
+    if not isinstance(parent, str) or not parent or parent == "None":
+        return None
+    if type(start) is not int or type(end) is not int or start < 0 or end - start != len(text):
+        return None
+    return parent, start, end
+
+
+def _join_chunk_spans(spans: list[tuple[int, int, str]]) -> str:
+    spans = sorted(spans)
+    start, end, content = spans[0]
+    parts = []
+    for next_start, next_end, text in spans[1:]:
+        if next_start > end:
+            # 分块器可能丢弃边界空白；没有原始字符证据时保留换行分隔。
+            parts.append(content)
+            start, end, content = next_start, next_end, text
+            continue
+        overlap = min(end, next_end) - next_start
+        if content[next_start - start:next_start - start + overlap] != text[:overlap]:
+            logger.warning("资料分块坐标与正文冲突，保留全部片段文字")
+            return "\n".join(text for _, _, text in spans)
+        if next_end > end:
+            content += text[overlap:]
+            end = next_end
+    return "\n".join([*parts, content])
 
 # URL 合法字符白名单匹配：\S+ 会吞掉紧邻的中文标点（如"）"），从源头杜绝尾部粘连
 _URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")

@@ -12,6 +12,7 @@ import {
   CommentOutlined,
   CalendarOutlined,
   BellOutlined,
+  SaveOutlined,
 } from '@ant-design/icons';
 import { useTopicStore } from '@/stores/topicStore';
 import SettingsModal from './SettingsModal';
@@ -45,6 +46,7 @@ export default function AppLayout() {
     { key: '/schedule', icon: <CalendarOutlined />, label: '我的课表' },
     { key: '/news', icon: <NotificationOutlined />, label: '最新消息' },
     { key: '/sync', icon: <SyncOutlined />, label: '数据同步' },
+    { key: '/backup', icon: <SaveOutlined />, label: '个人备份' },
   ];
 
   const handleCreateTopic = async () => {

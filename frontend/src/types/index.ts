@@ -3,6 +3,18 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  evidence?: ChatEvidence[];
+  warnings?: string[];
+}
+
+export interface ChatEvidence {
+  id: string;
+  source: string;
+  title: string;
+  url: string;
+  published_at: string;
+  excerpt: string;
+  kind: 'official' | 'personal' | 'web' | 'course_review';
 }
 
 export interface TopicInfo {
@@ -161,6 +173,35 @@ export interface ScheduleCourseInput {
 export interface ScheduleImportPayload {
   semester: string;
   courses: ScheduleCourseInput[];
+}
+
+export interface ScheduleImportPreview {
+  payload: ScheduleImportPayload;
+  course_count: number;
+  meeting_count: number;
+  existing_meeting_count: number;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface BackupCatalog {
+  topics: Array<{ id: string; name: string }>;
+  documents: Array<{ id: string; name: string; characters: number }>;
+  errors: string[];
+}
+
+export interface BackupRestorePreview {
+  checksum: string;
+  created_at: string;
+  topics: Array<{ name: string; message_count: number }>;
+  documents: Array<{ source: string; characters: number }>;
+}
+
+export interface BackupRestoreResult {
+  restored: number;
+  skipped: number;
+  failed: number;
+  results: Array<{ kind: 'topic' | 'document'; name: string; status: 'restored' | 'skipped' | 'failed'; message: string }>;
 }
 
 export interface DigestEvent {

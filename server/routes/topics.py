@@ -44,10 +44,16 @@ async def remove_topic(
     t = auth.get_topic(user, topic_id)
     if not t:
         raise HTTPException(status_code=404, detail="话题不存在")
+    try:
+        await chat.delete_thread(t["thread_id"])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="对话记录删除失败，话题已保留，请稍后重试",
+        ) from exc
     ok = auth.delete_topic(user, topic_id)
     if not ok:
         raise HTTPException(status_code=500, detail="删除话题失败")
-    await chat.delete_thread(t["thread_id"])
     return {"message": "话题已删除"}
 
 

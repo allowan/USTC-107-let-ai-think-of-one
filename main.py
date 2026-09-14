@@ -16,7 +16,7 @@ from tools.search import (
     search_ustc_web,
     search_web,
 )
-from campus_rag import search_notices, search_user_data, add_user_data
+from campus_rag import search_notices_with_evidence, search_user_data_with_evidence, add_user_data
 from llama_index.core import Document
 import model.config as config
 
@@ -80,6 +80,8 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 3. 如果搜索工具已经返回 Markdown 链接，请保留链接格式并在最终来源列表中复用
 4. 如果需要在链接外加括号或句号，把这些标点放在 Markdown 链接语法之外
 5. 如果检索结果为空或完全无关，直接说"未找到相关信息"
+6. 回答前核对来源对应的年份、学期和适用人群；不匹配的资料不能证明问题中的事实，不能将旧通知日期改写为所问年份。没有相符证据时明确说明资料不足
+7. 多来源信息冲突时并列给出各自出处和差异；发布日期、活动开始日期、教学周开始日期和截止日期必须区分，不根据检索排名自行选一个日期
 
 ## 多跳推理指南
 同一查询不要重复调用普通检索与 raw 别名：两者使用相同管线，均返回参考片段，由你统一生成回答。
@@ -90,8 +92,8 @@ SYSTEM_PROMPT = """你是中国科学技术大学的校园信息助手。
 
 ## 学期与相对时间
 - 中科大三学期制：春季学期约 2-6 月，夏季学期约 7-8 月，秋季学期约 9 月-次年 1 月
-- 用户说“这学期/本学期/下学期/上学期”等相对时间时，先根据当前日期换算成具体学期名（如“2026年秋季学期”），再查询或筛选，不得把其他学期的课程混入回答
-- 查课表优先用 get_my_schedule：留空学期即自动取当前学期；检索个人数据时，按来源或正文中的学期名只保留所问学期的内容
+- 用户问“这学期/本学期”课表时，调用 get_my_schedule 并留空学期，让工具按实际校历选择；不得先按月份猜学期再传入。月份映射仅适用于未配置覆盖当天的校历时
+- “上学期/下学期”先以工具返回的实际当前学期为基准；检索个人数据时，按来源或正文中的学期名只保留所问学期的内容，不混入其他学期课程
 """
 
 
@@ -109,25 +111,24 @@ def _system_prompt_with_date() -> str:
 
 # ── Shared (non-user-specific) tools ──────────────────────────────
 
-@tool
-def search_campus_notices(query: str) -> str:
+@tool(response_format="content_and_artifact")
+def search_campus_notices(query: str) -> tuple[str, dict]:
     """搜索校园官方通知，获取活动、比赛、课程、讲座、报名等公共信息（返回带来源的原文片段）。"""
     try:
-        return search_notices(query)
+        return search_notices_with_evidence(query)
     except Exception as e:
         logger.error("search_campus_notices failed: %s", e, exc_info=True)
-        return f"搜索校园通知时出错: {e}"
+        return "搜索校园通知失败，请检查检索服务后重试。", {"evidence": [], "warnings": []}
 
 
-@tool
-def search_notices_raw(query: str) -> str:
+@tool(response_format="content_and_artifact")
+def search_notices_raw(query: str) -> tuple[str, dict]:
     """获取校园官方通知的原始文本片段。当你需要查看原文或要对比多条信息时使用此工具。"""
     try:
-        from campus_rag import search_notices
-        return search_notices(query)
+        return search_notices_with_evidence(query)
     except Exception as e:
         logger.error("search_notices_raw failed: %s", e, exc_info=True)
-        return f"搜索通知原文时出错: {e}"
+        return "搜索通知原文失败，请检查检索服务后重试。", {"evidence": [], "warnings": []}
 
 
 @tool
@@ -192,14 +193,14 @@ def get_upcoming_events(days: int = 30, category: str = "", kind: str = "deadlin
 # ── Per-user tool factories ───────────────────────────────────────
 
 def _make_search_my_data(username: str):
-    @tool
-    def search_my_data(query: str) -> str:
+    @tool(response_format="content_and_artifact")
+    def search_my_data(query: str) -> tuple[str, dict]:
         """搜索用户个人数据（个人上传或爬取的教务、课表等私有信息）。"""
         try:
-            return search_user_data(query, username)
+            return search_user_data_with_evidence(query, username)
         except Exception as e:
             logger.error("search_my_data failed: %s", e, exc_info=True)
-            return f"搜索个人数据时出错: {e}"
+            return "搜索个人数据失败，请检查检索服务后重试。", {"evidence": [], "warnings": []}
     return search_my_data
 
 
@@ -218,15 +219,14 @@ def _make_add_personal_data(username: str):
 
 
 def _make_search_user_data_raw(username: str):
-    @tool
-    def search_user_data_raw(query: str) -> str:
+    @tool(response_format="content_and_artifact")
+    def search_user_data_raw(query: str) -> tuple[str, dict]:
         """获取用户个人数据的原始文本片段。当你需要查看原文或要对比多条信息时使用此工具。"""
         try:
-            from campus_rag import search_user_data
-            return search_user_data(query, username)
+            return search_user_data_with_evidence(query, username)
         except Exception as e:
             logger.error("search_user_data_raw failed: %s", e, exc_info=True)
-            return f"搜索个人数据原文时出错: {e}"
+            return "搜索个人数据原文失败，请检查检索服务后重试。", {"evidence": [], "warnings": []}
     return search_user_data_raw
 
 
@@ -237,13 +237,13 @@ def _make_get_my_schedule(username: str):
         留空时按今天日期自动返回当前学期。week 为教学周数，0 表示按校历取当前周；
         校历未配置时会返回全部周次并明确提示，不要自行猜测周数。"""
         try:
-            from server.services.schedule_service import current_semester, get_schedule_service
+            from server.services.schedule_service import get_schedule_service
 
             service = get_schedule_service()
             requested = semester.strip()
             today = datetime.now()
             if not requested:
-                requested = current_semester(today)
+                requested = service.resolve_semester(username, today.date())
                 imported = service.list(username).get("semesters") or []
                 if requested not in imported:
                     names = "、".join(imported) if imported else "（无）"
@@ -486,16 +486,25 @@ def _checkpoint_messages_to_history(raw_messages: list) -> list:
     content 为空，直接发给前端会渲染出空气泡；多跳推理产生的多条连续
     AI 消息合并为一条，与流式渲染时的单气泡视觉一致。
     """
+    from server.services import merge_evidence
+
     result = []
     for m in raw_messages:
         if hasattr(m, 'type') and hasattr(m, 'content'):
+            if m.type == 'tool' and getattr(m, 'status', '') != 'error':
+                existing = result[-1] if result and result[-1]['role'] == 'assistant' else {}
+                evidence = merge_evidence(existing, getattr(m, 'artifact', None))
+                if evidence['evidence'] or evidence['warnings']:
+                    if not existing:
+                        result.append({'role': 'assistant', 'content': ''})
+                    result[-1].update(evidence)
             if m.type in ('human', 'ai'):
                 content = m.content if isinstance(m.content, str) else str(m.content)
                 if m.type == 'ai' and not content.strip():
                     continue
                 role = "user" if m.type == "human" else "assistant"
                 if result and result[-1]["role"] == role == "assistant":
-                    result[-1]["content"] += "\n\n" + content
+                    result[-1]["content"] += ("\n\n" if result[-1]["content"] else "") + content
                 else:
                     result.append({"role": role, "content": content})
     return result

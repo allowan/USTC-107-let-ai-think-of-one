@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from server.lifespan import lifespan
+from server.deps import LocalAccessMiddleware
 from server.routes.topics import router as topics_router
 from server.routes.chat import router as chat_router
 from server.routes.search import router as search_router
@@ -24,6 +25,7 @@ from server.routes.news import router as news_router
 from server.routes.health import router as health_router
 from server.routes.schedule import router as schedule_router
 from server.routes.digest import router as digest_router
+from server.routes.backup import router as backup_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,11 +44,12 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origin_regex=r"https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?",
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(LocalAccessMiddleware)
     app.include_router(topics_router)
     app.include_router(chat_router)
     app.include_router(search_router)
@@ -57,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(news_router)
     app.include_router(schedule_router)
     app.include_router(digest_router)
+    app.include_router(backup_router)
 
     # Serve frontend static files (production build must exist)
     frontend_dist = ROOT / "frontend" / "dist"

@@ -26,6 +26,7 @@ LangChain 工具定义，注册于根目录 `main.py`（`TOOL_METADATA` 与 `_sh
 
 ## 约定
 
+- 六个网络工具使用 `content_and_artifact`：普通参数调用仍返回原有文本，Agent 的 ToolCall 另附 `artifact.evidence` 与 `artifact.warnings`。证据直接来自本次成功搜索结果或抓取正文，包含稳定 ID、来源、标题、安全 HTTP(S) 链接、发布日期（未知留空）、最多 2000 字的片段和 `web` / `official` / `course_review` 分类。失败或空结果不生成证据，不解析网页中的 Markdown 为来源，也不额外发起网络请求。
 - 工具失败必须返回可读错误文本给 Agent（而非抛异常中断对话），并记录日志。
 - 抓取的超长页面必须截断，防止撞穿 LLM context window。
 - 新增工具时同步更新 `main.py` 的 `TOOL_METADATA`；旧用户的工具偏好字典中未出现的工具视为"未表态"，默认启用。

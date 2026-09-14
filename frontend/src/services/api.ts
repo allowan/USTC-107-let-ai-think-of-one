@@ -25,10 +25,11 @@ export const topicApi = {
     }),
 
   getHistory: (topicId: string) =>
-    api.get<{ messages: Array<{ role: 'user' | 'assistant'; content: string }> }>(`/topics/${topicId}/history`),
+    api.get<{ messages: Array<Pick<import('@/types').ChatMessage, 'role' | 'content' | 'evidence' | 'warnings'>> }>(`/topics/${topicId}/history`),
 };
 
 export const settingsApi = {
+  diagnose: () => api.post<{ status: 'ok' | 'degraded'; checks: { llm: boolean; chromadb: boolean } }>('/health/diagnostics', {}, { timeout: 15000 }),
   getGlobal: () =>
     api.get<import('@/types').GlobalSettings>('/settings'),
 
@@ -107,6 +108,10 @@ export const scheduleApi = {
     api.get<import('@/types').CourseReminderData>('/schedule/reminders'),
   import: (payload: import('@/types').ScheduleImportPayload) =>
     api.post<{ message: string; semester: string; meeting_count: number }>('/schedule/import', payload),
+  preview: (payload: import('@/types').ScheduleImportPayload) =>
+    api.post<import('@/types').ScheduleImportPreview>('/schedule/preview', payload),
+  previewUstc: (content: string, filename?: string) =>
+    api.post<import('@/types').ScheduleImportPreview>('/schedule/preview-ustc', { content, filename: filename || '' }),
   importUstc: (content: string, filename?: string) =>
     api.post<{
       message: string;
@@ -151,3 +156,21 @@ export const trackApi = {
 };
 
 export default api;
+
+export const backupApi = {
+  catalog: () => api.get<import('@/types').BackupCatalog>('/backup/catalog', { timeout: 60000 }),
+  export: (topicIds: string[], documentIds: string[]) => api.post<Blob>('/backup/export', {
+    topic_ids: topicIds, document_ids: documentIds,
+  }, { responseType: 'blob', timeout: 60000 }),
+  preview: (file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post<import('@/types').BackupRestorePreview>('/backup/preview', form, { timeout: 60000 });
+  },
+  restore: (file: File, checksum: string) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('confirmed_checksum', checksum);
+    return api.post<import('@/types').BackupRestoreResult>('/backup/restore', form, { timeout: 0 });
+  },
+};
