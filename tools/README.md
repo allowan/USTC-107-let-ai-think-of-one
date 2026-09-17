@@ -26,6 +26,8 @@ LangChain 工具定义，注册于根目录 `main.py`（`TOOL_METADATA` 与 `_sh
 
 ## 约定
 
+两个采集脚本的 `--reindex` 共用安全的公共索引替换入口：先完整读取目录内全部 `.txt`，目录不存在、无通知、空白文件或读取失败均阻止写入。随后调用 `campus_rag.replace_public_documents`，保留集合身份，先写新分块再移除旧分块，并严格更新事件索引；不再删除 Chroma 集合后重建。嵌入或存储失败向调用方传播，不将失败当作完成。成功输出 `public_document_count` 表示通知数，不是向量分块数。该操作仍表示用所选目录全量替换公共资料，应确认目录包含完整来源；本地语料和同步服内容不是自动合并关系。离线回归：`python -m pytest tests/test_public_refresh.py -q`，不触碰真实资料库。
+
 - 六个网络工具使用 `content_and_artifact`：普通参数调用仍返回原有文本，Agent 的 ToolCall 另附 `artifact.evidence` 与 `artifact.warnings`。证据直接来自本次成功搜索结果或抓取正文，包含稳定 ID、来源、标题、安全 HTTP(S) 链接、发布日期（未知留空）、最多 2000 字的片段和 `web` / `official` / `course_review` 分类。失败或空结果不生成证据，不解析网页中的 Markdown 为来源，也不额外发起网络请求。
 - 工具失败必须返回可读错误文本给 Agent（而非抛异常中断对话），并记录日志。
 - 抓取的超长页面必须截断，防止撞穿 LLM context window。

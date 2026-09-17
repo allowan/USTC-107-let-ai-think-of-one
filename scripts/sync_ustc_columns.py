@@ -48,7 +48,7 @@ def main() -> int:
 
     if args.reindex and total["failed"] == 0:
         from scripts.sync_web_sources import rebuild_public_index
-        print(f"public_index_count={rebuild_public_index(args.data_dir)}")
+        print(f"public_document_count={rebuild_public_index(args.data_dir)}")
     return 1 if total["failed"] else 0
 
 
