@@ -200,6 +200,20 @@ python -c "from campus_rag import search_notices_answer; print(search_notices_an
 
 2026-09-13 本轮离线 BM25 基线：41 题（38 正例、3 无答案负例），Hit@1 为 84.2%，Hit@5/Recall@5 均为 100%，MRR@10 为 0.902；3 个负例中 2 个仍返回候选。该小样本结果只衡量当前语料的来源召回，不能证明最终回答准确率，也不能代表在线混合检索。新增负例揭示了常见词/错误年份仍会召回资料的边界，需用答案审查案例继续验证模型是否正确说明证据不足。
 
+检索集现有 56 题，开发集 49 题、固定留出集 7 题；未标注 `split` 的题目归开发集，留出按问题划分，并非来源隔离。`tests/answer_review_cases.json` 现有 15 条人工答案审查用例，涵盖年份、人群、跨来源对比、附件和二维码目标缺失；这些是审查标准，不表示已验证真实模型回答。
+
+```powershell
+# 在项目根目录执行；审计不初始化检索或调用服务。
+.venv/Scripts/python.exe scripts/eval_retrieval.py --audit-only
+.venv/Scripts/python.exe scripts/eval_retrieval.py --split development --output tests/retrieval_baseline_development.json
+# 开发调参完成后再评估留出集，输出需使用尚不存在的新文件。
+.venv/Scripts/python.exe scripts/eval_retrieval.py --split holdout --output tests/retrieval_baseline_holdout.json
+```
+
+脚本先检查必需来源有非空文本，缺失时返回 2 并阻止检索。JSON 记录模式、分组、Python 版本、语料/真值 SHA256、建索引及逐题耗时、实际来源、错误和分类指标；拒绝覆盖已有报告，后续运行请更换结果文件名。离线模式不使用生成模型；混合模式的嵌入/重排序配置未记录，需另行核对，且本地文本覆盖审计不证明向量库已经同步。检索错误返回 1；正常完成不代表每题都正确或达到任何质量门槛。回归：`python -m pytest tests/test_retrieval_evaluation.py -q`。
+
+2026-09-17 开发集离线 BM25 基线保存在 `tests/retrieval_baseline_development.json`：49 题（45 正例、4 负例），来源缺失 0、检索错误 0；Hit@1 为 86.7%，Recall@1 为 84.4%，Hit@5/Recall@5 均为 100%，MRR@10 为 0.917；4 个负例中 3 个仍召回候选。留出集仅做来源审计，尚未执行查询；未调用真实生成模型。旧基线与本次题集不同，不应将分数差异直接归因为检索质量提升。
+
 ## 统一检索管线
 
 检索两路分别执行：向量服务或索引初始化失败（包括冷启动维度探测）时，从现有目标集合只读加载分块执行 BM25；关键词读取或检索失败时保留向量结果。单路失败会在返回文字中标明降级，即使剩余一路没有命中也保留说明；两路均失败则明确报错，不显示为空资料。降级不创建、修改或删除集合，不放宽入库维度检查。个人检索始终只读取指定用户集合。
