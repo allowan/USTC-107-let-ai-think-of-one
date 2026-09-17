@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import Scope
 
 from server.lifespan import lifespan
 from server.deps import LocalAccessMiddleware
@@ -33,6 +35,24 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("server")
+
+
+class FrontendStaticFiles(StaticFiles):
+    """仅为已知前端页面提供入口，保留静态资源的安全检查。"""
+
+    page_paths = frozenset({
+        "/today", "/chat", "/personal-data", "/schedule", "/news", "/sync", "/backup",
+    })
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """页面刷新复用入口文件；未知路径仍由 StaticFiles 处理。"""
+        # 使用尚未归一化的请求路径，避免含 .. 的路径误匹配前端页面。
+        request_path = scope["path"]
+        if (scope["method"] in {"GET", "HEAD"}
+                and (request_path in self.page_paths
+                     or request_path.removesuffix("/") in self.page_paths)):
+            path = "index.html"
+        return await super().get_response(path, scope)
 
 
 def create_app() -> FastAPI:
@@ -65,7 +85,7 @@ def create_app() -> FastAPI:
     # Serve frontend static files (production build must exist)
     frontend_dist = ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():
-        app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+        app.mount("/", FrontendStaticFiles(directory=str(frontend_dist), html=True), name="frontend")
 
     return app
 

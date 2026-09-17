@@ -4,6 +4,19 @@
 
 主服务（端口 8000）：路由/服务分层架构，SSE 流式对话，本地单用户（无 JWT）。
 
+## 本地生产启动
+
+首次安装依赖后，在 `frontend` 目录运行 `npm run build` 生成 `frontend/dist`。随后回到项目根目录，在 PowerShell 执行：
+
+```powershell
+.\scripts\start_local.ps1 -CheckOnly # 仅检查虚拟环境解释器和前端构建入口
+.\scripts\start_local.ps1            # 前台运行现有 server.py，Ctrl+C 停止
+```
+
+启动脚本也可从其他目录通过绝对路径调用；它固定使用项目的 `.venv/Scripts/python.exe`，运行期间将工作目录切到项目根目录，结束后恢复。脚本不会安装依赖、构建前端、修改配置或启动 Sync Server；缺少解释器或 `frontend/dist/index.html` 时给出修复指引并退出。预检只检查文件存在，不代表模型服务或全部 Python 依赖可用。
+
+服务启动成功后打开 `http://127.0.0.1:8000`，无需单独运行 Vite。生产静态托管允许直接访问或刷新 `/today`、`/chat`、`/personal-data`、`/schedule`、`/news`、`/sync`、`/backup`（含末尾斜杠），由同一份 `index.html` 交给前端路由处理。仅这些已知页面使用回退；缺失资源、未知页面及不存在的 API 保持 404，静态目录外的文件不可访问。新增前端页面时同步维护 `FrontendStaticFiles` 的页面清单。
+
 ## 架构分层
 
 | 层 | 位置 | 职责 |
