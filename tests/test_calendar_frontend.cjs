@@ -59,6 +59,7 @@ test('今日面板先预览，取消不下载，确认才导出选中的快照',
     require(name) {
       if (name === 'react') return { ...React,
         useState(initial) { const key = index++; if (!(key in state)) state[key] = initial; return [state[key], value => { state[key] = value; }]; },
+        useRef(initial) { const key = index++; return state[key] ||= { current: initial }; },
         useCallback: fn => fn, useEffect() {},
       };
       if (name === 'antd') return { Button, Checkbox, Modal: 'Modal', Alert: 'Alert', Card: 'Card', Tag: 'Tag', Spin: 'Spin', Empty: 'Empty', Space: 'Space', Tooltip: 'Tooltip',
