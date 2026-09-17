@@ -6,6 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain.tools import tool
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from tools.search import (
@@ -438,6 +439,10 @@ async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = N
             tools=tools,
             system_prompt=_system_prompt_with_date(),
             checkpointer=checkpointer,
+            middleware=[
+                ModelCallLimitMiddleware(run_limit=6, exit_behavior="error"),
+                ToolCallLimitMiddleware(run_limit=12, exit_behavior="continue"),
+            ],
         )
     except (Exception, asyncio.CancelledError):
         logger.warning("Agent 构建未完成，关闭 checkpoint 连接", exc_info=True)

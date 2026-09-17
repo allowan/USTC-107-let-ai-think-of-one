@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langgraph.errors import GraphRecursionError
+
 if TYPE_CHECKING:
     from fastapi import Request
     from main import AgentContext
@@ -21,6 +24,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("server")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+CHAT_TIMEOUT_SECONDS = 180.0
+CHAT_RECURSION_LIMIT = 40
 
 
 def merge_evidence(existing: dict, artifact: object) -> dict:
@@ -238,7 +243,7 @@ class ChatService:
 
             async with aclosing(ctx.agent.astream(
                 {"messages": [{"role": "user", "content": content}]},
-                {"configurable": {"thread_id": thread_id}},
+                {"configurable": {"thread_id": thread_id}, "recursion_limit": CHAT_RECURSION_LIMIT},
                 stream_mode="messages",
             )) as messages:
                 async for msg_chunk, _metadata in messages:
@@ -306,14 +311,27 @@ class ChatService:
             return
         self._active_threads.add(thread_id)
         try:
+            deadline = asyncio.get_running_loop().time() + CHAT_TIMEOUT_SECONDS
             async with aclosing(_stream()) as stream:
-                async for chunk in stream:
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    try:
+                        chunk = await asyncio.wait_for(anext(stream), timeout=remaining)
+                    except StopAsyncIteration:
+                        break
                     yield chunk
         except asyncio.CancelledError:
             # A disconnected StreamingResponse is cancelled by ASGI. It is a
             # normal user interruption, not a model/checkpoint failure.
             logger.info("SSE stream cancelled for thread %s", thread_id)
             raise
+        except (TimeoutError, ModelCallLimitExceededError, GraphRecursionError) as exc:
+            logger.warning("SSE execution budget reached for thread %s (%s)", thread_id, type(exc).__name__)
+            reason = "本次处理超时" if isinstance(exc, TimeoutError) else "本次处理已达到调用上限"
+            error_content = f"{reason}，生成已停止，已有历史已保留。请缩小问题范围后重试；如涉及保存或导入，请先核对实际结果，避免重复操作。"
+            yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
         except Exception as exc:
             err_msg = str(exc)
             if "tool_calls" in err_msg and "tool messages" in err_msg:
