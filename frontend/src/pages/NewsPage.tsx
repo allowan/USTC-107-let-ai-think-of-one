@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Empty, Input, List, Select, Space, Tag, Typography } from 'antd';
 import { ReloadOutlined, ExportOutlined } from '@ant-design/icons';
 import api from '@/services/api';
+import { NoticeAssistantButton } from '@/components/NoticeAssistant';
 
 type NewsItem = { title: string; url: string; source_id: string; source_name: string; source_url: string; published_at: string | null; date_label: string };
 type NewsSource = { id: string; name: string; url: string; status: 'ok' | 'stale' | 'error'; updated_at: string | null };
@@ -52,6 +53,7 @@ export default function NewsPage() {
                 <Typography.Text type="secondary">来源：<a href={item.source_url} target="_blank" rel="noopener noreferrer">{item.source_name}</a></Typography.Text>
                 <Typography.Text type="secondary">发布：{item.date_label}</Typography.Text>
                 {status?.status === 'stale' && <Tag color="orange">缓存消息</Tag>}
+                <NoticeAssistantButton notice={{ source: item.url, title: item.title, url: item.url, publishedAt: item.published_at }} />
               </Space>
             </div>
           </List.Item>;

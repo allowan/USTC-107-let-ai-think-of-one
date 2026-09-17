@@ -65,6 +65,7 @@ test('今日面板先预览，取消不下载，确认才导出选中的快照',
       if (name === 'antd') return { Button, Checkbox, Modal: 'Modal', Alert: 'Alert', Card: 'Card', Tag: 'Tag', Spin: 'Spin', Empty: 'Empty', Space: 'Space', Tooltip: 'Tooltip',
         Typography: { Text: 'Text', Link: 'Link' }, App: { useApp: () => ({ message: { error() {} } }) } };
       if (name === '@ant-design/icons') return new Proxy({}, { get: () => 'Icon' });
+      if (name === '@/components/NoticeAssistant') return { NoticeAssistantButton: 'NoticeAssistantButton' };
       if (name === '@/utils/calendarExport') return { isCalendarDate, buildTrackedCalendar: async items => { generated++; assert.equal(items.length, 1); return 'calendar'; } };
       if (name === '@/services/api') return {
         digestApi: { get: async () => ({ data: { upcoming: [], recent: [] } }) },

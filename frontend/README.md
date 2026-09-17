@@ -25,6 +25,16 @@ React 18 + Vite 6 + TypeScript 5 + Ant Design + Zustand 的单页应用，通过
 | `utils/markdownLinks.ts` | 裸链接渲染辅助：把中文标点等尾随符号移出链接 |
 | `types/index.ts` | 前后端契约的 TypeScript 类型 |
 
+## 通知办理助手
+
+新闻和今日面板的“整理办理清单”会创建独立话题，携带通知标题、来源链接及已知日期，并预填可编辑问题；点击“发送”才调用模型。要求先读取原文，再列出适用对象、办理步骤、材料、分角色截止日期和依据；缺失内容标为待核实，不从发布日期推断截止日，不自动提交报名或保存资料。
+
+通知入口仍在当前页面会话中时，聊天请求携带 `read_only: true`，后端仅注册明确允许的查询工具，不提供资料写入或课表导入工具；追踪仅通过确认弹窗的现有接口保存。通知只读模式会在顶部明确提示；刷新后入口状态不保留，聊天恢复普通模式。
+
+离线回归：`node --test tests/test_notice_assistant_frontend.cjs tests/test_chat_frontend.cjs`；后端只读工具边界与连接清理：`python -m pytest tests/test_notice_assistant.py -q`（均在项目根目录）。真实模型清单质量仍需按 `tests/answer_review_cases.json` 人工核验。
+
+聊天顶部保留本次通知入口，可核对原文后选择“追踪这则通知”，确认日期类型和 ISO 日期再保存。无已知日期的新闻不会预填截止日；同来源已有追踪时展示旧值并明确将更新。取消不写入，失败保留表单供重试。入口上下文仅保存在当前浏览器运行期间；刷新后可从原页面重新进入，已发送的问题和回答仍按原有话题历史保存。新增共享 `components/NoticeAssistant.tsx` 和纯函数 `utils/noticeAssistant.ts`，分别复用入口/确认界面与草稿校验逻辑。
+
 ## SSE 协议（与 `POST /api/chat/stream` 对应）
 
 每行 `data: {"type": ..., "content": ...}`，type 取值：

@@ -17,6 +17,7 @@ import { useTopicStore } from '@/stores/topicStore';
 import { settingsApi, topicApi } from '@/services/api';
 import type { ChatEvidence, ChatMessage, GlobalSettings } from '@/types';
 import { normalizeAutoLink } from '@/utils/markdownLinks';
+import { NoticeContextPanel } from '@/components/NoticeAssistant';
 
 type ChatMarkdownLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   children?: ReactNode;
@@ -155,9 +156,16 @@ export default function ChatPage() {
   const isComposingRef = useRef(false);
   const summarizedRef = useRef<Set<string>>(new Set());
   const autoCreatedRef = useRef(false);
-  const { activeTopicId, topics, loaded, createTopic, renameTopic } = useTopicStore();
+  const { activeTopicId, topics, loaded, createTopic, renameTopic, noticeContexts, noticeDraft, consumeNoticeDraft } = useTopicStore();
   const { message } = App.useApp();
   const historyReady = historyState.topicId === activeTopicId && historyState.status === 'ready';
+
+  useEffect(() => {
+    if (noticeDraft?.topicId === activeTopicId) {
+      setInput(noticeDraft.content);
+      consumeNoticeDraft(activeTopicId);
+    }
+  }, [activeTopicId, noticeDraft, consumeNoticeDraft]);
 
   useEffect(() => () => { abortControllerRef.current?.abort(); }, []);
 
@@ -294,7 +302,7 @@ export default function ChatPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ content, topic_id: topicId }),
+        body: JSON.stringify({ content, topic_id: topicId, read_only: !!noticeContexts?.[topicId] }),
         signal: abortController.signal,
       });
 
@@ -445,6 +453,7 @@ export default function ChatPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+      {noticeContexts?.[activeTopicId] && <NoticeContextPanel key={activeTopicId} notice={noticeContexts[activeTopicId]} />}
       <div ref={listRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
         {activeTopicId && !historyReady && (
           <div role="status" style={{ textAlign: 'center', padding: 24 }}>

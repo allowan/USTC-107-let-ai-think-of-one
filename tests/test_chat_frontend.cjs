@@ -15,12 +15,14 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-function harness(histories, frames = []) {
+function harness(histories, frames = [], initialStore = {}) {
   const slots = [];
   const effects = [];
   let index = 0;
   let fetches = 0;
-  const store = { activeTopicId: 'topic-a', topics: [{ id: 'topic-a', name: '已有话题' }], loaded: true };
+  const store = { activeTopicId: 'topic-a', topics: [{ id: 'topic-a', name: '已有话题' }], loaded: true, ...initialStore };
+  const requests = [];
+  store.consumeNoticeDraft = topicId => { if (store.noticeDraft?.topicId === topicId) store.noticeDraft = null; };
   const useTopicStore = () => store;
   useTopicStore.getState = () => store;
   const apiMessage = { error() {}, info() {}, warning() {} };
@@ -46,6 +48,7 @@ function harness(histories, frames = []) {
     if (name === '@ant-design/icons') return new Proxy({}, { get: () => 'Icon' });
     if (name === 'react-markdown' || name === 'remark-gfm') return { default: () => null };
     if (name === '@/stores/topicStore') return { useTopicStore };
+    if (name === '@/components/NoticeAssistant') return { NoticeContextPanel: 'NoticeContextPanel' };
     if (name === '@/utils/markdownLinks') return { normalizeAutoLink: () => ({}) };
     if (name === '@/services/api') return { settingsApi: { getGlobal: async () => ({ data: { env: {}, groups: [] } }) }, topicApi: { getHistory: () => histories.shift().promise } };
     return requireFrontend(name);
@@ -54,8 +57,9 @@ function harness(histories, frames = []) {
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
   const context = { require: requireMock, exports, AbortController, DOMException, TextDecoder, setTimeout: () => 0,
-    window: { addEventListener() {}, removeEventListener() {} }, fetch: async () => {
+    window: { addEventListener() {}, removeEventListener() {} }, fetch: async (_url, options) => {
       fetches++;
+      requests.push(JSON.parse(options.body));
       let cursor = 0;
       return { ok: true, body: { getReader: () => ({ read: async () => cursor < frames.length
         ? { done: false, value: new TextEncoder().encode(frames[cursor++]) } : { done: true } }) } };
@@ -63,7 +67,7 @@ function harness(histories, frames = []) {
   };
   vm.runInNewContext(code, context);
   return { render() { index = 0; const tree = exports.default(); effects.splice(0).forEach(effect => effect()); return tree; },
-    messages: () => slots[0], fetches: () => fetches, store };
+    messages: () => slots[0], fetches: () => fetches, requests, store };
 }
 
 function find(tree, predicate) {
@@ -151,3 +155,18 @@ test('工具证据在回答前到达并跨帧去重，切换历史后仍可显�
   assert.equal(next.messages()[0].warnings[0], '关键词降级');
 });
 
+test('通知草稿不自动发送，历史就绪后发送使用只读模式', async () => {
+  const history = deferred();
+  const ui = harness([history], ['data: {"type":"done"}\n\n'], {
+    noticeContexts: { 'topic-a': { source: 'notice', title: '通知', url: null } },
+    noticeDraft: { topicId: 'topic-a', content: '整理通知草稿' },
+  });
+  ui.render();
+  assert.equal(find(ui.render(), node => node.type === 'TextArea').props.value, '整理通知草稿');
+  assert.equal(ui.fetches(), 0);
+  assert.equal(ui.store.noticeDraft, null);
+  history.resolve({ data: { messages: [] } }); await settle();
+  await sendButton(ui.render()).props.onClick();
+  assert.equal(ui.requests[0].read_only, true);
+  assert.equal(ui.requests[0].content, '整理通知草稿');
+});

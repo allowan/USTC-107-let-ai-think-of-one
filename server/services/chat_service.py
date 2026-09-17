@@ -227,16 +227,26 @@ class ChatService:
         return await get_history(thread_id)
 
     async def stream_chat_events(
-        self, username: str, content: str, topic_id: str,
+        self, username: str, content: str, topic_id: str, *, read_only: bool = False,
     ) -> AsyncIterator[tuple[str, str | dict]]:
         """Async generator yielding SSE-style (event_type, data) tuples."""
         from langchain_core.messages import AIMessageChunk, ToolMessage
 
-        ctx = await self.get_agent(username)
+        if read_only:
+            from campus_rag import get_user_tool_prefs
+            from main import build_agent
+
+            prefs = await asyncio.to_thread(get_user_tool_prefs, username)
+            ctx = await build_agent(username=username, tool_prefs=prefs, read_only=True)
+        else:
+            ctx = await self.get_agent(username)
         thread_id = self._thread_id(username, topic_id)
 
         context_id = id(ctx)
         self._active_contexts[context_id] = self._active_contexts.get(context_id, 0) + 1
+        if read_only:
+            # 请求专用实例不进入普通工具缓存，结束/停止时复用现有收尾逻辑关闭连接。
+            self._retired_contexts[context_id] = ctx
         try:
             seen_tool_names: set[str] = set()
             yield ("thinking", "")
@@ -287,6 +297,7 @@ class ChatService:
 
     async def sse_generator(
         self, username: str, content: str, topic_id: str, request: Request | None = None,
+        *, read_only: bool = False,
     ) -> AsyncIterator[str]:
         """Stream SSE events while preserving history when checkpoint validation fails."""
         thread_id = self._thread_id(username, topic_id)
@@ -298,7 +309,8 @@ class ChatService:
             if request is not None and await request.is_disconnected():
                 logger.info("SSE client disconnected before streaming thread %s", thread_id)
                 return
-            async with aclosing(self.stream_chat_events(username, content, topic_id)) as stream:
+            options = {"read_only": True} if read_only else {}
+            async with aclosing(self.stream_chat_events(username, content, topic_id, **options)) as stream:
                 async for event_type, data in stream:
                     if request is not None and await request.is_disconnected():
                         logger.info("SSE client disconnected during thread %s", thread_id)

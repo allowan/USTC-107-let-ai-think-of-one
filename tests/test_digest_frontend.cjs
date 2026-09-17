@@ -44,6 +44,7 @@ function harness(api) {
       Typography: { Text: 'Text', Link: 'Link' }, App: { useApp: () => ({ message: { success() {}, error() {} } }) } };
     if (name === '@ant-design/icons') return new Proxy({}, { get: () => 'Icon' });
     if (name === '@/services/api') return api;
+    if (name === '@/components/NoticeAssistant') return { NoticeAssistantButton: 'NoticeAssistantButton' };
     if (name === '@/utils/calendarExport') return { isCalendarDate: value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') };
     return requireFrontend(name);
   } });

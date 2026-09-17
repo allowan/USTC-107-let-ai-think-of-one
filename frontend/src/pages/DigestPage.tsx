@@ -13,6 +13,7 @@ import {
 import { digestApi, scheduleApi, trackApi } from '@/services/api';
 import type { CourseReminderData, CourseReminderDay, DigestData, DigestEvent, TrackedEvent } from '@/types';
 import { buildTrackedCalendar, isCalendarDate } from '@/utils/calendarExport';
+import { NoticeAssistantButton } from '@/components/NoticeAssistant';
 
 const { Text, Link } = Typography;
 
@@ -106,6 +107,9 @@ function EventRow({ e, tracked, onTrack, onUntrack, trackingUnavailable }: Event
               <LinkOutlined /> 原文
             </Link>
           )}
+          <NoticeAssistantButton notice={{ source: e.source, title: e.title || e.source, url: e.url,
+            category: e.category, publishedAt: e.publish_date, dateKind: e.kind || 'deadline',
+            dateValue: e.kind === 'start' ? e.event_start : e.deadline }} />
         </div>
       </div>
       <Tooltip title={tracked ? '取消追踪' : '追踪此事件'}>
