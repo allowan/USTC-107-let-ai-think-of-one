@@ -1,12 +1,14 @@
+import { lazy } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import AppLayout from '@/components/Layout/AppLayout';
-import ChatPage from '@/pages/ChatPage';
-import DigestPage from '@/pages/DigestPage';
-import NewsPage from '@/pages/NewsPage';
-import SyncPage from '@/pages/SyncPage';
-import PersonalDataPage from '@/pages/PersonalDataPage';
-import SchedulePage from '@/pages/SchedulePage';
-import BackupPage from '@/pages/BackupPage';
+
+const ChatPage = lazy(() => import('@/pages/ChatPage'));
+const DigestPage = lazy(() => import('@/pages/DigestPage'));
+const NewsPage = lazy(() => import('@/pages/NewsPage'));
+const SyncPage = lazy(() => import('@/pages/SyncPage'));
+const PersonalDataPage = lazy(() => import('@/pages/PersonalDataPage'));
+const SchedulePage = lazy(() => import('@/pages/SchedulePage'));
+const BackupPage = lazy(() => import('@/pages/BackupPage'));
 
 export default function App() {
   return (

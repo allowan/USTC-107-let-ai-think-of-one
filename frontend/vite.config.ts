@@ -34,6 +34,18 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 共享运行时单独缓存；页面及其专用组件仍由动态 import 自动拆分。
+        manualChunks(id) {
+          const modulePath = id.replace(/\\/g, '/');
+          if (/\/node_modules\/(react|react-dom|scheduler)\//.test(modulePath)) return 'react-runtime';
+          if (/\/node_modules\/(rc-[^/]+|@rc-component\/[^/]+|@ant-design\/[^/]+)\//.test(modulePath)) return 'ui-runtime';
+        },
+      },
+    },
+  },
   server: {
     port: 3000,
     proxy: {
