@@ -318,6 +318,8 @@ class ChatService:
                     yield f"data: {json.dumps({'type': event_type, 'content': data})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
+        from main import ContextBudgetExceededError
+
         if thread_id in self._active_threads:
             yield f"data: {json.dumps({'type': 'error', 'content': '该话题正在生成，请等待完成或停止后重试'})}\n\n"
             return
@@ -339,6 +341,10 @@ class ChatService:
             # normal user interruption, not a model/checkpoint failure.
             logger.info("SSE stream cancelled for thread %s", thread_id)
             raise
+        except ContextBudgetExceededError:
+            logger.warning("SSE context budget reached for thread %s", thread_id)
+            error_content = "当前问题或工具结果过长，生成已停止，已有历史已保留。请缩小问题范围或新建话题；如涉及保存或导入，请先核对实际结果，避免重复操作。"
+            yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
         except (TimeoutError, ModelCallLimitExceededError, GraphRecursionError) as exc:
             logger.warning("SSE execution budget reached for thread %s (%s)", thread_id, type(exc).__name__)
             reason = "本次处理超时" if isinstance(exc, TimeoutError) else "本次处理已达到调用上限"

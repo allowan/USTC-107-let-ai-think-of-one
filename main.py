@@ -1,13 +1,22 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    ModelRequest,
+    ModelResponse,
+    ToolCallLimitMiddleware,
+)
 from langchain.tools import tool
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from tools.search import (
     fetch_course_review_text,
@@ -35,6 +44,68 @@ logger = logging.getLogger("agent")
 _CHECKPOINT_DB = Path(__file__).resolve().parent / "data" / "agent_checkpoints.db"
 _MAX_CHECKPOINTS_PER_THREAD = 50
 _MAX_CHECKPOINT_DB_MB = 200
+
+
+class ContextBudgetExceededError(ValueError):
+    """当前完整轮次已超过模型请求的近似上下文预算。"""
+
+
+class ContextBudgetMiddleware(AgentMiddleware):
+    """只裁剪模型请求中的旧轮次，保留 checkpoint 原始历史。"""
+
+    def __init__(self, max_tokens: int = 32000) -> None:
+        self.max_tokens = max_tokens
+
+    def prepare_request(self, request: ModelRequest) -> ModelRequest:
+        """保留最新连续完整轮次，并拒绝已有工具记录失配。"""
+        pending: set[str] = set()
+        for message in request.messages:
+            if isinstance(message, ToolMessage):
+                if message.tool_call_id not in pending:
+                    raise ValueError("tool_calls do not match tool messages")
+                pending.remove(message.tool_call_id)
+            else:
+                if pending:
+                    raise ValueError("tool_calls do not match tool messages")
+                if isinstance(message, AIMessage):
+                    ids = [call["id"] for call in message.tool_calls]
+                    if len(set(ids)) != len(ids):
+                        raise ValueError("tool_calls do not match tool messages")
+                    pending.update(ids)
+        if pending:
+            raise ValueError("tool_calls do not match tool messages")
+
+        def fits(messages: list[BaseMessage], system: SystemMessage | None) -> bool:
+            return count_tokens_approximately(
+                ([system] if system is not None else []) + messages,
+                chars_per_token=1.0, tools=request.tools,
+            ) <= self.max_tokens
+
+        if fits(request.messages, request.system_message):
+            return request
+        notice = "较早的对话轮次未包含在本次请求中；如回答依赖未提供的历史细节，请用户重述，不要猜测。"
+        original = request.system_message
+        content = original.content if original is not None else ""
+        content = (content + "\n" + notice) if isinstance(content, str) else [*content, {"type": "text", "text": notice}]
+        system = original.model_copy(update={"content": content}) if original is not None else SystemMessage(content=content)
+        starts = [i for i, message in enumerate(request.messages) if isinstance(message, HumanMessage)]
+        selected = None
+        for start in reversed(starts):
+            candidate = request.messages[start:]
+            if not fits(candidate, system):
+                break
+            selected = candidate
+        if selected is None:
+            raise ContextBudgetExceededError("Current turn exceeds context budget")
+        return request.override(messages=selected, system_message=system)
+
+    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
+        """为同步模型调用应用输入预算。"""
+        return handler(self.prepare_request(request))
+
+    async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelResponse:
+        """为流式异步模型调用应用相同输入预算。"""
+        return await handler(self.prepare_request(request))
 
 TOOL_METADATA = [
     {"name": "web_search", "label": "网络搜索", "description": "按关键词搜索公开网页并返回标题和URL"},
@@ -455,6 +526,7 @@ async def build_agent(username: str = "", tool_prefs: dict[str, bool] | None = N
             ),
             checkpointer=checkpointer,
             middleware=[
+                ContextBudgetMiddleware(),
                 ModelCallLimitMiddleware(run_limit=6, exit_behavior="error"),
                 ToolCallLimitMiddleware(run_limit=12, exit_behavior="continue"),
             ],
