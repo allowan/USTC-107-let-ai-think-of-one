@@ -1,5 +1,6 @@
 """网络工具证据必须来自实际结果，并保持原文本调用兼容。"""
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,7 @@ def test_search_artifact_and_text_compatibility(tool: object, helper: str, kind:
     assert card["kind"] == kind
     assert card["excerpt"] == "正文片段"
     assert card["published_at"] == ""
+    assert re.findall(r"\[证据:([0-9a-f]{64})\]", text) == [card["id"]]
 
 
 @pytest.mark.parametrize("tool,helper,kind", [
@@ -50,10 +52,28 @@ def test_fetch_uses_only_fetched_body(tool: object, helper: str, kind: str) -> N
     assert card["kind"] == kind
     assert card["excerpt"] == body[:2000]
     assert card["id"] == repeated.artifact["evidence"][0]["id"]
+    assert f"[证据:{card['id']}]\n\n{body}" in message.content
     with patch.object(search, helper, side_effect=ValueError("读取失败")):
         failed = tool.invoke(call)
     assert "失败" in failed.content
     assert failed.artifact == {"evidence": [], "warnings": []}
+    assert "[证据:" not in failed.content
+
+
+def test_each_search_marker_stays_with_its_result() -> None:
+    results = [
+        {"title": "通知甲", "url": "https://example.com/a", "content": "甲的摘要"},
+        {"title": "通知乙", "url": "https://example.com/b", "content": "乙的摘要"},
+    ]
+    text, artifact = search._search_tool_result(results, "official")
+    assert len(text.splitlines()) == 2
+    for line, result, card in zip(text.splitlines(), results, artifact["evidence"]):
+        assert re.findall(r"\[证据:([0-9a-f]{64})\]", line) == [card["id"]]
+        assert result["url"] in line
+        assert result["title"] in line
+    reordered, reordered_artifact = search._search_tool_result(list(reversed(results)), "official")
+    assert reordered.splitlines()[0].startswith(f"1. [证据:{artifact['evidence'][1]['id']}]")
+    assert reordered_artifact["evidence"][0]["id"] == artifact["evidence"][1]["id"]
 
 
 @pytest.mark.parametrize("url", ["javascript:alert(1)", "https://user:password@example.com",

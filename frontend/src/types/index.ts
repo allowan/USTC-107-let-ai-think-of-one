@@ -239,3 +239,13 @@ export interface TrackedEvent {
   url: string | null;
   created_at: string;
 }
+
+export interface NoticeContext {
+  source: string;
+  title: string;
+  url: string | null;
+  category?: string | null;
+  publishedAt?: string | null;
+  dateKind?: 'deadline' | 'start';
+  dateValue?: string | null;
+}

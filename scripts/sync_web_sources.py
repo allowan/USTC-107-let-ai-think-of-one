@@ -52,18 +52,24 @@ def sync_sources(config_path: Path, data_dir: Path) -> dict[str, int]:
 
 
 def rebuild_public_index(data_dir: Path) -> int:
-    from campus_rag.index_manager import RAGSystem
-    from campus_rag.query import reset_caches
+    """完整读取并校验通知后，通过公共门面替换索引，返回通知数。"""
+    from llama_index.core import Document
+    from campus_rag import replace_public_documents
 
-    rag = RAGSystem()
-    try:
-        rag.chroma_client.delete_collection("public")
-    except Exception:
-        pass
-    rag.create_public_index(str(data_dir))
-    # 集合被重建，进程内的检索器必须失效，否则仍指向旧集合
-    reset_caches()
-    return rag.chroma_client.get_collection("public").count()
+    if not data_dir.is_dir():
+        raise ValueError("语料目录不存在，公共索引未修改")
+    files = sorted(data_dir.glob("*.txt"))
+    if not files:
+        raise ValueError("语料目录没有通知，已拒绝清空公共索引")
+    documents = []
+    for path in files:
+        # 不能跳过坏文件后做全量替换，否则会把暂时不可读的通知当作删除。
+        content = path.read_text(encoding="utf-8-sig")
+        if not content.strip():
+            raise ValueError(f"通知内容为空，公共索引未修改：{path.name}")
+        documents.append(Document(text=content, metadata={"source": path.name}))
+    replace_public_documents(documents)
+    return len(documents)
 
 
 def main() -> int:
@@ -76,7 +82,7 @@ def main() -> int:
     stats = sync_sources(args.config.resolve(), args.data_dir.resolve())
     print("summary=" + json.dumps(stats, ensure_ascii=False, sort_keys=True))
     if args.reindex and stats["failed"] == 0:
-        print(f"public_index_count={rebuild_public_index(args.data_dir.resolve())}")
+        print(f"public_document_count={rebuild_public_index(args.data_dir.resolve())}")
     return 1 if stats["failed"] else 0
 
 

@@ -80,14 +80,19 @@ def _get_user_index(user_id: str) -> VectorStoreIndex:
         return _user_indexes[user_id]
 
 
-def _format_nodes(nodes, empty_message: str, warnings: list[str] | None = None) -> str:
+def _format_nodes(
+    nodes: list[NodeWithScore], empty_message: str, warnings: list[str] | None = None,
+    evidence: list[dict] | None = None,
+) -> str:
     prefix = "\n".join(warnings or [])
     if not nodes:
         return f"{prefix}\n{empty_message}" if prefix else empty_message
     contexts = []
-    for node in nodes:
+    for index, node in enumerate(nodes):
         meta = node.metadata or {}
         header = f"[来源: {meta.get('source', '未知来源')}]"
+        if evidence is not None:
+            header += f" [证据:{evidence[index]['id']}]"
         if meta.get("url"):
             header += f" [源链接: {meta['url']}]"
         contexts.append(f"{header}\n{node.get_content()}")
@@ -203,14 +208,16 @@ def search_notices_with_evidence(query: str) -> tuple[str, dict]:
     """从一次通知检索生成正文与真实节点证据，供 Agent 工具使用。"""
     warnings: list[str] = []
     nodes = retrieve_notice_nodes(query, warnings=warnings)
-    return _format_nodes(nodes, "未在通知中找到相关信息。", warnings), _evidence_artifact(nodes, "official", warnings)
+    artifact = _evidence_artifact(nodes, "official", warnings)
+    return _format_nodes(nodes, "未在通知中找到相关信息。", warnings, artifact["evidence"]), artifact
 
 
 def search_user_data_with_evidence(query: str, user_id: str) -> tuple[str, dict]:
     """从指定用户的一次检索生成正文与证据，不混入其他用户资料。"""
     warnings: list[str] = []
     nodes = retrieve_user_nodes(query, user_id, warnings=warnings)
-    return _format_nodes(nodes, "未在个人数据中找到相关信息。", warnings), _evidence_artifact(nodes, "personal", warnings)
+    artifact = _evidence_artifact(nodes, "personal", warnings)
+    return _format_nodes(nodes, "未在个人数据中找到相关信息。", warnings, artifact["evidence"]), artifact
 
 
 def search_notices_answer(query: str) -> str:

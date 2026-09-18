@@ -26,8 +26,11 @@ async def chat_stream(
         raise HTTPException(status_code=400, detail="消息不能为空")
     if len(content) > 10000:
         raise HTTPException(status_code=400, detail="消息长度不能超过 10000 字符")
+    read_only = body.get("read_only", False)
+    if not isinstance(read_only, bool):
+        raise HTTPException(status_code=400, detail="read_only 必须是布尔值")
 
     return StreamingResponse(
-        chat.sse_generator(user, content, topic_id, request=request),
+        chat.sse_generator(user, content, topic_id, request=request, read_only=read_only),
         media_type="text/event-stream; charset=utf-8",
     )

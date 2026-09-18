@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import type { TopicInfo } from '@/types';
+import type { NoticeContext, TopicInfo } from '@/types';
 import { topicApi } from '@/services/api';
+import { buildNoticePrompt } from '@/utils/noticeAssistant';
 
 interface TopicState {
   topics: TopicInfo[];
@@ -13,6 +14,11 @@ interface TopicState {
   deleteTopic: (topicId: string) => Promise<void>;
   renameTopic: (topicId: string, name: string) => Promise<void>;
   setActiveTopicId: (id: string) => void;
+  noticeCreating: boolean;
+  noticeContexts: Record<string, NoticeContext>;
+  noticeDraft: { topicId: string; content: string } | null;
+  createNoticeTopic: (notice: NoticeContext) => Promise<string>;
+  consumeNoticeDraft: (topicId: string) => void;
 }
 
 export const useTopicStore = create<TopicState>((set, get) => ({
@@ -21,6 +27,28 @@ export const useTopicStore = create<TopicState>((set, get) => ({
   loading: false,
   loaded: false,
   loadError: false,
+  noticeCreating: false,
+  noticeContexts: {},
+  noticeDraft: null,
+
+  createNoticeTopic: async (notice) => {
+    if (get().noticeCreating) throw new Error('正在创建通知话题，请稍候');
+    const content = buildNoticePrompt(notice);
+    set({ noticeCreating: true });
+    try {
+      const { data } = await topicApi.create(`办理：${notice.title}`.slice(0, 80));
+      set(state => ({ topics: [data, ...state.topics], activeTopicId: data.id,
+        noticeContexts: { ...state.noticeContexts, [data.id]: { ...notice } },
+        noticeDraft: { topicId: data.id, content } }));
+      return data.id;
+    } finally {
+      set({ noticeCreating: false });
+    }
+  },
+
+  consumeNoticeDraft: (topicId) => {
+    if (get().noticeDraft?.topicId === topicId) set({ noticeDraft: null });
+  },
 
   fetchTopics: async () => {
     set({ loading: true });

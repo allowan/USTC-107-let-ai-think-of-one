@@ -49,6 +49,8 @@ def init_chat():
         model_provider="openai",
         base_url=base_url,
         api_key=api_key,
+        timeout=45.0,
+        max_retries=1,
     )
 
 

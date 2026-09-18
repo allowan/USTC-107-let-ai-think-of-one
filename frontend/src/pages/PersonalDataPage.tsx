@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Button, Input, Modal, Popconfirm, App, Empty, Card, Space, Typography, Segmented, Upload, Alert } from 'antd';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Button, Input, Modal, Popconfirm, App, Empty, Card, Space, Typography, Segmented, Upload, Alert, Spin } from 'antd';
 import { InboxOutlined, CalendarOutlined, PlusOutlined, EditOutlined, DeleteOutlined, DatabaseOutlined } from '@ant-design/icons';
 import { personalDataApi } from '@/services/api';
 import type { PersonalDataItem } from '@/types';
@@ -21,7 +21,7 @@ const errDetail = (e: unknown, fallback: string): string => {
 export default function PersonalDataPage() {
   const { message } = App.useApp();
   const [items, setItems] = useState<PersonalDataItem[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [addVisible, setAddVisible] = useState(false);
   const [editVisible, setEditVisible] = useState(false);
   const [newContent, setNewContent] = useState('');
@@ -63,16 +63,27 @@ export default function PersonalDataPage() {
     return false;
   };
   const [scheduleImportVisible, setScheduleImportVisible] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const loadSequence = useRef(0);
 
-  const fetchData = () => {
+  const fetchData = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
-    personalDataApi.list()
-      .then(({ data }) => setItems(data.items))
-      .catch(() => message.error('获取个人数据失败'))
-      .finally(() => setLoading(false));
-  };
+    try {
+      const { data } = await personalDataApi.list();
+      if (sequence !== loadSequence.current) return;
+      setItems(data.items);
+      setLoaded(true);
+      setLoadError('');
+    } catch (error) {
+      if (sequence === loadSequence.current) setLoadError(errDetail(error, '获取个人数据失败，请重试'));
+    } finally {
+      if (sequence === loadSequence.current) setLoading(false);
+    }
+  }, []);
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => { void fetchData(); return () => { loadSequence.current++; }; }, [fetchData]);
 
   const handleAdd = async () => {
     if (!newContent.trim()) {
@@ -131,6 +142,7 @@ export default function PersonalDataPage() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
         <Text strong style={{ fontSize: 18 }}>个人数据</Text>
         <Space>
+          <Button onClick={() => void fetchData()} loading={loading}>刷新资料</Button>
           <Button icon={<CalendarOutlined />} onClick={() => setScheduleImportVisible(true)}>
             导入已有课表
           </Button>
@@ -140,7 +152,11 @@ export default function PersonalDataPage() {
         </Space>
       </div>
 
-      {items.length === 0 && !loading ? (
+      {loadError && <Alert type="error" showIcon message={loadError} style={{ marginBottom: 16 }}
+        description={loaded ? '以下保留上次成功获取的资料，可能已过期；重新加载成功后再编辑或删除。' : '尚未成功读取资料，无法确认资料是否为空。'}
+        action={<Button size="small" loading={loading} onClick={() => void fetchData()}>重新加载</Button>} />}
+      {loading && !loaded && <Spin tip="正在读取个人资料"><div style={{ minHeight: 80 }} /></Spin>}
+      {items.length === 0 && loaded && !loading && !loadError ? (
         <Empty description="暂无个人数据，点击上方按钮添加" />
       ) : (
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
@@ -159,14 +175,15 @@ export default function PersonalDataPage() {
               }
               extra={
                 <Space>
-                  <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(item)}>
+                  <Button size="small" disabled={loading || !!loadError} icon={<EditOutlined />} onClick={() => openEdit(item)}>
                     编辑
                   </Button>
                   <Popconfirm
                     title="确定删除此数据？"
+                    disabled={loading || !!loadError}
                     onConfirm={() => handleDelete(item.source)}
                   >
-                    <Button size="small" danger icon={<DeleteOutlined />}>
+                    <Button size="small" danger disabled={loading || !!loadError} icon={<DeleteOutlined />}>
                       删除
                     </Button>
                   </Popconfirm>

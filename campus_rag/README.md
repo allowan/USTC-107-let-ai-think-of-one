@@ -6,6 +6,8 @@
 
 `search_notices_with_evidence(query)` / `search_user_data_with_evidence(query, user_id)` 返回 `(content, artifact)`，只检索一次并从同一组节点生成工具正文和证据。artifact 含 `evidence` 与 `warnings`；每片段包含稳定标识、来源、标题、链接、发布日期、最多 2000 字原文及类别。发布日期仅使用明确元数据/标记为发布日期的原文，不将正文里的活动日期当成发布日期。工具通过 LangChain `content_and_artifact` 持久化，普通字符串搜索接口保持兼容。
 
+证据版工具正文在每个片段头部附上 `[证据:ID]`，与 artifact 的完整 ID 一一对应，同一来源的不同片段使用不同 ID。Agent 可据此生成 `[来源](#evidence-ID)` 行内引用；普通字符串搜索接口不增加该标记，不额外检索或调用模型。
+
 跨模块使用一律通过包入口导出的公共 API，禁止直接导入内部函数或私有变量。
 
 ### 纯检索（不经过 LLM）
@@ -42,6 +44,8 @@ delete_user_data("local_user", "课表.txt")
 ```
 
 同步服务专用（公共集合）：`add_public_documents`（追加）/ `upsert_public_documents`（按来源替换）/ `delete_public_data` / `replace_public_documents`（全量替换）/ `reset_caches`。
+
+采集脚本的 `--reindex` 同样统一调用 `replace_public_documents`，不再绕过门面删除公共集合。脚本先完整校验所选目录全部通知；空目录、空文件和读取失败不得触发替换。成功输出通知数 `public_document_count`。全量替换范围为所选目录，不能将只含部分新通知的目录作为完整快照；SQLite 事件库与向量库仍非跨库事务，严格失败后应重试恢复一致性。
 
 写入先完成新分块的嵌入与持久化，再删除被替换的旧 ID；新增写入失败会尝试清理本次新增 ID；移除旧 ID 失败时保留已写入的新内容供重试，异常继续上抛。公共全量同步沿用现有集合，空快照保持为空。该顺序保障嵌入/新增写入失败时旧数据仍在，但不是跨 ChromaDB 与事件库的事务：进程在写新与删旧之间崩溃可能暂留重复块，需重试同步。进程内写操作串行化，查询仍可并行。
 
@@ -171,8 +175,10 @@ pytest tests/test_campus_rag.py -v
 
 # 事件抽取质量评测（零第三方依赖，仅标准库）：
 # 对比 campus_rag/data 真值（tests/events_ground_truth.json）与 parse_notice 输出，
-# 输出逐字段 P/R 与偏差明细；调整 events.py 抽取正则后重跑验证。
+# 输出配置、真值覆盖、逐字段 P/R 与偏差明细；调整抽取正则后重跑验证。
 python scripts/eval_events.py
+# 可选逐字段质量门槛（0–1，默认 0，仅强制完整覆盖）：
+python scripts/eval_events.py --min-precision 0.8 --min-recall 0.8
 
 # 检索评测：复用生产 search_keyword_nodes，默认 BM25 离线模式。
 # 输出 Hit@K、MRR@10、各必需来源的 Recall@K、负例误召回率、分组指标与耗时。
@@ -190,7 +196,27 @@ python -c "from campus_rag import search_notices_answer; print(search_notices_an
 
 嵌入或 LLM 不可用时，依赖网络的用例会自动跳过（不视为失败）。
 
+事件评测只读语料，不连接数据库或调用模型。`--truth`、`--data-dir` 可指定独立真值与语料，`--today YYYY-MM-DD` 可指定抽取参考日期（默认 `2026-08-15`）；报告记录这些配置以便复现。真值中的每篇通知必须有非空语料，缺失/空白文档逐项列出，无真值语料单独报告并跳过。覆盖不完整时只报告已匹配样本指标，不能作为完整基线；不应通过删减真值掩盖缺失。
+
+字段值错误 `MM` 同时计入精度和召回的分母：`P = TP / (TP + FP + MM)`，`R = TP / (TP + FN + MM)`；分母为零按 1 计，空字段双方一致计为 `OK`，不增加 `TP`。门槛针对每个字段独立检查。退出码 `0` 表示覆盖完整且达到指定门槛，`1` 表示缺失样本、零匹配或质量未达标，`2` 表示输入/参数无效。默认不设抽取质量下限，因此默认成功不代表抽取全部正确。离线守护测试：`python -m pytest tests/test_event_evaluation.py -q`，指标测试使用临时语料，另有覆盖测试只读核对仓库真值样本是否存在且非空，不访问数据库。
+
+2026-09-17 事件基线：经来源 URL 和正文核对，将 10 个旧真值文件名对齐现有 `ID_标题.txt` 命名，全部预期字段保持不变，覆盖恢复至 17/17（100%）。在参考日期 `2026-08-15` 下，六字段精度均为 100%；`category`、`publish_date`、`event_end` 召回为 100%，`deadline` 为 83.3%（5/6），`event_start` 为 85.7%（6/7），`location` 为 88.9%（8/9）。仍有三处漏抽：本科选课通知的跨行表格截止日，以及毕业思政课新闻的活动日期和地点；保留这些真值暴露现有解析边界，不以修改预期值制造成功。默认门槛退出 0 不代表无偏差。
+
 2026-09-13 本轮离线 BM25 基线：41 题（38 正例、3 无答案负例），Hit@1 为 84.2%，Hit@5/Recall@5 均为 100%，MRR@10 为 0.902；3 个负例中 2 个仍返回候选。该小样本结果只衡量当前语料的来源召回，不能证明最终回答准确率，也不能代表在线混合检索。新增负例揭示了常见词/错误年份仍会召回资料的边界，需用答案审查案例继续验证模型是否正确说明证据不足。
+
+检索集现有 56 题，开发集 49 题、固定留出集 7 题；未标注 `split` 的题目归开发集，留出按问题划分，并非来源隔离。`tests/answer_review_cases.json` 现有 15 条人工答案审查用例，涵盖年份、人群、跨来源对比、附件和二维码目标缺失；这些是审查标准，不表示已验证真实模型回答。
+
+```powershell
+# 在项目根目录执行；审计不初始化检索或调用服务。
+.venv/Scripts/python.exe scripts/eval_retrieval.py --audit-only
+.venv/Scripts/python.exe scripts/eval_retrieval.py --split development --output tests/retrieval_baseline_development.json
+# 开发调参完成后再评估留出集，输出需使用尚不存在的新文件。
+.venv/Scripts/python.exe scripts/eval_retrieval.py --split holdout --output tests/retrieval_baseline_holdout.json
+```
+
+脚本先检查必需来源有非空文本，缺失时返回 2 并阻止检索。JSON 记录模式、分组、Python 版本、语料/真值 SHA256、建索引及逐题耗时、实际来源、错误和分类指标；拒绝覆盖已有报告，后续运行请更换结果文件名。离线模式不使用生成模型；混合模式的嵌入/重排序配置未记录，需另行核对，且本地文本覆盖审计不证明向量库已经同步。检索错误返回 1；正常完成不代表每题都正确或达到任何质量门槛。回归：`python -m pytest tests/test_retrieval_evaluation.py -q`。
+
+2026-09-17 开发集离线 BM25 基线保存在 `tests/retrieval_baseline_development.json`：49 题（45 正例、4 负例），来源缺失 0、检索错误 0；Hit@1 为 86.7%，Recall@1 为 84.4%，Hit@5/Recall@5 均为 100%，MRR@10 为 0.917；4 个负例中 3 个仍召回候选。留出集仅做来源审计，尚未执行查询；未调用真实生成模型。旧基线与本次题集不同，不应将分数差异直接归因为检索质量提升。
 
 ## 统一检索管线
 

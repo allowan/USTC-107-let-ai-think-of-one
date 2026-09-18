@@ -39,5 +39,20 @@
   {"query": "2026年本科生夏季和秋季学期选课通知", "expect": ["20153_2026年夏季学期本科生选课通知", "20425_2026年秋季学期本科生选课通知"], "category": "semester_conflict"},
   {"query": "量子奶茶传送门的开放时间", "expect": [], "category": "no_answer"},
   {"query": "2099年秋季学期本科生选课截止时间", "expect": [], "category": "no_answer_wrong_year"},
-  {"query": "zzzxqvqzz", "expect": [], "category": "no_answer_oov"}
+  {"query": "zzzxqvqzz", "expect": [], "category": "no_answer_oov"},
+  {"query": "2026年秋季本科生正选与退课截止到几点，个性化申请也是同一时间吗", "expect": ["20425_"], "category": "deadline_distinction", "split": "development"},
+  {"query": "2026级本科新生可以直接按照7月23日的选课安排选课吗", "expect": ["20425_"], "category": "audience_exception", "split": "holdout"},
+  {"query": "研究生2026年秋季学期教学日历第一周开始就上课吗", "expect": ["3498_"], "category": "date_distinction", "split": "development"},
+  {"query": "研究生2026年秋季学期英语免修占不占23学分限额", "expect": ["3498_"], "category": "audience_exception", "split": "holdout"},
+  {"query": "硕博连读转博后应该用硕士学号还是博士学号选课", "expect": ["3498_"], "category": "explicit_year_audience", "split": "development"},
+  {"query": "2026年夏季本科生选课遇到实习实验课和考试冲突怎么办", "expect": ["20153_"], "category": "semester_conflict", "split": "holdout"},
+  {"query": "2026年夏季和秋季本科生正选与退课分别哪天截止", "expect": ["20153_", "20425_"], "category": "multi_source", "split": "development"},
+  {"query": "2026年秋季本科课程助教大一学生能申请吗", "expect": ["20406_"], "category": "audience_exception", "split": "development"},
+  {"query": "研究生申请2026年秋季本科课程助教是否需要导师同意", "expect": ["20406_"], "category": "audience_exception", "split": "holdout"},
+  {"query": "本科课程助教申请截止和老师审核录用截止是同一天吗", "expect": ["20406_"], "category": "deadline_distinction", "split": "development"},
+  {"query": "我能申请自己选修课程的本科课程助教吗", "expect": ["20406_"], "category": "audience_exception", "split": "development"},
+  {"query": "一〇七杯2026年补报名截止是哪天，智能体赛道联系谁", "expect": ["20412_"], "category": "explicit_year_audience", "split": "holdout"},
+  {"query": "比较2026年秋季本科课程助教申请截止与本科生正选截止", "expect": ["20406_", "20425_"], "category": "multi_source", "split": "holdout"},
+  {"query": "2099年秋季研究生英语课免修规定是什么", "expect": [], "category": "no_answer_wrong_year", "split": "holdout"},
+  {"query": "量子奶茶传送门和反重力宿舍的预约入口分别在哪里", "expect": [], "category": "no_answer", "split": "development"}
 ]

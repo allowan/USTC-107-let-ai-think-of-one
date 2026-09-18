@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langgraph.errors import GraphRecursionError
+
 if TYPE_CHECKING:
     from fastapi import Request
     from main import AgentContext
@@ -21,6 +24,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("server")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+CHAT_TIMEOUT_SECONDS = 180.0
+CHAT_RECURSION_LIMIT = 40
 
 
 def merge_evidence(existing: dict, artifact: object) -> dict:
@@ -222,23 +227,33 @@ class ChatService:
         return await get_history(thread_id)
 
     async def stream_chat_events(
-        self, username: str, content: str, topic_id: str,
+        self, username: str, content: str, topic_id: str, *, read_only: bool = False,
     ) -> AsyncIterator[tuple[str, str | dict]]:
         """Async generator yielding SSE-style (event_type, data) tuples."""
         from langchain_core.messages import AIMessageChunk, ToolMessage
 
-        ctx = await self.get_agent(username)
+        if read_only:
+            from campus_rag import get_user_tool_prefs
+            from main import build_agent
+
+            prefs = await asyncio.to_thread(get_user_tool_prefs, username)
+            ctx = await build_agent(username=username, tool_prefs=prefs, read_only=True)
+        else:
+            ctx = await self.get_agent(username)
         thread_id = self._thread_id(username, topic_id)
 
         context_id = id(ctx)
         self._active_contexts[context_id] = self._active_contexts.get(context_id, 0) + 1
+        if read_only:
+            # 请求专用实例不进入普通工具缓存，结束/停止时复用现有收尾逻辑关闭连接。
+            self._retired_contexts[context_id] = ctx
         try:
             seen_tool_names: set[str] = set()
             yield ("thinking", "")
 
             async with aclosing(ctx.agent.astream(
                 {"messages": [{"role": "user", "content": content}]},
-                {"configurable": {"thread_id": thread_id}},
+                {"configurable": {"thread_id": thread_id}, "recursion_limit": CHAT_RECURSION_LIMIT},
                 stream_mode="messages",
             )) as messages:
                 async for msg_chunk, _metadata in messages:
@@ -282,6 +297,7 @@ class ChatService:
 
     async def sse_generator(
         self, username: str, content: str, topic_id: str, request: Request | None = None,
+        *, read_only: bool = False,
     ) -> AsyncIterator[str]:
         """Stream SSE events while preserving history when checkpoint validation fails."""
         thread_id = self._thread_id(username, topic_id)
@@ -293,7 +309,8 @@ class ChatService:
             if request is not None and await request.is_disconnected():
                 logger.info("SSE client disconnected before streaming thread %s", thread_id)
                 return
-            async with aclosing(self.stream_chat_events(username, content, topic_id)) as stream:
+            options = {"read_only": True} if read_only else {}
+            async with aclosing(self.stream_chat_events(username, content, topic_id, **options)) as stream:
                 async for event_type, data in stream:
                     if request is not None and await request.is_disconnected():
                         logger.info("SSE client disconnected during thread %s", thread_id)
@@ -301,19 +318,38 @@ class ChatService:
                     yield f"data: {json.dumps({'type': event_type, 'content': data})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
+        from main import ContextBudgetExceededError
+
         if thread_id in self._active_threads:
             yield f"data: {json.dumps({'type': 'error', 'content': '该话题正在生成，请等待完成或停止后重试'})}\n\n"
             return
         self._active_threads.add(thread_id)
         try:
+            deadline = asyncio.get_running_loop().time() + CHAT_TIMEOUT_SECONDS
             async with aclosing(_stream()) as stream:
-                async for chunk in stream:
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    try:
+                        chunk = await asyncio.wait_for(anext(stream), timeout=remaining)
+                    except StopAsyncIteration:
+                        break
                     yield chunk
         except asyncio.CancelledError:
             # A disconnected StreamingResponse is cancelled by ASGI. It is a
             # normal user interruption, not a model/checkpoint failure.
             logger.info("SSE stream cancelled for thread %s", thread_id)
             raise
+        except ContextBudgetExceededError:
+            logger.warning("SSE context budget reached for thread %s", thread_id)
+            error_content = "当前问题或工具结果过长，生成已停止，已有历史已保留。请缩小问题范围或新建话题；如涉及保存或导入，请先核对实际结果，避免重复操作。"
+            yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
+        except (TimeoutError, ModelCallLimitExceededError, GraphRecursionError) as exc:
+            logger.warning("SSE execution budget reached for thread %s (%s)", thread_id, type(exc).__name__)
+            reason = "本次处理超时" if isinstance(exc, TimeoutError) else "本次处理已达到调用上限"
+            error_content = f"{reason}，生成已停止，已有历史已保留。请缩小问题范围后重试；如涉及保存或导入，请先核对实际结果，避免重复操作。"
+            yield f"data: {json.dumps({'type': 'error', 'content': error_content})}\n\n"
         except Exception as exc:
             err_msg = str(exc)
             if "tool_calls" in err_msg and "tool messages" in err_msg:

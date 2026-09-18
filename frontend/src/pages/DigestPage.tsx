@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { Alert, Checkbox, Modal, Card, Tag, Button, App, Spin, Empty, Space, Typography, Tooltip } from 'antd';
 import {
   BellOutlined,
@@ -13,6 +13,7 @@ import {
 import { digestApi, scheduleApi, trackApi } from '@/services/api';
 import type { CourseReminderData, CourseReminderDay, DigestData, DigestEvent, TrackedEvent } from '@/types';
 import { buildTrackedCalendar, isCalendarDate } from '@/utils/calendarExport';
+import { NoticeAssistantButton } from '@/components/NoticeAssistant';
 
 const { Text, Link } = Typography;
 
@@ -42,7 +43,10 @@ function badgeOf(e: DigestEvent): Badge {
   }
   const when = (e.kind === 'start' ? e.event_start : e.deadline) ?? '';
   const d = e.days_left;
-  if (d !== undefined && d <= 0) {
+  if (d !== undefined && d < 0) {
+    return { dateText: when.slice(5), leftText: `${e.kind === 'start' ? '已开始' : '已截止'} ${-d} 天`, cls: 'badge-recent' };
+  }
+  if (d === 0) {
     return { dateText: '今天', leftText: e.kind === 'start' ? '开始' : '截止', cls: 'badge-urgent' };
   }
   if (d !== undefined && d <= 3) {
@@ -62,9 +66,10 @@ interface EventRowProps {
   tracked: boolean;
   onTrack: (e: DigestEvent) => void;
   onUntrack: (source: string) => void;
+  trackingUnavailable: boolean;
 }
 
-function EventRow({ e, tracked, onTrack, onUntrack }: EventRowProps) {
+function EventRow({ e, tracked, onTrack, onUntrack, trackingUnavailable }: EventRowProps) {
   const badge = badgeOf(e);
   const isRecent = e.days_since !== undefined;
   return (
@@ -102,11 +107,16 @@ function EventRow({ e, tracked, onTrack, onUntrack }: EventRowProps) {
               <LinkOutlined /> 原文
             </Link>
           )}
+          <NoticeAssistantButton notice={{ source: e.source, title: e.title || e.source, url: e.url,
+            category: e.category, publishedAt: e.publish_date, dateKind: e.kind || 'deadline',
+            dateValue: e.kind === 'start' ? e.event_start : e.deadline }} />
         </div>
       </div>
       <Tooltip title={tracked ? '取消追踪' : '追踪此事件'}>
         <Button
           type="text"
+          disabled={trackingUnavailable}
+          aria-label={tracked ? '取消追踪' : '追踪此事件'}
           className={`digest-track-btn${tracked ? ' is-tracked' : ''}`}
           icon={tracked ? <StarFilled /> : <StarOutlined />}
           onClick={() => (tracked ? onUntrack(e.source) : onTrack(e))}
@@ -124,9 +134,10 @@ interface SectionProps {
   onTrack: (e: DigestEvent) => void;
   onUntrack: (source: string) => void;
   emptyHint: string;
+  trackingUnavailable: boolean;
 }
 
-function EventSection({ title, icon, events, trackedSources, onTrack, onUntrack, emptyHint }: SectionProps) {
+function EventSection({ title, icon, events, trackedSources, onTrack, onUntrack, emptyHint, trackingUnavailable }: SectionProps) {
   return (
     <Card size="small" className="digest-card" title={<Space>{icon}<span>{title}</span></Space>}>
       {events.length === 0 ? (
@@ -139,6 +150,7 @@ function EventSection({ title, icon, events, trackedSources, onTrack, onUntrack,
             tracked={trackedSources.has(e.source)}
             onTrack={onTrack}
             onUntrack={onUntrack}
+            trackingUnavailable={trackingUnavailable}
           />
         ))
       )}
@@ -155,12 +167,13 @@ export default function DigestPage() {
   const [loading, setLoading] = useState(false);
   const [days, setDays] = useState(7);
   const [digest, setDigest] = useState<DigestData | null>(null);
-  const [tracked, setTracked] = useState<TrackedEvent[]>([]);
+  const [tracked, setTracked] = useState<TrackedEvent[] | null>(null);
   const [courseReminders, setCourseReminders] = useState<CourseReminderData | null>(null);
-  const [loadError, setLoadError] = useState(false);
+  const [loadErrors, setLoadErrors] = useState({ digest: false, tracked: false, courses: false });
   const [calendarPreview, setCalendarPreview] = useState<TrackedEvent[] | null>(null);
   const [calendarSelection, setCalendarSelection] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
+  const loadSequence = useRef(0);
 
   const exportCalendar = async () => {
     if (!calendarPreview || exporting || !calendarSelection.length) return;
@@ -182,28 +195,31 @@ export default function DigestPage() {
   };
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
-    try {
-      const [{ data: d }, { data: t }, { data: courses }] = await Promise.all([
-        digestApi.get(days),
-        trackApi.list(),
-        scheduleApi.getReminders(),
-      ]);
-      setDigest(d);
-      setTracked(t.items || []);
-      setCourseReminders(courses);
-      setLoadError(false);
-    } catch {
-      setLoadError(true);
-      message.error('加载今日面板失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [days, message]);
+    // 各区域独立提交结果，慢请求或失败不能挡住其余区域；迟到响应不能覆盖新范围。
+    const refresh = async <T,>(key: keyof typeof loadErrors, request: Promise<{ data: T }>, apply: (data: T) => void) => {
+      try {
+        const { data } = await request;
+        if (sequence !== loadSequence.current) return;
+        apply(data);
+        setLoadErrors(previous => ({ ...previous, [key]: false }));
+      } catch {
+        if (sequence === loadSequence.current) setLoadErrors(previous => ({ ...previous, [key]: true }));
+      }
+    };
+    await Promise.all([
+      refresh('digest', digestApi.get(days), setDigest),
+      refresh('tracked', trackApi.list(), data => setTracked(data.items || [])),
+      refresh('courses', scheduleApi.getReminders(), setCourseReminders),
+    ]);
+    if (sequence === loadSequence.current) setLoading(false);
+  }, [days]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadSequence.current++; }; }, [load]);
 
-  const trackedSet = new Set(tracked.map((t) => t.source));
+  const trackedSet = new Set((tracked || []).map((t) => t.source));
+  const trackingUnavailable = tracked === null || loadErrors.tracked;
 
   const handleTrack = async (e: DigestEvent) => {
     const isStart = e.kind === 'start';
@@ -227,22 +243,21 @@ export default function DigestPage() {
   const handleUntrack = async (source: string) => {
     try {
       await trackApi.remove(source);
-      setTracked((prev) => prev.filter((t) => t.source !== source));
+      setTracked((prev) => (prev || []).filter((t) => t.source !== source));
     } catch {
       message.error('取消追踪失败');
     }
   };
 
   // 追踪事件渲染为顶部固定区；date_value 非法时跳过倒计时（NaN 防御）
-  const trackedAsEvents: DigestEvent[] = tracked.map((t) => {
+  const trackedAsEvents: DigestEvent[] = (tracked || []).map((t) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     let daysLeft: number | undefined;
-    if (t.date_value) {
-      const d = new Date(t.date_value);
-      if (!Number.isNaN(d.getTime())) {
-        daysLeft = Math.round((d.getTime() - today.getTime()) / 86400000);
-      }
+    if (isCalendarDate(t.date_value)) {
+      // 用本地日历日对应的 UTC 序号相减，避免时区偏移和夏令时改变全天倒计时。
+      const todayOrdinal = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+      daysLeft = (Date.parse(`${t.date_value}T00:00:00Z`) - todayOrdinal) / 86400000;
     }
     return {
       source: t.source,
@@ -296,9 +311,9 @@ export default function DigestPage() {
           </Text>
         </div>
         <Space>
-          <Button size="small" disabled={!tracked.length || loading} onClick={() => {
-            setCalendarPreview(tracked.map(item => ({ ...item })));
-            setCalendarSelection(tracked.filter(item => isCalendarDate(item.date_value)).map(item => item.source));
+          <Button size="small" disabled={!tracked?.length || loading || trackingUnavailable} onClick={() => {
+            setCalendarPreview((tracked || []).map(item => ({ ...item })));
+            setCalendarSelection((tracked || []).filter(item => isCalendarDate(item.date_value)).map(item => item.source));
           }}>导出追踪日历</Button>
           <Button.Group>
             {[7, 14, 30].map((d) => (
@@ -307,15 +322,15 @@ export default function DigestPage() {
               </Button>
             ))}
           </Button.Group>
-          <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading} />
+          <Button size="small" aria-label="刷新今日面板" icon={<ReloadOutlined />} onClick={load} loading={loading} />
         </Space>
       </div>
 
-      {loadError && <Alert type="error" showIcon style={{ marginBottom: 16 }}
-        message="今日面板加载失败"
-        description={digest ? '以下保留上次成功获取的结果，可能已经过期。请重新加载后核对截止事项。' : '无法确认当前是否有截止事项或课程安排，请重新加载。'}
+      {(['digest', 'tracked', 'courses'] as const).filter(key => loadErrors[key]).map(key => <Alert key={key} type="error" showIcon style={{ marginBottom: 16 }}
+        message={`${{ digest: '校园通知', tracked: '追踪事件', courses: '课程提醒' }[key]}加载失败`}
+        description="此区域如有旧结果会保留，但可能已经过期；未取得数据不代表没有安排。其他区域仍可使用，请重试后核对。"
         action={<Button size="small" onClick={() => void load()} loading={loading}>重新加载</Button>}
-      />}
+      />)}
 
       <Modal title="预览追踪日历" open={calendarPreview !== null} onCancel={() => { if (!exporting) setCalendarPreview(null); }}
         onOk={() => void exportCalendar()} okText="确认下载日历" cancelText="取消" confirmLoading={exporting}
@@ -331,10 +346,9 @@ export default function DigestPage() {
         </Checkbox.Group>
       </Modal>
 
-      {loading && !digest ? (
+      {loading && !digest && !tracked && !courseReminders && (
         <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
-      ) : !digest ? null : (
-        <>
+      )}
           {courseReminders?.calendar_configured && (
             <Card size="small" className="digest-card" title={<Space><BellOutlined style={{ color: '#1677ff' }} /><span>课程提醒 · {courseReminders.semester}</span></Space>}>
               {reminderRows('今天', courseReminders.today)}
@@ -350,28 +364,29 @@ export default function DigestPage() {
               onTrack={handleTrack}
               onUntrack={handleUntrack}
               emptyHint=""
+              trackingUnavailable={trackingUnavailable}
             />
           )}
-          <EventSection
+          {digest && <EventSection
             title={`即将发生（${upcoming.length}）`}
             icon={<ClockCircleOutlined style={{ color: '#1677ff' }} />}
             events={upcoming}
             trackedSources={trackedSet}
             onTrack={handleTrack}
             onUntrack={handleUntrack}
-            emptyHint={`未来 ${days} 天暂无即将截止或开始的事件`}
-          />
-          <EventSection
+            emptyHint={`未来 ${digest.days} 天暂无即将截止或开始的事件`}
+            trackingUnavailable={trackingUnavailable}
+          />}
+          {digest && <EventSection
             title={`最近发布（${recent.length}）`}
             icon={<CalendarOutlined style={{ color: '#52c41a' }} />}
             events={recent}
             trackedSources={trackedSet}
             onTrack={handleTrack}
             onUntrack={handleUntrack}
-            emptyHint={`最近 ${days} 天暂无新通知`}
-          />
-        </>
-      )}
+            emptyHint={`最近 ${digest.days} 天暂无新通知`}
+            trackingUnavailable={trackingUnavailable}
+          />}
     </div>
   );
 }

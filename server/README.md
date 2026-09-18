@@ -4,6 +4,26 @@
 
 主服务（端口 8000）：路由/服务分层架构，SSE 流式对话，本地单用户（无 JWT）。
 
+## 本地生产启动
+
+首次安装依赖后，在 `frontend` 目录运行 `npm run build` 生成 `frontend/dist`。随后回到项目根目录，在 PowerShell 执行：
+
+```powershell
+.\scripts\start_local.ps1 -CheckOnly # 仅检查虚拟环境解释器和前端构建入口
+.\scripts\start_local.ps1            # 前台运行现有 server.py，Ctrl+C 停止
+```
+
+如果 Windows PowerShell 提示禁止运行脚本，可使用仅对本次进程生效的命令（不修改系统执行策略）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1 -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1
+```
+
+启动脚本也可从其他目录通过绝对路径调用；它固定使用项目的 `.venv/Scripts/python.exe`，运行期间将工作目录切到项目根目录，结束后恢复。脚本不会安装依赖、构建前端、修改配置或启动 Sync Server；缺少解释器或 `frontend/dist/index.html` 时给出修复指引并退出。预检只检查文件存在，不代表模型服务或全部 Python 依赖可用。
+
+服务启动成功后打开 `http://127.0.0.1:8000`，无需单独运行 Vite。生产静态托管允许直接访问或刷新 `/today`、`/chat`、`/personal-data`、`/schedule`、`/news`、`/sync`、`/backup`（含末尾斜杠），由同一份 `index.html` 交给前端路由处理。仅这些已知页面使用回退；缺失资源、未知页面及不存在的 API 保持 404，静态目录外的文件不可访问。新增前端页面时同步维护 `FrontendStaticFiles` 的页面清单。
+
 ## 架构分层
 
 | 层 | 位置 | 职责 |
@@ -82,6 +102,7 @@
 
 - **回答证据**：沿用 `astream(stream_mode="messages")`，从成功工具消息的 `artifact` 发出 `evidence` SSE 事件（content 为 `{evidence: [...], warnings: [...]}`）。卡片字段为 `id/source/title/url/published_at/excerpt/kind`，类别区分官方、个人、公开网页及学生评价。仅转发白名单字段和 HTTP(S) 链接，每轮最多 40 个片段，每片段最多 2000 字。卡片表示本轮实际检索资料，并不宣称模型每句话均已核验；降级说明单独展示。工具 artifact 由现有 checkpoint 保存，历史接口在对应助手回合返回相同可选字段；无 artifact 的旧历史保持兼容，不迁移数据库，文字备份仍只包含可见正文。
 - **回答核对**：Agent 提示词要求核对证据年份、学期和适用人群，区分发布/开始/截止日期；无相符证据时说明不足，冲突来源并列给出。此约束仍需用 `tests/answer_review_cases.json` 审查真实回答，来源命中测试不能代替答案正确性测试。
+- **行内引用**：工具正文中的 `[证据:ID]` 对应同次工具调用保存的 artifact。提示词要求在日期、资格、材料、费用等关键事实后使用 `[来源](#evidence-ID)`，只引用本轮支持该事实的片段；无标识的工具保持普通出处。前端按当前助手回合的证据精确匹配，不跨回合寻找，也不将匹配成功视为事实核验。无需增加 SSE 字段或迁移历史。
 
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
 - **话题删除顺序**：先删除 checkpoint，再删除话题元数据；checkpoint 清理失败时返回 503 并保留可见话题，避免接口报告成功后留下无法访问的私人历史。清理操作可重复执行，元数据删除失败时再次删除即可收敛。
@@ -100,6 +121,14 @@
 - **事件失败语义**：事件库查询失败必须向 `/api/digest` 返回稳定的 503，Agent 工具提示“事件数据暂时不可用”，不得伪装成“没有即将发生的事件”。空列表只表示查询成功且确实无数据。追踪 CRUD 全部进入线程池；来源、标题、类别、日期和 URL 在写库前校验长度与格式，日期统一保存为 `YYYY-MM-DD`。
 - **聊天错误脱敏**：普通模型或工具链异常只向 SSE 返回稳定错误文案，日志记录异常类型和 thread 标识，不记录供应商异常正文，避免请求内容或凭据随异常泄露。checkpoint 工具消息失配继续使用专门的历史保留提示。
 - **相对时间解析**：`main.py` 构建 agent 时在 system prompt 注入当天日期与三学期制映射（仅作无校历时的回退）；`get_my_schedule` 与今日/明日提醒统一调用 `ScheduleService.resolve_semester()`，优先选择覆盖所查日期且最近开始的本用户校历，无覆盖才按月份推断。未导入所选学期时明确报告已导入学期列表，不返回其他学期课表；显式指定学期仍按用户选择查询。
+
+## 对话执行预算
+
+通知办理请求可显式传入 `read_only: true`（仅接受布尔值，默认 false）。服务为该请求构建独立的只读工具 Agent，仍尊重用户工具开关；允许通知/个人资料/课表查询与公开网页检索，不注册个人资料写入、课表导入或未来未列入白名单的工具。请求结束或取消后关闭专用连接，复用原话题 checkpoint 保存对话，不执行额外的历史裁剪。此标志限制本次 Agent 工具权限，不是整个 HTTP API 的认证机制；普通请求行为保持原样。前端的追踪保存仍由用户核对日期后通过现有接口确认。
+
+每次 SSE 请求的处理预算为 180 秒（含 Agent 初始化与工具等待），最多 6 次模型调用、12 次工具调用，并以 40 个图执行步骤兜底。工具超额后返回工具错误供模型收尾；模型次数、图步数或总时限耗尽时发送明确的 `error`，不发送成功 `done`、不自动重新提交。已收到的文字和已有 checkpoint 保留；超时发生在工具执行中时，不能保证已经开始的同步 I/O 或写入已撤销，用户应先核对结果。预算仅限制当前请求，不限制话题一生的调用次数，不变更 checkpoint 存储路径或数据库结构。
+
+模型 HTTP 请求使用 45 秒超时、最多 1 次 SDK 重试；该超时不能替代整个对话的总预算。离线回归：`python -m pytest tests/test_chat.py tests/test_chat_limits.py tests/test_chat_evidence.py -q`。
 
 ## 课表导入校验
 
@@ -135,6 +164,8 @@ pytest tests/test_server_api.py -v   # 路由契约/编码往返/状态机，离
 
 
 ### Agent 检索调用
+
+每次模型请求使用 32000 的近似上下文预算，包含系统提示、工具定义和消息（按每字符约一个 token 估算，适合中文保守控制，但不是供应商精确分词结果）。超过预算时，仅从本次请求中去掉较早的完整用户轮次，保留最新连续轮次及工具调用/结果配对，并告知模型缺失的历史细节需要用户重述。原始 checkpoint、界面历史与备份不被裁剪或摘要覆盖。当前完整轮次本身超限时，SSE 返回明确错误，提示缩小问题范围或新建话题；不自动重试，不撤销已经执行的操作，涉及保存/导入时需先核对结果。已有工具记录损坏仍报错，不通过裁剪掩盖。离线回归：`pytest tests/test_context_budget.py tests/test_chat_limits.py -q`。
 
 校园通知与个人数据工具统一返回混合检索后的原文片段、来源和链接，由 Agent 组织回答。保留普通工具和 raw 工具的名称以兼容已有偏好，两者使用相同检索管线，同一查询无需重复调用。工具内部不再额外调用总结 LLM；Agent 的规划、多跳查询仍可能产生多次模型调用。搜索接口同样使用该纯检索管线；SSE 协议不变。
 - 资料更新/删除与取消事件追踪将来源作为完整标识处理，支持名称中的斜杠及 URL；路径仅解码一次，保留字面 `%2F`。回归：`pytest tests/test_adversarial_api.py -q`。

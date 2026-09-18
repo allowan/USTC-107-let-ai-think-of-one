@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Button, Typography, App, Spin, Popconfirm, Input } from 'antd';
 import {
@@ -15,7 +15,8 @@ import {
   SaveOutlined,
 } from '@ant-design/icons';
 import { useTopicStore } from '@/stores/topicStore';
-import SettingsModal from './SettingsModal';
+
+const SettingsModal = lazy(() => import('./SettingsModal'));
 
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
@@ -226,14 +227,20 @@ export default function AppLayout() {
           </Button>
         </Header>
         <Content style={{ padding: 24, overflow: 'auto', flex: 1 }}>
-          <Outlet />
+          <Suspense fallback={<div role="status"><Spin /> 正在加载页面…</div>}>
+            <Outlet />
+          </Suspense>
         </Content>
       </Layout>
 
-      <SettingsModal
-        visible={settingsModalVisible}
-        onClose={() => setSettingsModalVisible(false)}
-      />
+      {settingsModalVisible && (
+        <Suspense fallback={<div role="status">正在加载设置…</div>}>
+          <SettingsModal
+            visible={settingsModalVisible}
+            onClose={() => setSettingsModalVisible(false)}
+          />
+        </Suspense>
+      )}
     </Layout>
   );
 }

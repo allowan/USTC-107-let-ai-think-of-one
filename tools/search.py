@@ -258,11 +258,15 @@ def _search_tavily_results(query: str, api_key: str, max_results: int = 5) -> li
     ][: max(1, min(max_results, 10))]
 
 
-def _format_search_results(results: list[dict[str, str]]) -> str:
+def _format_search_results(
+    results: list[dict[str, str]], evidence_ids: list[str] | None = None,
+) -> str:
     if not results:
         return "未找到网页搜索结果。"
     return "\n".join(
-        f"{index}. {_format_markdown_link(item['title'], item['url'])}"
+        f"{index}. "
+        + (f"[证据:{evidence_ids[index - 1]}] " if evidence_ids is not None else "")
+        + _format_markdown_link(item['title'], item['url'])
         for index, item in enumerate(results, start=1)
     )
 
@@ -454,13 +458,16 @@ def _evidence_artifact(results: list[dict[str, str]], kind: str) -> dict[str, ob
 
 
 def _search_tool_result(results: list[dict[str, str]], kind: str) -> tuple[str, dict[str, object]]:
-    return _format_search_results(results), _evidence_artifact(results, kind)
+    artifact = _evidence_artifact(results, kind)
+    return _format_search_results(results, [item["id"] for item in artifact["evidence"]]), artifact
 
 
 def _fetch_tool_result(url: str, text: str, title: str, kind: str) -> tuple[str, dict[str, object]]:
+    artifact = _evidence_artifact([{"url": url, "title": title, "content": text}], kind)
+    evidence_id = artifact["evidence"][0]["id"]
     return (
-        f"来源: {_format_markdown_link(title, url)}\n\n{text}",
-        _evidence_artifact([{"url": url, "title": title, "content": text}], kind),
+        f"来源: {_format_markdown_link(title, url)}\n[证据:{evidence_id}]\n\n{text}",
+        artifact,
     )
 
 
