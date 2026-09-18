@@ -6,6 +6,8 @@
 
 `search_notices_with_evidence(query)` / `search_user_data_with_evidence(query, user_id)` 返回 `(content, artifact)`，只检索一次并从同一组节点生成工具正文和证据。artifact 含 `evidence` 与 `warnings`；每片段包含稳定标识、来源、标题、链接、发布日期、最多 2000 字原文及类别。发布日期仅使用明确元数据/标记为发布日期的原文，不将正文里的活动日期当成发布日期。工具通过 LangChain `content_and_artifact` 持久化，普通字符串搜索接口保持兼容。
 
+证据版工具正文在每个片段头部附上 `[证据:ID]`，与 artifact 的完整 ID 一一对应，同一来源的不同片段使用不同 ID。Agent 可据此生成 `[来源](#evidence-ID)` 行内引用；普通字符串搜索接口不增加该标记，不额外检索或调用模型。
+
 跨模块使用一律通过包入口导出的公共 API，禁止直接导入内部函数或私有变量。
 
 ### 纯检索（不经过 LLM）

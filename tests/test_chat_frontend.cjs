@@ -44,7 +44,7 @@ function harness(histories, frames = [], initialStore = {}) {
   };
   const requireMock = name => {
     if (name === 'react') return react;
-    if (name === 'antd') return { Input: { TextArea: 'TextArea' }, Button: 'Button', Empty: 'Empty', Select: 'Select', Space: 'Space', Tooltip: 'Tooltip', App: { useApp: () => ({ message: apiMessage }) } };
+    if (name === 'antd') return { Input: { TextArea: 'TextArea' }, Button: 'Button', Empty: 'Empty', Select: 'Select', Space: 'Space', Tooltip: 'Tooltip', Popover: 'Popover', App: { useApp: () => ({ message: apiMessage }) } };
     if (name === '@ant-design/icons') return new Proxy({}, { get: () => 'Icon' });
     if (name === 'react-markdown' || name === 'remark-gfm') return { default: () => null };
     if (name === '@/stores/topicStore') return { useTopicStore };
@@ -169,4 +169,54 @@ test('通知草稿不自动发送，历史就绪后发送使用只读模式', as
   await sendButton(ui.render()).props.onClick();
   assert.equal(ui.requests[0].read_only, true);
   assert.equal(ui.requests[0].content, '整理通知草稿');
+});
+
+async function citationRenderer(messages, content) {
+  const history = deferred();
+  const ui = harness([history]);
+  ui.render();
+  history.resolve({ data: { messages } });
+  await settle();
+  const bubble = find(ui.render(), node => node.props?.msg?.content === content);
+  const rendered = bubble.type.type(bubble.props);
+  return find(rendered, node => node.props?.components?.a).props.components.a;
+}
+
+test('行内来源精确匹配当前回合，并展示真实资料而非模型自报标题', async () => {
+  const evidence = { id: 'a'.repeat(64), source: '通知.txt', title: '实际通知', url: 'https://example.org/a',
+    published_at: '', excerpt: '实际片段', kind: 'official' };
+  const renderLink = await citationRenderer([{ role: 'assistant', content: '回答', evidence: [evidence] }], '回答');
+  const citation = renderLink({ href: `#evidence-${evidence.id}`, children: '已经核验的结论' });
+  assert.equal(citation.type, 'Popover');
+  assert.equal(citation.props.trigger, 'click');
+  assert.match(citation.props.title, /请核对/);
+  const button = find(citation, node => node.type === 'button');
+  assert.equal(button.props.children, '查看来源');
+  assert.equal(button.props['aria-label'], '查看引用来源：实际通知');
+  const cards = find(citation.props.content, node => node.props?.evidence);
+  assert.equal(cards.props.evidence[0].excerpt, '实际片段');
+});
+
+test('跨回合、虚构、截断标识与无证据旧历史均不伪造来源', async () => {
+  const id = 'a'.repeat(64);
+  const renderLink = await citationRenderer([
+    { role: 'assistant', content: '旧回答', evidence: [{ id, source: '旧通知' }] },
+    { role: 'assistant', content: '当前回答' },
+  ], '当前回答');
+  for (const value of [id, 'b'.repeat(64), 'a'.repeat(12), id.toUpperCase(), '']) {
+    const citation = renderLink({ href: `#evidence-${value}`, children: '来源' });
+    assert.equal(citation.type, 'span');
+    assert.equal(citation.props.children, '来源未匹配');
+    assert.equal(citation.props.href, undefined);
+  }
+});
+
+test('普通网页与其他锚点继续使用原有 Markdown 链接渲染', async () => {
+  const renderLink = await citationRenderer([{ role: 'assistant', content: '普通回答' }], '普通回答');
+  for (const href of ['https://example.org/article', 'mailto:help@example.org', '#section']) {
+    const link = renderLink({ href, children: '原有标题' });
+    assert.equal(link.type.name, 'MarkdownLinkRenderer');
+    assert.equal(link.props.href, href);
+    assert.equal(link.props.children, '原有标题');
+  }
 });

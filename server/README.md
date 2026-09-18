@@ -102,6 +102,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local.ps1
 
 - **回答证据**：沿用 `astream(stream_mode="messages")`，从成功工具消息的 `artifact` 发出 `evidence` SSE 事件（content 为 `{evidence: [...], warnings: [...]}`）。卡片字段为 `id/source/title/url/published_at/excerpt/kind`，类别区分官方、个人、公开网页及学生评价。仅转发白名单字段和 HTTP(S) 链接，每轮最多 40 个片段，每片段最多 2000 字。卡片表示本轮实际检索资料，并不宣称模型每句话均已核验；降级说明单独展示。工具 artifact 由现有 checkpoint 保存，历史接口在对应助手回合返回相同可选字段；无 artifact 的旧历史保持兼容，不迁移数据库，文字备份仍只包含可见正文。
 - **回答核对**：Agent 提示词要求核对证据年份、学期和适用人群，区分发布/开始/截止日期；无相符证据时说明不足，冲突来源并列给出。此约束仍需用 `tests/answer_review_cases.json` 审查真实回答，来源命中测试不能代替答案正确性测试。
+- **行内引用**：工具正文中的 `[证据:ID]` 对应同次工具调用保存的 artifact。提示词要求在日期、资格、材料、费用等关键事实后使用 `[来源](#evidence-ID)`，只引用本轮支持该事实的片段；无标识的工具保持普通出处。前端按当前助手回合的证据精确匹配，不跨回合寻找，也不将匹配成功视为事实核验。无需增加 SSE 字段或迁移历史。
 
 - **thread_id 契约**：`user-{username}-topic-{topic_id}`，话题删除 / 历史加载 / 对话写入三处共用，`tests/test_server_api.py::TestThreadIdContract` 守护。
 - **话题删除顺序**：先删除 checkpoint，再删除话题元数据；checkpoint 清理失败时返回 503 并保留可见话题，避免接口报告成功后留下无法访问的私人历史。清理操作可重复执行，元数据删除失败时再次删除即可收敛。

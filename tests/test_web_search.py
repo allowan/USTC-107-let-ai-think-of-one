@@ -190,8 +190,8 @@ class WebSearchProviderTest(unittest.TestCase):
         os.environ["TAVILY_API_KEY"] = "tvly-test-key"
         with patch.object(search.httpx, "post", side_effect=fake_post):
             result = search.search_web.invoke({"query": "中科大新闻"})
-        self.assertIn("1. [结果一](https://a.example.com)", result)
-        self.assertIn("2. [结果二](https://b.example.com)", result)
+        self.assertRegex(result, r"1\. \[证据:[0-9a-f]{64}\] \[结果一\]\(https://a\.example\.com\)")
+        self.assertRegex(result, r"2\. \[证据:[0-9a-f]{64}\] \[结果二\]\(https://b\.example\.com\)")
         # Bearer 认证头必须携带，请求必须打到 Tavily 端点
         self.assertEqual(captured["headers"]["Authorization"], "Bearer tvly-test-key")
         self.assertEqual(captured["url"], search.TAVILY_ENDPOINT)
@@ -203,7 +203,7 @@ class WebSearchProviderTest(unittest.TestCase):
         os.environ.pop("TAVILY_API_KEY", None)
         with patch.object(search, "_search_web_results", return_value=[{"title": "兜底结果", "url": "https://example.com"}]) as ddg:
             result = search.search_web.invoke({"query": "任意查询"})
-        self.assertEqual(result, "1. [兜底结果](https://example.com)")
+        self.assertRegex(result, r"^1\. \[证据:[0-9a-f]{64}\] \[兜底结果\]\(https://example\.com\)$")
         ddg.assert_called_once_with("任意查询")
 
     def test_ddg_provider_skips_tavily(self):
@@ -213,7 +213,7 @@ class WebSearchProviderTest(unittest.TestCase):
         with patch.object(search, "_search_tavily_results") as tavily:
             with patch.object(search, "_search_web_results", return_value=[{"title": "ddg 结果", "url": "https://example.com"}]):
                 result = search.search_web.invoke({"query": "任意查询"})
-        self.assertEqual(result, "1. [ddg 结果](https://example.com)")
+        self.assertRegex(result, r"^1\. \[证据:[0-9a-f]{64}\] \[ddg 结果\]\(https://example\.com\)$")
         tavily.assert_not_called()
 
 

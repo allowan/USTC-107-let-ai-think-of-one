@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import axios from 'axios';
-import { Input, Button, Empty, App, Select, Space, Tooltip } from 'antd';
+import { Input, Button, Empty, App, Select, Space, Tooltip, Popover } from 'antd';
 import { GlobalOutlined, MailOutlined, SendOutlined, LoadingOutlined, StopOutlined, ToolOutlined, RobotOutlined } from '@ant-design/icons';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -117,6 +117,22 @@ function EvidenceCards({ evidence, warnings }: EvidenceCardsProps) {
 
 const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
   const isUser = msg.role === 'user';
+  const renderLink: Components['a'] = (props) => {
+    if (!props.href?.startsWith('#evidence-')) return <MarkdownLinkRenderer {...props} />;
+    const id = props.href.slice('#evidence-'.length);
+    const evidence = /^[a-f0-9]{64}$/.test(id) ? msg.evidence?.find(item => item.id === id) : undefined;
+    if (!evidence) return <span style={{ color: '#ad6800' }}>来源未匹配</span>;
+    return <Popover
+      trigger="click"
+      title="引用资料（请核对是否支持此处回答）"
+      content={<div style={{ maxWidth: 'min(480px, 80vw)' }}><EvidenceCards evidence={[evidence]} warnings={[]} /></div>}
+    >
+      <button type="button" aria-label={`查看引用来源：${evidence.title || evidence.source}`}
+        style={{ cursor: 'pointer', color: '#1677ff', border: '1px solid #91caff', borderRadius: 4, background: '#e6f4ff', font: 'inherit' }}>
+        查看来源
+      </button>
+    </Popover>;
+  };
   return (
     <div style={{ display: 'flex', gap: 12, padding: '12px 0', flexDirection: isUser ? 'row-reverse' : 'row' }}>
       <div style={{
@@ -129,7 +145,7 @@ const ChatBubble = memo(({ msg }: { msg: ChatMessage }) => {
           <div className="chat-markdown" style={{ fontSize: 16, lineHeight: 1.6 }}>
             <ReactMarkdown
               remarkPlugins={MARKDOWN_PLUGINS}
-              components={MARKDOWN_COMPONENTS}
+              components={{ ...MARKDOWN_COMPONENTS, a: renderLink }}
             >
               {msg.content}
             </ReactMarkdown>

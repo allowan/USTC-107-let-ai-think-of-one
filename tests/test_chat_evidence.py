@@ -44,8 +44,22 @@ def test_evidence_uses_one_retrieval_without_llm(
     assert item["title"] == "奖学金通知" and item["published_at"] == "2026-09-12"
     assert item["kind"] == ("personal" if personal else "official")
     assert "真实正文" in content and "真实正文" in item["excerpt"]
+    assert f"[证据:{item['id']}]" in content
     assert "SECRET" not in json.dumps(artifact) + content
     assert "PRIVATE-PATH" not in json.dumps(artifact) + content
+
+
+def test_multiple_fragments_keep_distinct_citation_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一来源的不同片段必须能逐个对应，普通搜索接口保持原格式。"""
+    nodes = [NodeWithScore(node=TextNode(id_=str(i), text=f"片段{i}",
+             metadata={"source": "通知.txt"})) for i in range(2)]
+    monkeypatch.setattr(query, "retrieve_notice_nodes", Mock(return_value=nodes))
+    content, artifact = query.search_notices_with_evidence("问题")
+    ids = [item["id"] for item in artifact["evidence"]]
+    assert len(set(ids)) == 2
+    assert content.index(ids[0]) < content.index("片段0") < content.index(ids[1]) < content.index("片段1")
+    assert "[证据:" not in query.search_notices("问题")
+    assert query.search_notices_with_evidence("问题")[1] == artifact
 
 
 def test_empty_retrieval_preserves_warning(monkeypatch: pytest.MonkeyPatch) -> None:
